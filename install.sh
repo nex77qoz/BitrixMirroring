@@ -13,7 +13,7 @@ set -euo pipefail
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 INSTALL_DIR="/opt/bitrix-bot"
-REPO_URL="https://github.com/YOUR_USERNAME/BitrixMirroring.git"   # <-- replace
+REPO_URL="https://github.com/nex77qoz/BitrixMirroring.git"   # <-- replace
 VENV="$INSTALL_DIR/.venv"
 ENV_FILE="$INSTALL_DIR/.env"
 DB_FILE="$INSTALL_DIR/mirror_state.sqlite3"

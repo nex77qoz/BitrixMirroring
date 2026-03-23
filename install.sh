@@ -407,18 +407,21 @@ step_setup_ssl() {
         fi
     fi
 
+    # Ensure nginx is running before --install-cert fires reloadcmd
+    systemctl start nginx >> "$LOG_FILE" 2>&1 || true
+
     # Install / re-install cert to SSL_DIR
     print_info "Копирование сертификата в $SSL_DIR..."
     "$ACME" --install-cert -d "${DOMAIN}" \
         --key-file  "$SSL_KEY" \
         --fullchain-file "$SSL_CERT" \
-        --reloadcmd "systemctl reload nginx" \
+        --reloadcmd "systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true" \
         >> "$LOG_FILE" 2>&1
     print_ok "Сертификат скопирован в $SSL_DIR"
 
     chmod 600 "$SSL_KEY" "$SSL_CERT"
 
-    # Restart nginx
+    # Ensure nginx is running after cert installation
     systemctl start nginx >> "$LOG_FILE" 2>&1 || true
 
     print_ok "SSL-сертификат установлен: $SSL_CERT"
@@ -881,8 +884,9 @@ do_uninstall() {
 # Entry point
 # ──────────────────────────────────────────────────────────────────────────────
 main() {
-    # Ensure log file exists
+    # Rotate log file: keep previous run as .old, start fresh
     mkdir -p "$(dirname "$LOG_FILE")"
+    [[ -f "$LOG_FILE" ]] && mv -f "$LOG_FILE" "${LOG_FILE}.old"
     touch "$LOG_FILE"
 
     case "${1-}" in

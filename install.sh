@@ -23,6 +23,10 @@ NGINX_LINK="/etc/nginx/sites-enabled/bitrix-bot"
 
 SERVICES=("bitrix-telegram-mirror" "bitrix-bot" "bitrix-monitor")
 
+# Runtime-detected Python binary and package name (set by _detect_latest_python)
+PYTHON_BIN=""
+PYTHON_PKG=""
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Colours
 # ──────────────────────────────────────────────────────────────────────────────
@@ -130,6 +134,47 @@ check_root() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Detect the latest available Python 3.x (system or deadsnakes PPA)
+# Sets globals: PYTHON_BIN (e.g. python3.13), PYTHON_PKG (e.g. python3.13)
+# ──────────────────────────────────────────────────────────────────────────────
+_detect_latest_python() {
+    local best_major=0 best_minor=0 best_bin=""
+
+    # Check already-installed interpreters
+    for bin in $(compgen -c python3 2>/dev/null | sort -uV); do
+        if [[ "$bin" =~ ^python3\.([0-9]+)$ ]]; then
+            local minor="${BASH_REMATCH[1]}"
+            if (( minor > best_minor )); then
+                best_minor=$minor
+                best_major=3
+                best_bin="$bin"
+            fi
+        fi
+    done
+
+    # Also check apt cache for available python3.X packages (deadsnakes or system)
+    local apt_best
+    apt_best=$(apt-cache search '^python3\.[0-9]+-venv$' 2>/dev/null \
+        | grep -oP 'python3\.\K[0-9]+' \
+        | sort -n | tail -1 || true)
+
+    if [[ -n "$apt_best" && "$apt_best" -gt "$best_minor" ]]; then
+        best_minor="$apt_best"
+        best_bin="python3.${apt_best}"
+    fi
+
+    if [[ -z "$best_bin" ]]; then
+        # Absolute fallback
+        best_bin="python3"
+        best_minor=""
+    fi
+
+    PYTHON_BIN="$best_bin"
+    PYTHON_PKG="python3.${best_minor}"
+    print_info "Будет использован Python: ${BOLD}${PYTHON_BIN}${RESET}"
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 # STEP 1 — System update
 # ──────────────────────────────────────────────────────────────────────────────
 step_update_system() {
@@ -148,15 +193,18 @@ step_install_packages() {
     local pkgs=(git nginx curl sqlite3 software-properties-common)
     run_cmd apt-get install -y "${pkgs[@]}"
 
-    # Check for python3.11
-    if ! command -v python3.11 &>/dev/null; then
-        print_warn "python3.11 не найден. Добавляем deadsnakes PPA..."
-        run_cmd add-apt-repository -y ppa:deadsnakes/python3.11
+    # Detect the latest available Python 3.x
+    _detect_latest_python
+
+    # Install if not already present
+    if ! command -v "$PYTHON_BIN" &>/dev/null; then
+        print_warn "${PYTHON_BIN} не найден. Добавляем deadsnakes PPA..."
+        run_cmd add-apt-repository -y ppa:deadsnakes/python3
         run_cmd apt-get update -y
     fi
 
-    run_cmd apt-get install -y python3.11 python3.11-venv python3.11-dev
-    print_ok "Все системные зависимости установлены"
+    run_cmd apt-get install -y "${PYTHON_PKG}" "${PYTHON_PKG}-venv" "${PYTHON_PKG}-dev"
+    print_ok "Все системные зависимости установлены (Python: $PYTHON_BIN)"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -181,7 +229,7 @@ step_python_deps() {
     print_step "Настройка Python-окружения и установка зависимостей"
 
     if [[ ! -d "$VENV" ]]; then
-        run_cmd python3.11 -m venv "$VENV"
+        run_cmd "$PYTHON_BIN" -m venv "$VENV"
     fi
     run_cmd "$VENV/bin/pip" install --upgrade pip
     run_cmd "$VENV/bin/pip" install -r "$INSTALL_DIR/requirements.txt"

@@ -19,7 +19,7 @@
 
 ## Состав репозитория
 
-- `telegram_to_bitrix_mirror.py` — точка входа основного Telegram-бота, который принимает апдейты через polling и запускает сервис зеркалирования.
+- `main.py` — точка входа основного Telegram-бота, который принимает апдейты через polling и запускает сервис зеркалирования.
 - `mirror_service.py` — основная логика двусторонней синхронизации, очереди отправки, polling Битрикс и подавления дублей.
 - `bitrix_client.py` — клиент для вызова Битрикс REST API, отправки сообщений, обновлений, лайков и загрузки файлов.
 - `handlers.py` — обработчики Telegram-команд, обычных сообщений, редактирований и реакций.
@@ -80,14 +80,44 @@
 
 ## Установка и быстрый старт
 
-### 1. Клонирование репозитория
+### Автоматическая установка на сервер (рекомендуется)
+
+Склонируйте репозиторий и запустите установщик — он сам определит URL и ветку репозитория:
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/nex77qoz/BitrixMirroring.git
+cd BitrixMirroring
+sudo bash install.sh
+```
+
+Скрипт интерактивно соберёт конфигурацию, установит python-зависимости, настроит systemd-сервисы, nginx и SSL-сертификат (Let's Encrypt).
+
+Для обновления уже установленного бота достаточно выполнить `git pull` в установленном каталоге через флаг `--update`:
+
+```bash
+sudo bash /opt/bitrix-bot/install.sh --update
+```
+
+Удаление:
+
+```bash
+sudo bash /opt/bitrix-bot/install.sh --uninstall
+```
+
+Подробная инструкция по серверному развёртыванию: [`DEPLOYMENT.md`](./DEPLOYMENT.md).
+
+---
+
+### Ручная установка (локальная разработка)
+
+#### 1. Клонирование репозитория
+
+```bash
+git clone https://github.com/nex77qoz/BitrixMirroring.git
 cd BitrixMirroring
 ```
 
-### 2. Создание виртуального окружения
+#### 2. Создание виртуального окружения
 
 ```bash
 python3 -m venv .venv
@@ -96,7 +126,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. Настройка переменных окружения
+#### 3. Настройка переменных окружения
 
 Скопируйте шаблон:
 
@@ -115,17 +145,16 @@ cp env.example .env
 
 Если хотите отправлять сообщения в Битрикс **от имени зарегистрированного чат-бота**, дополнительно настройте:
 
-- `BITRIX_USE_CHAT_BOT=true`
 - `BITRIX_BOT_CLIENT_ID`
 - при необходимости `BITRIX_BOT_ID`
 
-### 4. Запуск основного mirror-сервиса
+#### 4. Запуск основного mirror-сервиса
 
 ```bash
-python telegram_to_bitrix_mirror.py
+python main.py
 ```
 
-### 5. Проверка Telegram-команд
+#### 5. Проверка Telegram-команд
 
 После запуска бот отвечает на:
 
@@ -179,7 +208,6 @@ export MONITOR_PASSWORD='change-me'
 
 ### Отправка в Битрикс от имени чат-бота
 
-- `BITRIX_USE_CHAT_BOT=false|true`
 - `BITRIX_BOT_ID`
 - `BITRIX_BOT_CLIENT_ID`
 

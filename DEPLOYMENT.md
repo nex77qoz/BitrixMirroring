@@ -126,19 +126,12 @@ cp env.example .env
 TELEGRAM_BOT_TOKEN=...
 BITRIX_WEBHOOK_BASE=https://YOUR_COMPANY.bitrix24.ru/rest/1/WEBHOOK_CODE
 CHAT_MAPPINGS=[{"tg_chat_id": -1001234567890, "bitrix_dialog_id": "chat2941"}]
-```
-
-### Если включён режим чат-бота Bitrix
-
-Нужно также указать:
-
-```dotenv
-BITRIX_USE_CHAT_BOT=true
-BITRIX_BOT_ID=123
 BITRIX_BOT_CLIENT_ID=local.******
 ```
 
-Для `server-side/app.py` допустимы оба имени переменной client id:
+### Переменные для bot client id в server-side/app.py
+
+Допустимы оба имени переменной client id:
 
 - `BITRIX_CLIENT_ID`;
 - `BITRIX_BOT_CLIENT_ID`.

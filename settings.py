@@ -159,9 +159,8 @@ def _parse_chat_mappings() -> tuple[ChatMapping, ...]:
 class Settings:
     telegram_bot_token: str
     bitrix_webhook_base: str
-    bitrix_use_chat_bot: bool
     bitrix_bot_id: Optional[int]
-    bitrix_bot_client_id: Optional[str]
+    bitrix_bot_client_id: str
     chat_mappings: tuple[ChatMapping, ...]
     prefix_with_chat_title: bool
     prefix_with_sender: bool
@@ -192,13 +191,8 @@ class Settings:
         if not bitrix_webhook_base.startswith(("http://", "https://")):
             raise ValueError("BITRIX_WEBHOOK_BASE must start with http:// or https://")
 
-        bitrix_use_chat_bot = _parse_bool("BITRIX_USE_CHAT_BOT", "false")
         bitrix_bot_id = _parse_optional_int("BITRIX_BOT_ID")
-        bitrix_bot_client_id = _read_env("BITRIX_BOT_CLIENT_ID", "") or None
-
-        if bitrix_use_chat_bot:
-            if bitrix_bot_client_id is None:
-                raise ValueError("BITRIX_BOT_CLIENT_ID is required when BITRIX_USE_CHAT_BOT=true")
+        bitrix_bot_client_id = _read_env("BITRIX_BOT_CLIENT_ID")
 
         mirror_state_db_path = _read_env("MIRROR_STATE_DB_PATH", "mirror_state.sqlite3")
 
@@ -231,7 +225,6 @@ class Settings:
         return Settings(
             telegram_bot_token=telegram_bot_token,
             bitrix_webhook_base=bitrix_webhook_base,
-            bitrix_use_chat_bot=bitrix_use_chat_bot,
             bitrix_bot_id=bitrix_bot_id,
             bitrix_bot_client_id=bitrix_bot_client_id,
             chat_mappings=chat_mappings,

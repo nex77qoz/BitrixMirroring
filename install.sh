@@ -81,7 +81,7 @@ ask_password() {
     while true; do
         echo -en "  ${YELLOW}${prompt}: ${RESET}"
         read -rs pw; echo
-        echo -en "  ${YELLOW}Повторите пароль: ${RESET}"
+        echo -en "  ${YELLOW}Повторите пароль ${CYAN}(ввод скрыт)${YELLOW}: ${RESET}"
         read -rs pw2; echo
         if [[ -z "$pw" ]]; then
             print_error "Пароль не может быть пустым."
@@ -219,9 +219,11 @@ step_collect_config() {
     ask_input BITRIX_BOT_CLIENT_ID "CLIENT_ID бота в Битрикс"
 
     # Telegram token
+    print_info "Ввод скрыт — символы не отображаются"
     ask_secret TELEGRAM_BOT_TOKEN "Telegram Bot Token"
 
     # Monitor password
+    print_info "Ввод скрыт — символы не отображаются"
     ask_password MONITOR_PASSWORD "Пароль для мониторинг-дашборда (/monitor)"
 
     # Optional proxy
@@ -308,23 +310,48 @@ EOF
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STEP 7a — Generate self-signed SSL certificate
+# STEP 7a — Obtain SSL certificate via acme.sh
 # ──────────────────────────────────────────────────────────────────────────────
 step_setup_ssl() {
-    print_step "Генерация самоподписного SSL-сертификата"
+    print_step "Получение SSL-сертификата через acme.sh"
 
     mkdir -p "$SSL_DIR"
     chmod 700 "$SSL_DIR"
 
-    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-        -keyout "$SSL_KEY" \
-        -out "$SSL_CERT" \
-        -subj "/CN=${DOMAIN}" \
+    # Install acme.sh if not already installed
+    if [[ ! -f "$HOME/.acme.sh/acme.sh" ]]; then
+        print_info "Установка acme.sh..."
+        curl -fsSL https://get.acme.sh | sh -s email=admin@"${DOMAIN}" >> "$LOG_FILE" 2>&1
+    else
+        print_info "acme.sh уже установлен"
+    fi
+
+    local ACME="$HOME/.acme.sh/acme.sh"
+
+    # Stop nginx temporarily so acme.sh standalone can bind port 80
+    systemctl stop nginx >> "$LOG_FILE" 2>&1 || true
+
+    print_info "Выпуск сертификата для ${DOMAIN} (standalone на порту 80)..."
+    if "$ACME" --issue -d "${DOMAIN}" --standalone >> "$LOG_FILE" 2>&1; then
+        print_ok "Сертификат успешно выпущен"
+    else
+        print_warn "acme.sh завершился с ошибкой. Возможно сертификат уже актуален."
+    fi
+
+    # Install cert to our SSL_DIR
+    "$ACME" --install-cert -d "${DOMAIN}" \
+        --key-file  "$SSL_KEY" \
+        --fullchain-file "$SSL_CERT" \
+        --reloadcmd "systemctl reload nginx" \
         >> "$LOG_FILE" 2>&1
 
     chmod 600 "$SSL_KEY" "$SSL_CERT"
-    print_ok "Сертификат создан: $SSL_CERT (действителен 10 лет)"
-    print_info "Для браузера потребуется принять исключение безопасности (самоподписной)"
+
+    # Restart nginx
+    systemctl start nginx >> "$LOG_FILE" 2>&1 || true
+
+    print_ok "Сертификат установлен: $SSL_CERT"
+    print_info "acme.sh настроит автообновление через cron"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -662,8 +689,8 @@ print_summary() {
     echo -e "  URL для поля handler_url при вызове imbot.register:"
     echo -e "    ${CYAN}https://${DOMAIN}/bitrix/bot${RESET}"
     echo ""
-    echo -e "  Обновление:    ${CYAN}${SCRIPT_PATH} --update${RESET}"
-    echo -e "  Удаление:      ${CYAN}${SCRIPT_PATH} --uninstall${RESET}"
+    echo -e "  Обновление:    ${CYAN}sudo bash ${INSTALL_DIR}/install.sh --update${RESET}"
+    echo -e "  Удаление:      ${CYAN}sudo bash ${INSTALL_DIR}/install.sh --uninstall${RESET}"
     echo ""
 }
 

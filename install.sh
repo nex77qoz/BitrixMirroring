@@ -20,11 +20,17 @@ DB_FILE="$INSTALL_DIR/mirror_state.sqlite3"
 LOG_FILE="/var/log/bitrix-bot-install.log"
 NGINX_CONF="/etc/nginx/sites-available/bitrix-bot"
 NGINX_LINK="/etc/nginx/sites-enabled/bitrix-bot"
+SSL_DIR="/etc/ssl/bitrix-bot"
+SSL_CERT="${SSL_DIR}/cert.pem"
+SSL_KEY="${SSL_DIR}/key.pem"
 
 SERVICES=("bitrix-telegram-mirror" "bitrix-bot" "bitrix-monitor")
 
 # Python binary used throughout the script
 PYTHON_BIN="python3"
+
+# Resolved script path (avoids /dev/fd/XX when run via pipe)
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Colours
@@ -116,7 +122,7 @@ banner() {
     cat << 'EOF'
 ╔══════════════════════════════════════════════════════════╗
 ║         Bitrix  ↔  Telegram  Mirror  Bot                 ║
-║                  Auto Installer v1.1                     ║
+║                  Auto Installer v1.2                     ║
 ╚══════════════════════════════════════════════════════════╝
 EOF
     echo -e "${RESET}"
@@ -148,7 +154,7 @@ step_update_system() {
 step_install_packages() {
     print_step "Установка системных зависимостей"
 
-    local pkgs=(git nginx curl sqlite3 python3 python3-venv python3-dev)
+    local pkgs=(git nginx curl sqlite3 openssl python3 python3-venv python3-dev)
     run_cmd apt-get install -y "${pkgs[@]}"
 
     PYTHON_BIN="python3"
@@ -302,15 +308,48 @@ EOF
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STEP 7 — Configure nginx
+# STEP 7a — Generate self-signed SSL certificate
+# ──────────────────────────────────────────────────────────────────────────────
+step_setup_ssl() {
+    print_step "Генерация самоподписного SSL-сертификата"
+
+    mkdir -p "$SSL_DIR"
+    chmod 700 "$SSL_DIR"
+
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout "$SSL_KEY" \
+        -out "$SSL_CERT" \
+        -subj "/CN=${DOMAIN}" \
+        >> "$LOG_FILE" 2>&1
+
+    chmod 600 "$SSL_KEY" "$SSL_CERT"
+    print_ok "Сертификат создан: $SSL_CERT (действителен 10 лет)"
+    print_info "Для браузера потребуется принять исключение безопасности (самоподписной)"
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 7b — Configure nginx
 # ──────────────────────────────────────────────────────────────────────────────
 step_configure_nginx() {
     print_step "Настройка nginx"
 
     cat > "$NGINX_CONF" << EOF
+# HTTP → HTTPS redirect
 server {
     listen 80;
     server_name ${DOMAIN};
+    return 301 https://\$host\$request_uri;
+}
+
+# HTTPS
+server {
+    listen 443 ssl;
+    server_name ${DOMAIN};
+
+    ssl_certificate     ${SSL_CERT};
+    ssl_certificate_key ${SSL_KEY};
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
 
     location /bitrix/bot {
         proxy_pass http://127.0.0.1:8081/bitrix/bot;
@@ -341,7 +380,7 @@ EOF
 
     if nginx -t >> "$LOG_FILE" 2>&1; then
         run_cmd systemctl reload nginx
-        print_ok "nginx настроен и перезагружен"
+        print_ok "nginx настроен и перезагружен (HTTPS на порту 443)"
     else
         print_error "Ошибка в конфиге nginx. Проверьте: $LOG_FILE"
         exit 1
@@ -554,10 +593,10 @@ step_health_checks() {
         all_ok=false
     fi
 
-    # Monitor dashboard
+    # Monitor dashboard (прямое обращение к upstream, минуя nginx)
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
         -u "admin:${MONITOR_PASSWORD}" \
-        http://127.0.0.1:8082/ 2>/dev/null || echo "000")
+        http://127.0.0.1:8082/monitor 2>/dev/null || echo "000")
     if [[ "$code" == "200" ]]; then
         print_ok "Мониторинг-дашборд доступен (HTTP $code)"
     else
@@ -565,14 +604,14 @@ step_health_checks() {
         all_ok=false
     fi
 
-    # nginx proxy check
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-        -H "Host: ${DOMAIN}" \
-        http://127.0.0.1:80/health 2>/dev/null || echo "000")
+    # nginx HTTPS proxy check (-k для самоподписного сертификата)
+    code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 5 \
+        --resolve "${DOMAIN}:443:127.0.0.1" \
+        "https://${DOMAIN}/health" 2>/dev/null || echo "000")
     if [[ "$code" == "200" ]]; then
-        print_ok "nginx проксирует запросы (HTTP $code)"
+        print_ok "nginx HTTPS проксирует запросы (HTTP $code)"
     else
-        print_warn "nginx: /health вернул HTTP $code (возможно ещё не готов)"
+        print_warn "nginx HTTPS: /health вернул HTTP $code (возможно ещё не готов)"
     fi
 
     # SQLite check
@@ -623,8 +662,8 @@ print_summary() {
     echo -e "  URL для поля handler_url при вызове imbot.register:"
     echo -e "    ${CYAN}https://${DOMAIN}/bitrix/bot${RESET}"
     echo ""
-    echo -e "  Обновление:    ${CYAN}$0 --update${RESET}"
-    echo -e "  Удаление:      ${CYAN}$0 --uninstall${RESET}"
+    echo -e "  Обновление:    ${CYAN}${SCRIPT_PATH} --update${RESET}"
+    echo -e "  Удаление:      ${CYAN}${SCRIPT_PATH} --uninstall${RESET}"
     echo ""
 }
 
@@ -691,8 +730,9 @@ do_uninstall() {
 
     rm -f "$NGINX_LINK"
     rm -f "$NGINX_CONF"
+    rm -rf "$SSL_DIR"
     nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx || true
-    print_ok "nginx-конфиг удалён"
+    print_ok "nginx-конфиг и SSL-сертификаты удалены"
 
     rm -rf "$INSTALL_DIR"
     print_ok "Файлы бота удалены ($INSTALL_DIR)"
@@ -725,6 +765,7 @@ main() {
             step_python_deps
             step_collect_config
             step_write_env
+            step_setup_ssl
             step_configure_nginx
             step_create_services
             step_chat_mapping

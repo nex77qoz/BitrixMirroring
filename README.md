@@ -115,7 +115,6 @@ cp env.example .env
 
 Если хотите отправлять сообщения в Битрикс **от имени зарегистрированного чат-бота**, дополнительно настройте:
 
-- `BITRIX_USE_CHAT_BOT=true`
 - `BITRIX_BOT_CLIENT_ID`
 - при необходимости `BITRIX_BOT_ID`
 
@@ -179,7 +178,6 @@ export MONITOR_PASSWORD='change-me'
 
 ### Отправка в Битрикс от имени чат-бота
 
-- `BITRIX_USE_CHAT_BOT=false|true`
 - `BITRIX_BOT_ID`
 - `BITRIX_BOT_CLIENT_ID`
 

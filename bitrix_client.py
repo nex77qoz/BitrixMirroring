@@ -27,24 +27,6 @@ class BitrixClient:
         await self._client.aclose()
 
     async def send_message(self, text: str, *, dialog_id: str) -> int:
-        if self.settings.bitrix_use_chat_bot:
-            return await self._send_bot_message(text=text, dialog_id=dialog_id)
-
-        data = await self._call(
-            "im.message.add",
-            {
-                "DIALOG_ID": dialog_id,
-                "MESSAGE": text,
-                "SYSTEM": "N",
-                "URL_PREVIEW": "N" if self.settings.disable_link_preview else "Y",
-            },
-        )
-        result = data.get("result")
-        if not isinstance(result, int):
-            raise RuntimeError(f"Unexpected Bitrix response: {data}")
-        return result
-
-    async def _send_bot_message(self, *, text: str, dialog_id: str) -> int:
         payload: dict[str, Any] = {
             "DIALOG_ID": dialog_id,
             "MESSAGE": text,
@@ -62,30 +44,12 @@ class BitrixClient:
         return result
 
     async def update_message(self, *, message_id: int, text: str) -> None:
-        if self.settings.bitrix_use_chat_bot:
-            await self._update_bot_message(message_id=message_id, text=text)
-            return
-
-        data = await self._call(
-            "im.message.update",
-            {
-                "MESSAGE_ID": message_id,
-                "MESSAGE": text,
-                "URL_PREVIEW": "N" if self.settings.disable_link_preview else "Y",
-            },
-        )
-        result = data.get("result")
-        if result not in (True, "Y", 1):
-            raise RuntimeError(f"Unexpected Bitrix response: {data}")
-
-    async def _update_bot_message(self, *, message_id: int, text: str) -> None:
         payload: dict[str, Any] = {
             "MESSAGE_ID": message_id,
             "MESSAGE": text,
             "URL_PREVIEW": "N" if self.settings.disable_link_preview else "Y",
+            "CLIENT_ID": self.settings.bitrix_bot_client_id,
         }
-        if self.settings.bitrix_bot_client_id is not None:
-            payload["CLIENT_ID"] = self.settings.bitrix_bot_client_id
         if self.settings.bitrix_bot_id is not None:
             payload["BOT_ID"] = self.settings.bitrix_bot_id
         data = await self._call("imbot.message.update", payload)

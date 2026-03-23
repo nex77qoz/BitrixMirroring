@@ -169,7 +169,7 @@ step_clone_repo() {
         print_info "Репозиторий уже существует — выполняем git pull"
         run_cmd git -C "$INSTALL_DIR" pull
     else
-        run_cmd git clone "$REPO_URL" "$INSTALL_DIR"
+        run_cmd git clone -b Dev "$REPO_URL" "$INSTALL_DIR"
     fi
     print_ok "Код загружен в $INSTALL_DIR"
 }

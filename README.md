@@ -85,7 +85,7 @@
 Склонируйте репозиторий и запустите установщик — он сам определит URL и ветку репозитория:
 
 ```bash
-git clone https://github.com/USERNAME/BitrixMirroring.git
+git clone https://github.com/nex77qoz/BitrixMirroring.git
 cd BitrixMirroring
 sudo bash install.sh
 ```
@@ -113,7 +113,7 @@ sudo bash /opt/bitrix-bot/install.sh --uninstall
 #### 1. Клонирование репозитория
 
 ```bash
-git clone https://github.com/USERNAME/BitrixMirroring.git
+git clone https://github.com/nex77qoz/BitrixMirroring.git
 cd BitrixMirroring
 ```
 

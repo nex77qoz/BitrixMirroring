@@ -26,6 +26,9 @@ SSL_KEY="${SSL_DIR}/key.pem"
 
 SERVICES=("bitrix-telegram-mirror" "bitrix-bot" "bitrix-monitor")
 
+# Set to true by step_setup_ssl when user skips SSL
+SKIP_SSL=false
+
 # Python binary used throughout the script
 PYTHON_BIN="python3"
 
@@ -316,7 +319,16 @@ EOF
 # STEP 7a — Obtain SSL certificate via acme.sh
 # ──────────────────────────────────────────────────────────────────────────────
 step_setup_ssl() {
-    print_step "Получение SSL-сертификата через acme.sh"
+    print_step "Получение SSL-сертификата через acme.sh (Let's Encrypt)"
+
+    echo -en "  ${YELLOW}Выпустить получение SSL-сертификата? (Y/n): ${RESET}"
+    read -r ssl_answer
+    if [[ "${ssl_answer,,}" == "n" ]]; then
+        print_warn "Получение сертификата пропущено. nginx будет настроен на HTTP."
+        SKIP_SSL=true
+        return 0
+    fi
+    SKIP_SSL=false
 
     mkdir -p "$SSL_DIR"
     chmod 700 "$SSL_DIR"
@@ -324,36 +336,80 @@ step_setup_ssl() {
     # Install acme.sh if not already installed
     if [[ ! -f "$HOME/.acme.sh/acme.sh" ]]; then
         print_info "Установка acme.sh..."
-        curl -fsSL https://get.acme.sh | sh -s email="${ACME_EMAIL}" >> "$LOG_FILE" 2>&1
+        if curl -fsSL https://get.acme.sh | sh -s email="${ACME_EMAIL}" 2>&1 | tee -a "$LOG_FILE"; then
+            print_ok "acme.sh установлен"
+        else
+            print_error "Ошибка установки acme.sh. Подробности: $LOG_FILE"
+            exit 1
+        fi
+        [[ -f "$HOME/.acme.sh/acme.sh.env" ]] && source "$HOME/.acme.sh/acme.sh.env" || true
     else
         print_info "acme.sh уже установлен"
     fi
 
     local ACME="$HOME/.acme.sh/acme.sh"
 
-    # Stop nginx temporarily so acme.sh standalone can bind port 80
-    systemctl stop nginx >> "$LOG_FILE" 2>&1 || true
+    # Switch default CA to Let's Encrypt and register account
+    print_info "Переключение CA на Let's Encrypt..."
+    "$ACME" --set-default-ca --server letsencrypt 2>&1 | tee -a "$LOG_FILE"
+    "$ACME" --register-account -m "${ACME_EMAIL}" --server letsencrypt 2>&1 | tee -a "$LOG_FILE"
 
-    print_info "Выпуск сертификата для ${DOMAIN} (standalone на порту 80)..."
-    if "$ACME" --issue -d "${DOMAIN}" --standalone >> "$LOG_FILE" 2>&1; then
-        print_ok "Сертификат успешно выпущен"
-    else
-        print_warn "acme.sh завершился с ошибкой. Возможно сертификат уже актуален."
+    # Check if certificate already exists and is valid
+    local cert_exists=false
+    if [[ -f "$SSL_CERT" ]] && openssl x509 -checkend 86400 -noout -in "$SSL_CERT" 2>/dev/null; then
+        print_info "Действующий сертификат уже существует (срок > 24ч) — пропускаем выпуск"
+        cert_exists=true
     fi
 
-    # Install cert to our SSL_DIR
-    "$ACME" --install-cert -d "${DOMAIN}" \
+    if [[ "$cert_exists" == false ]]; then
+        # Stop nginx temporarily so acme.sh standalone can bind port 80
+        print_info "Временно останавливаем nginx для standalone-проверки..."
+        systemctl stop nginx 2>&1 | tee -a "$LOG_FILE" || true
+
+        print_info "Выпуск сертификата для ${DOMAIN} (standalone на порту 80)..."
+        echo "──────────────────────────────────────────" | tee -a "$LOG_FILE"
+        if "$ACME" --issue -d "${DOMAIN}" --standalone 2>&1 | tee -a "$LOG_FILE"; then
+            echo "──────────────────────────────────────────" | tee -a "$LOG_FILE"
+            print_ok "Сертификат успешно выпущен"
+        else
+            local acme_exit=${PIPESTATUS[0]}
+            echo "──────────────────────────────────────────" | tee -a "$LOG_FILE"
+            if [[ $acme_exit -eq 2 ]]; then
+                # Exit code 2 = already issued, not due for renewal
+                print_info "Сертификат уже актуален (acme.sh exit 2) — продолжаем установку"
+            else
+                print_error "acme.sh завершился с ошибкой (exit code $acme_exit)"
+                print_info "Полный лог: $LOG_FILE"
+                print_info "Команды для ручного запуска:"
+                echo -e "    ${CYAN}systemctl stop nginx${RESET}"
+                echo -e "    ${CYAN}$ACME --issue -d ${DOMAIN} --standalone${RESET}"
+                echo -e "    ${CYAN}systemctl start nginx${RESET}"
+                systemctl start nginx 2>/dev/null || true
+                exit 1
+            fi
+        fi
+    fi
+
+    # Install / re-install cert to SSL_DIR
+    print_info "Копирование сертификата в $SSL_DIR..."
+    if "$ACME" --install-cert -d "${DOMAIN}" \
         --key-file  "$SSL_KEY" \
         --fullchain-file "$SSL_CERT" \
         --reloadcmd "systemctl reload nginx" \
-        >> "$LOG_FILE" 2>&1
+        2>&1 | tee -a "$LOG_FILE"; then
+        print_ok "Сертификат скопирован в $SSL_DIR"
+    else
+        print_error "Ошибка при установке сертификата. Подробности: $LOG_FILE"
+        systemctl start nginx 2>/dev/null || true
+        exit 1
+    fi
 
     chmod 600 "$SSL_KEY" "$SSL_CERT"
 
     # Restart nginx
-    systemctl start nginx >> "$LOG_FILE" 2>&1 || true
+    systemctl start nginx 2>&1 | tee -a "$LOG_FILE" || true
 
-    print_ok "Сертификат установлен: $SSL_CERT"
+    print_ok "SSL-сертификат установлен: $SSL_CERT"
     print_info "acme.sh настроит автообновление через cron"
 }
 
@@ -363,7 +419,41 @@ step_setup_ssl() {
 step_configure_nginx() {
     print_step "Настройка nginx"
 
-    cat > "$NGINX_CONF" << EOF
+    if [[ "$SKIP_SSL" == true ]]; then
+        # HTTP-only config (no certificate)
+        cat > "$NGINX_CONF" << EOF
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    location /bitrix/bot {
+        proxy_pass http://127.0.0.1:8081/bitrix/bot;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /monitor {
+        proxy_pass http://127.0.0.1:8082;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 120s;
+        proxy_buffering off;
+    }
+
+    location /health {
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+    }
+}
+EOF
+        print_warn "nginx настроен на HTTP (без SSL). Для добавления HTTPS выполните: sudo bash ${INSTALL_DIR}/install.sh --renew-ssl"
+    else
+        # HTTPS config
+        cat > "$NGINX_CONF" << EOF
 # HTTP → HTTPS redirect
 server {
     listen 80;
@@ -405,12 +495,17 @@ server {
     }
 }
 EOF
+    fi
 
     ln -sf "$NGINX_CONF" "$NGINX_LINK"
 
     if nginx -t >> "$LOG_FILE" 2>&1; then
         run_cmd systemctl reload nginx
-        print_ok "nginx настроен и перезагружен (HTTPS на порту 443)"
+        if [[ "$SKIP_SSL" == true ]]; then
+            print_ok "nginx настроен и перезагружен (HTTP на порту 80)"
+        else
+            print_ok "nginx настроен и перезагружен (HTTPS на порту 443)"
+        fi
     else
         print_error "Ошибка в конфиге nginx. Проверьте: $LOG_FILE"
         exit 1

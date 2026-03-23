@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+
+bitrix_cursor_state.json
+mirror_state.sqlite3
+mirror_state.sqlite3-shm
+mirror_state.sqlite3-wal
+bitrix.log
+
+.pytest_cache/
+.vscode/
+.venv/
+.roo/

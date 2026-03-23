@@ -122,7 +122,7 @@ banner() {
     cat << 'EOF'
 ╔══════════════════════════════════════════════════════════╗
 ║         Bitrix  ↔  Telegram  Mirror  Bot                 ║
-║                  Auto Installer v1.2                     ║
+║                  Auto Installer v1.3                     ║
 ╚══════════════════════════════════════════════════════════╝
 EOF
     echo -e "${RESET}"

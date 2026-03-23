@@ -13,7 +13,8 @@ set -euo pipefail
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 INSTALL_DIR="/opt/bitrix-bot"
-REPO_URL="https://github.com/nex77qoz/BitrixMirroring.git"   # <-- replace
+REPO_URL=""       # auto-detected from the cloned repo's remote.origin.url
+REPO_BRANCH=""   # auto-detected from the current branch of the cloned repo
 VENV="$INSTALL_DIR/.venv"
 ENV_FILE="$INSTALL_DIR/.env"
 DB_FILE="$INSTALL_DIR/mirror_state.sqlite3"
@@ -34,6 +35,14 @@ PYTHON_BIN="python3"
 
 # Resolved script path (avoids /dev/fd/XX when run via pipe)
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")"
+
+# Auto-detect repo URL and branch from the directory the script is running from.
+# This works when the user clones the repo and runs: sudo bash install.sh
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+if git -C "$SCRIPT_DIR" rev-parse --git-dir > /dev/null 2>&1; then
+    REPO_URL="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)"
+    REPO_BRANCH="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Colours
@@ -171,11 +180,25 @@ step_install_packages() {
 step_clone_repo() {
     print_step "Получение исходного кода"
 
+    if [[ -z "$REPO_URL" ]]; then
+        print_error "Не удалось определить URL репозитория."
+        print_info "Запустите скрипт из склонированного репозитория:"
+        print_info "  git clone <repo-url>"
+        print_info "  cd <repo-dir>"
+        print_info "  sudo bash install.sh"
+        exit 1
+    fi
+
     if [[ -d "$INSTALL_DIR/.git" ]]; then
         print_info "Репозиторий уже существует — выполняем git pull"
         run_cmd git -C "$INSTALL_DIR" pull
     else
-        run_cmd git clone -b Dev "$REPO_URL" "$INSTALL_DIR"
+        print_info "Клонирование из $REPO_URL (ветка: ${REPO_BRANCH:-default})"
+        if [[ -n "$REPO_BRANCH" && "$REPO_BRANCH" != "HEAD" ]]; then
+            run_cmd git clone -b "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+        else
+            run_cmd git clone "$REPO_URL" "$INSTALL_DIR"
+        fi
     fi
     print_ok "Код загружен в $INSTALL_DIR"
 }

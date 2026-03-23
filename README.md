@@ -80,14 +80,44 @@
 
 ## Установка и быстрый старт
 
-### 1. Клонирование репозитория
+### Автоматическая установка на сервер (рекомендуется)
+
+Склонируйте репозиторий и запустите установщик — он сам определит URL и ветку репозитория:
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/USERNAME/BitrixMirroring.git
+cd BitrixMirroring
+sudo bash install.sh
+```
+
+Скрипт интерактивно соберёт конфигурацию, установит python-зависимости, настроит systemd-сервисы, nginx и SSL-сертификат (Let's Encrypt).
+
+Для обновления уже установленного бота достаточно выполнить `git pull` в установленном каталоге через флаг `--update`:
+
+```bash
+sudo bash /opt/bitrix-bot/install.sh --update
+```
+
+Удаление:
+
+```bash
+sudo bash /opt/bitrix-bot/install.sh --uninstall
+```
+
+Подробная инструкция по серверному развёртыванию: [`DEPLOYMENT.md`](./DEPLOYMENT.md).
+
+---
+
+### Ручная установка (локальная разработка)
+
+#### 1. Клонирование репозитория
+
+```bash
+git clone https://github.com/USERNAME/BitrixMirroring.git
 cd BitrixMirroring
 ```
 
-### 2. Создание виртуального окружения
+#### 2. Создание виртуального окружения
 
 ```bash
 python3 -m venv .venv
@@ -96,7 +126,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. Настройка переменных окружения
+#### 3. Настройка переменных окружения
 
 Скопируйте шаблон:
 
@@ -118,13 +148,13 @@ cp env.example .env
 - `BITRIX_BOT_CLIENT_ID`
 - при необходимости `BITRIX_BOT_ID`
 
-### 4. Запуск основного mirror-сервиса
+#### 4. Запуск основного mirror-сервиса
 
 ```bash
 python main.py
 ```
 
-### 5. Проверка Telegram-команд
+#### 5. Проверка Telegram-команд
 
 После запуска бот отвечает на:
 

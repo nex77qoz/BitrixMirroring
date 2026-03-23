@@ -1,0 +1,14 @@
+[Unit]
+Description=Telegram Bitrix Mirror Bot
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/opt/bitrix-bot
+EnvironmentFile=/opt/bitrix-bot/.env
+ExecStart=/opt/bitrix-bot/.venv/bin/python /opt/bitrix-bot/main.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

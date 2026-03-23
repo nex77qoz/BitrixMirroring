@@ -1,0 +1,260 @@
+from __future__ import annotations
+
+import json
+import os
+import sqlite3 as _sqlite3
+from dataclasses import dataclass
+from pathlib import Path as _Path
+from typing import Optional
+
+
+def _read_env(name: str, default: Optional[str] = None) -> str:
+    value = os.getenv(name)
+    if value is None:
+        if default is None:
+            raise ValueError(f"{name} is required")
+        value = default
+    return value.strip()
+
+
+def _parse_bool(name: str, default: str) -> bool:
+    raw = _read_env(name, default)
+    normalized = raw.lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
+def _parse_optional_int(name: str) -> Optional[int]:
+    raw = _read_env(name, "")
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _parse_float(name: str, default: str, *, minimum: float) -> float:
+    raw = _read_env(name, default)
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    return value
+
+
+def _parse_int(name: str, default: str, *, minimum: int) -> int:
+    raw = _read_env(name, default)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    return value
+
+
+@dataclass(frozen=True)
+class ChatMapping:
+    tg_chat_id: int
+    bitrix_dialog_id: str
+
+
+def _load_db_chat_mappings(db_path: str) -> tuple[ChatMapping, ...]:
+    """Load additional chat mappings from the database chat_mappings table.
+
+    Returns an empty tuple if the file does not exist, the table has not been
+    created yet, or any other error occurs — all gracefully ignored so the
+    service still starts even without the monitoring app having run first.
+    """
+    path = _Path(db_path) if _Path(db_path).is_absolute() else _Path.cwd() / db_path
+    if not path.exists():
+        return ()
+    try:
+        conn = _sqlite3.connect(str(path))
+        try:
+            rows = conn.execute(
+                "SELECT tg_chat_id, bitrix_dialog_id FROM chat_mappings"
+            ).fetchall()
+            return tuple(
+                ChatMapping(tg_chat_id=int(row[0]), bitrix_dialog_id=str(row[1]))
+                for row in rows
+            )
+        except _sqlite3.OperationalError:
+            return ()  # table doesn't exist yet
+        finally:
+            conn.close()
+    except Exception:
+        return ()
+
+
+def _parse_chat_mappings() -> tuple[ChatMapping, ...]:
+    raw = os.getenv("CHAT_MAPPINGS", "").strip()
+    if raw:
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"CHAT_MAPPINGS must be valid JSON: {exc}") from exc
+        if not isinstance(items, list) or not items:
+            raise ValueError("CHAT_MAPPINGS must be a non-empty JSON array")
+        mappings: list[ChatMapping] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise ValueError(f"CHAT_MAPPINGS[{index}] must be a JSON object")
+            tg_chat_id = item.get("tg_chat_id")
+            bitrix_dialog_id = item.get("bitrix_dialog_id")
+            if not isinstance(tg_chat_id, int):
+                raise ValueError(f"CHAT_MAPPINGS[{index}].tg_chat_id must be an integer")
+            if not isinstance(bitrix_dialog_id, str) or not bitrix_dialog_id.strip():
+                raise ValueError(f"CHAT_MAPPINGS[{index}].bitrix_dialog_id must be a non-empty string")
+            mappings.append(ChatMapping(tg_chat_id=tg_chat_id, bitrix_dialog_id=bitrix_dialog_id.strip()))
+        return tuple(mappings)
+
+    # Alternative: CHAT_MAPPING_1, CHAT_MAPPING_2, ... format
+    # Each value is "tg_chat_id:bitrix_dialog_id", e.g. -1001234567890:chat2941
+    numbered: list[ChatMapping] = []
+    idx = 1
+    while True:
+        entry = os.getenv(f"CHAT_MAPPING_{idx}", "").strip()
+        if not entry:
+            break
+        parts = entry.split(":", 1)
+        if len(parts) != 2:
+            raise ValueError(f"CHAT_MAPPING_{idx} must be in format tg_chat_id:bitrix_dialog_id")
+        tg_str, bitrix_str = parts
+        try:
+            tg_chat_id = int(tg_str.strip())
+        except ValueError:
+            raise ValueError(f"CHAT_MAPPING_{idx}: tg_chat_id must be an integer")
+        bitrix_dialog_id = bitrix_str.strip()
+        if not bitrix_dialog_id:
+            raise ValueError(f"CHAT_MAPPING_{idx}: bitrix_dialog_id must not be empty")
+        numbered.append(ChatMapping(tg_chat_id=tg_chat_id, bitrix_dialog_id=bitrix_dialog_id))
+        idx += 1
+    if numbered:
+        return tuple(numbered)
+
+    # Backward compatibility: fall back to legacy single-mapping env vars
+    bitrix_dialog_id = _read_env("BITRIX_DIALOG_ID", "")
+    if not bitrix_dialog_id:
+        raise ValueError(
+            "Chat mappings are not configured. Use CHAT_MAPPING_1, CHAT_MAPPING_2, ... "
+            "or CHAT_MAPPINGS (JSON array) or legacy BITRIX_DIALOG_ID."
+        )
+    allowed_tg_chat_id = _parse_optional_int("ALLOWED_TELEGRAM_CHAT_ID")
+    if allowed_tg_chat_id is None:
+        raise ValueError(
+            "ALLOWED_TELEGRAM_CHAT_ID is required when using legacy single-mapping config. "
+            "Consider switching to CHAT_MAPPING_1, CHAT_MAPPING_2, ... instead."
+        )
+    return (ChatMapping(tg_chat_id=allowed_tg_chat_id, bitrix_dialog_id=bitrix_dialog_id),)
+
+
+@dataclass(frozen=True)
+class Settings:
+    telegram_bot_token: str
+    bitrix_webhook_base: str
+    bitrix_use_chat_bot: bool
+    bitrix_bot_id: Optional[int]
+    bitrix_bot_client_id: Optional[str]
+    chat_mappings: tuple[ChatMapping, ...]
+    prefix_with_chat_title: bool
+    prefix_with_sender: bool
+    prefix_with_timestamp: bool
+    disable_link_preview: bool
+    request_timeout_seconds: float
+    socks5_proxy_url: Optional[str]
+    bitrix_poll_interval_seconds: float
+    sync_bitrix_to_telegram: bool
+    sync_telegram_to_bitrix: bool
+    bitrix_cursor_state_path: str
+    mirror_state_db_path: str
+    bitrix_retry_attempts: int
+    bitrix_retry_base_delay_seconds: float
+    bitrix_retry_max_delay_seconds: float
+    bitrix_poll_error_backoff_seconds: float
+    bitrix_poll_max_backoff_seconds: float
+    bitrix_user_cache_ttl_seconds: float
+    bitrix_max_concurrent_requests: int
+    bitrix_send_queue_maxsize: int
+    bitrix_send_workers: int
+    bitrix_rescan_recent_messages_limit: int
+
+    @staticmethod
+    def from_env() -> "Settings":
+        telegram_bot_token = _read_env("TELEGRAM_BOT_TOKEN")
+        bitrix_webhook_base = _read_env("BITRIX_WEBHOOK_BASE").rstrip("/")
+        if not bitrix_webhook_base.startswith(("http://", "https://")):
+            raise ValueError("BITRIX_WEBHOOK_BASE must start with http:// or https://")
+
+        bitrix_use_chat_bot = _parse_bool("BITRIX_USE_CHAT_BOT", "false")
+        bitrix_bot_id = _parse_optional_int("BITRIX_BOT_ID")
+        bitrix_bot_client_id = _read_env("BITRIX_BOT_CLIENT_ID", "") or None
+
+        if bitrix_use_chat_bot:
+            if bitrix_bot_client_id is None:
+                raise ValueError("BITRIX_BOT_CLIENT_ID is required when BITRIX_USE_CHAT_BOT=true")
+
+        mirror_state_db_path = _read_env("MIRROR_STATE_DB_PATH", "mirror_state.sqlite3")
+
+        # Try env-based mappings first; fall back gracefully so DB-only configs work
+        try:
+            env_mappings: tuple[ChatMapping, ...] = _parse_chat_mappings()
+        except ValueError:
+            env_mappings = ()
+
+        db_mappings = _load_db_chat_mappings(mirror_state_db_path)
+        seen_ids = {m.tg_chat_id for m in env_mappings}
+        extra = tuple(m for m in db_mappings if m.tg_chat_id not in seen_ids)
+        chat_mappings = env_mappings + extra
+
+        if not chat_mappings:
+            raise ValueError(
+                "Chat mappings are not configured. "
+                "Use CHAT_MAPPING_1, CHAT_MAPPING_2, … or CHAT_MAPPINGS (JSON array) "
+                "or the legacy BITRIX_DIALOG_ID env var, "
+                "or add mappings via the monitoring web dashboard."
+            )
+
+        enable_socks5_proxy = _parse_bool("ENABLE_SOCKS5_PROXY", "false")
+        socks5_proxy_url = _read_env("SOCKS5_PROXY_URL", "") or None
+        if enable_socks5_proxy and not socks5_proxy_url:
+            raise ValueError("SOCKS5_PROXY_URL is required when ENABLE_SOCKS5_PROXY=true")
+        if not enable_socks5_proxy:
+            socks5_proxy_url = None
+
+        return Settings(
+            telegram_bot_token=telegram_bot_token,
+            bitrix_webhook_base=bitrix_webhook_base,
+            bitrix_use_chat_bot=bitrix_use_chat_bot,
+            bitrix_bot_id=bitrix_bot_id,
+            bitrix_bot_client_id=bitrix_bot_client_id,
+            chat_mappings=chat_mappings,
+            prefix_with_chat_title=_parse_bool("PREFIX_WITH_CHAT_TITLE", "true"),
+            prefix_with_sender=_parse_bool("PREFIX_WITH_SENDER", "true"),
+            prefix_with_timestamp=_parse_bool("PREFIX_WITH_TIMESTAMP", "true"),
+            disable_link_preview=_parse_bool("BITRIX_DISABLE_LINK_PREVIEW", "true"),
+            request_timeout_seconds=_parse_float("REQUEST_TIMEOUT_SECONDS", "20", minimum=0.1),
+            socks5_proxy_url=socks5_proxy_url,
+            bitrix_poll_interval_seconds=_parse_float("BITRIX_POLL_INTERVAL_SECONDS", "5", minimum=0.1),
+            sync_bitrix_to_telegram=_parse_bool("SYNC_BITRIX_TO_TELEGRAM", "true"),
+            sync_telegram_to_bitrix=_parse_bool("SYNC_TELEGRAM_TO_BITRIX", "true"),
+            bitrix_cursor_state_path=_read_env("BITRIX_CURSOR_STATE_PATH", "bitrix_cursor_state.json"),
+            mirror_state_db_path=mirror_state_db_path,
+            bitrix_retry_attempts=_parse_int("BITRIX_RETRY_ATTEMPTS", "4", minimum=1),
+            bitrix_retry_base_delay_seconds=_parse_float("BITRIX_RETRY_BASE_DELAY_SECONDS", "1", minimum=0.1),
+            bitrix_retry_max_delay_seconds=_parse_float("BITRIX_RETRY_MAX_DELAY_SECONDS", "15", minimum=0.1),
+            bitrix_poll_error_backoff_seconds=_parse_float("BITRIX_POLL_ERROR_BACKOFF_SECONDS", "2", minimum=0.1),
+            bitrix_poll_max_backoff_seconds=_parse_float("BITRIX_POLL_MAX_BACKOFF_SECONDS", "30", minimum=0.1),
+            bitrix_user_cache_ttl_seconds=_parse_float("BITRIX_USER_CACHE_TTL_SECONDS", "300", minimum=1),
+            bitrix_max_concurrent_requests=_parse_int("BITRIX_MAX_CONCURRENT_REQUESTS", "5", minimum=1),
+            bitrix_send_queue_maxsize=_parse_int("BITRIX_SEND_QUEUE_MAXSIZE", "1000", minimum=1),
+            bitrix_send_workers=_parse_int("BITRIX_SEND_WORKERS", "2", minimum=1),
+            bitrix_rescan_recent_messages_limit=_parse_int("BITRIX_RESCAN_RECENT_MESSAGES_LIMIT", "100", minimum=1),
+        )
+

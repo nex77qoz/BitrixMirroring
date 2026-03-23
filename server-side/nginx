@@ -1,0 +1,30 @@
+server {
+    listen 80;
+    server_name bot.example.com;
+
+    location /bitrix/bot {
+        proxy_pass http://127.0.0.1:8081/bitrix/bot;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Monitoring dashboard — served at /monitor
+    # Protected by HTTP Basic Auth (credentials configured in .env)
+    location /monitor {
+        proxy_pass http://127.0.0.1:8082;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Increase timeout for SSE / long-poll responses
+        proxy_read_timeout 120s;
+        proxy_buffering off;
+    }
+
+    location /health {
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+    }
+}

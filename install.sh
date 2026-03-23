@@ -125,7 +125,7 @@ banner() {
     cat << 'EOF'
 ╔══════════════════════════════════════════════════════════╗
 ║         Bitrix  ↔  Telegram  Mirror  Bot                 ║
-║                  Auto Installer v1.4                     ║
+║                  Auto Installer v1.5                     ║
 ╚══════════════════════════════════════════════════════════╝
 EOF
     echo -e "${RESET}"
@@ -336,13 +336,9 @@ step_setup_ssl() {
     # Install acme.sh if not already installed
     if [[ ! -f "$HOME/.acme.sh/acme.sh" ]]; then
         print_info "Установка acme.sh..."
-        if curl -fsSL https://get.acme.sh | sh -s email="${ACME_EMAIL}" 2>&1 | tee -a "$LOG_FILE"; then
-            print_ok "acme.sh установлен"
-        else
-            print_error "Ошибка установки acme.sh. Подробности: $LOG_FILE"
-            exit 1
-        fi
+        curl -fsSL https://get.acme.sh | sh -s email="${ACME_EMAIL}" >> "$LOG_FILE" 2>&1
         [[ -f "$HOME/.acme.sh/acme.sh.env" ]] && source "$HOME/.acme.sh/acme.sh.env" || true
+        print_ok "acme.sh установлен"
     else
         print_info "acme.sh уже установлен"
     fi
@@ -351,8 +347,9 @@ step_setup_ssl() {
 
     # Switch default CA to Let's Encrypt and register account
     print_info "Переключение CA на Let's Encrypt..."
-    "$ACME" --set-default-ca --server letsencrypt 2>&1 | tee -a "$LOG_FILE"
-    "$ACME" --register-account -m "${ACME_EMAIL}" --server letsencrypt 2>&1 | tee -a "$LOG_FILE"
+    "$ACME" --set-default-ca --server letsencrypt >> "$LOG_FILE" 2>&1
+    "$ACME" --register-account -m "${ACME_EMAIL}" --server letsencrypt >> "$LOG_FILE" 2>&1
+    print_ok "CA настроен: Let's Encrypt"
 
     # Check if certificate already exists and is valid
     local cert_exists=false
@@ -364,16 +361,13 @@ step_setup_ssl() {
     if [[ "$cert_exists" == false ]]; then
         # Stop nginx temporarily so acme.sh standalone can bind port 80
         print_info "Временно останавливаем nginx для standalone-проверки..."
-        systemctl stop nginx 2>&1 | tee -a "$LOG_FILE" || true
+        systemctl stop nginx >> "$LOG_FILE" 2>&1 || true
 
         print_info "Выпуск сертификата для ${DOMAIN} (standalone на порту 80)..."
-        echo "──────────────────────────────────────────" | tee -a "$LOG_FILE"
-        if "$ACME" --issue -d "${DOMAIN}" --standalone 2>&1 | tee -a "$LOG_FILE"; then
-            echo "──────────────────────────────────────────" | tee -a "$LOG_FILE"
+        if "$ACME" --issue -d "${DOMAIN}" --standalone >> "$LOG_FILE" 2>&1; then
             print_ok "Сертификат успешно выпущен"
         else
-            local acme_exit=${PIPESTATUS[0]}
-            echo "──────────────────────────────────────────" | tee -a "$LOG_FILE"
+            local acme_exit=$?
             if [[ $acme_exit -eq 2 ]]; then
                 # Exit code 2 = already issued, not due for renewal
                 print_info "Сертификат уже актуален (acme.sh exit 2) — продолжаем установку"
@@ -384,7 +378,7 @@ step_setup_ssl() {
                 echo -e "    ${CYAN}systemctl stop nginx${RESET}"
                 echo -e "    ${CYAN}$ACME --issue -d ${DOMAIN} --standalone${RESET}"
                 echo -e "    ${CYAN}systemctl start nginx${RESET}"
-                systemctl start nginx 2>/dev/null || true
+                systemctl start nginx >> "$LOG_FILE" 2>/dev/null || true
                 exit 1
             fi
         fi
@@ -392,22 +386,17 @@ step_setup_ssl() {
 
     # Install / re-install cert to SSL_DIR
     print_info "Копирование сертификата в $SSL_DIR..."
-    if "$ACME" --install-cert -d "${DOMAIN}" \
+    "$ACME" --install-cert -d "${DOMAIN}" \
         --key-file  "$SSL_KEY" \
         --fullchain-file "$SSL_CERT" \
         --reloadcmd "systemctl reload nginx" \
-        2>&1 | tee -a "$LOG_FILE"; then
-        print_ok "Сертификат скопирован в $SSL_DIR"
-    else
-        print_error "Ошибка при установке сертификата. Подробности: $LOG_FILE"
-        systemctl start nginx 2>/dev/null || true
-        exit 1
-    fi
+        >> "$LOG_FILE" 2>&1
+    print_ok "Сертификат скопирован в $SSL_DIR"
 
     chmod 600 "$SSL_KEY" "$SSL_CERT"
 
     # Restart nginx
-    systemctl start nginx 2>&1 | tee -a "$LOG_FILE" || true
+    systemctl start nginx >> "$LOG_FILE" 2>&1 || true
 
     print_ok "SSL-сертификат установлен: $SSL_CERT"
     print_info "acme.sh настроит автообновление через cron"

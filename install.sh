@@ -122,7 +122,7 @@ banner() {
     cat << 'EOF'
 ╔══════════════════════════════════════════════════════════╗
 ║         Bitrix  ↔  Telegram  Mirror  Bot                 ║
-║                  Auto Installer v1.3                     ║
+║                  Auto Installer v1.4                     ║
 ╚══════════════════════════════════════════════════════════╝
 EOF
     echo -e "${RESET}"
@@ -217,6 +217,9 @@ step_collect_config() {
     # Bot IDs
     ask_input BITRIX_BOT_ID    "BOT_ID бота в Битрикс"
     ask_input BITRIX_BOT_CLIENT_ID "CLIENT_ID бота в Битрикс"
+
+    # Email for SSL certificate (acme.sh)
+    ask_input ACME_EMAIL "Email для SSL-сертификата (Let's Encrypt уведомления)"
 
     # Telegram token
     print_info "Ввод скрыт — символы не отображаются"
@@ -321,7 +324,7 @@ step_setup_ssl() {
     # Install acme.sh if not already installed
     if [[ ! -f "$HOME/.acme.sh/acme.sh" ]]; then
         print_info "Установка acme.sh..."
-        curl -fsSL https://get.acme.sh | sh -s email=admin@"${DOMAIN}" >> "$LOG_FILE" 2>&1
+        curl -fsSL https://get.acme.sh | sh -s email="${ACME_EMAIL}" >> "$LOG_FILE" 2>&1
     else
         print_info "acme.sh уже установлен"
     fi

@@ -612,15 +612,18 @@ step_setup_ssl() {
 step_configure_nginx() {
     print_step "Настройка nginx"
 
-    # Build monitor IP allow/deny block
+    # Build monitor IP allow/deny block (with real newlines, not \n literals)
     local monitor_ip_block=""
     if [[ -n "$MONITOR_ALLOWED_IPS" ]]; then
         local IFS=','
         for ip in $MONITOR_ALLOWED_IPS; do
             ip=$(echo "$ip" | xargs)  # trim whitespace
-            [[ -n "$ip" ]] && monitor_ip_block="${monitor_ip_block}        allow ${ip};\n"
+            if [[ -n "$ip" ]]; then
+                monitor_ip_block="${monitor_ip_block}        allow ${ip};
+"
+            fi
         done
-        monitor_ip_block="${monitor_ip_block}        deny all;\n"
+        monitor_ip_block="${monitor_ip_block}        deny all;"
     fi
 
     if [[ "$SKIP_SSL" == true ]]; then
@@ -656,7 +659,7 @@ server {
     }
 
     location /monitor {
-$(echo -e "$monitor_ip_block")
+${monitor_ip_block}
         limit_req zone=monitor burst=20 nodelay;
         limit_req_status 429;
 
@@ -732,7 +735,7 @@ server {
     }
 
     location /monitor {
-$(echo -e "$monitor_ip_block")
+${monitor_ip_block}
         limit_req zone=monitor burst=20 nodelay;
         limit_req_status 429;
 

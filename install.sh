@@ -763,11 +763,16 @@ EOF
     ln -sf "$NGINX_CONF" "$NGINX_LINK"
 
     if nginx -t >> "$LOG_FILE" 2>&1; then
-        run_cmd systemctl reload nginx
-        if [[ "$SKIP_SSL" == true ]]; then
-            print_ok "nginx настроен и перезагружен (HTTP на порту 80)"
+        # Use restart (not reload) — nginx may be stopped after acme.sh standalone
+        if systemctl is-active --quiet nginx; then
+            run_cmd systemctl reload nginx
         else
-            print_ok "nginx настроен и перезагружен (HTTPS на порту 443)"
+            run_cmd systemctl start nginx
+        fi
+        if [[ "$SKIP_SSL" == true ]]; then
+            print_ok "nginx настроен и запущен (HTTP на порту 80)"
+        else
+            print_ok "nginx настроен и запущен (HTTPS на порту 443)"
         fi
     else
         print_error "Ошибка в конфиге nginx. Проверьте: $LOG_FILE"

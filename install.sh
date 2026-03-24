@@ -202,6 +202,8 @@ step_clone_repo() {
 
     if [[ -d "$INSTALL_DIR/.git" ]]; then
         print_info "Репозиторий уже существует — выполняем git pull"
+        # Allow root to operate on a directory owned by the service user
+        git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
         run_cmd git -C "$INSTALL_DIR" pull
     else
         print_info "Клонирование из $REPO_URL (ветка: ${REPO_BRANCH:-default})"
@@ -266,11 +268,42 @@ step_configure_ssh() {
             print_info "Режим: только SSH-ключ"
             echo ""
             print_warn "Убедитесь, что ваш SSH-ключ уже добавлен в ~/.ssh/authorized_keys!"
-            echo -en "  ${YELLOW}Ваш SSH-ключ настроен? (y/N): ${RESET}"
+            echo -en "  ${YELLOW}Ваш SSH-ключ настроен? (y/N/paste): ${RESET}"
             read -r key_ready
-            if [[ "${key_ready,,}" != "y" ]]; then
+            if [[ "${key_ready,,}" == "paste" || "${key_ready,,}" == "p" ]]; then
+                # Let user paste their public key directly
+                echo ""
+                echo -e "  ${CYAN}Вставьте ваш публичный SSH-ключ (ssh-rsa ... или ssh-ed25519 ...):${RESET}"
+                echo -en "  > "
+                read -r ssh_pub_key
+                if [[ -z "$ssh_pub_key" ]]; then
+                    print_error "Ключ не введён. Отмена."
+                    exit 1
+                fi
+                # Validate key format
+                if ! echo "$ssh_pub_key" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp[0-9]+|ssh-dss) '; then
+                    print_error "Неверный формат ключа. Ожидается: ssh-rsa AAAA... или ssh-ed25519 AAAA..."
+                    exit 1
+                fi
+                # Determine target user for the key (current sudo user or root)
+                local target_user="${SUDO_USER:-root}"
+                local target_home
+                target_home=$(eval echo "~$target_user")
+                local auth_keys="${target_home}/.ssh/authorized_keys"
+                mkdir -p "${target_home}/.ssh"
+                chmod 700 "${target_home}/.ssh"
+                # Add key if not already present
+                if grep -qF "$ssh_pub_key" "$auth_keys" 2>/dev/null; then
+                    print_info "Этот ключ уже присутствует в $auth_keys"
+                else
+                    echo "$ssh_pub_key" >> "$auth_keys"
+                    chmod 600 "$auth_keys"
+                    chown -R "${target_user}:${target_user}" "${target_home}/.ssh"
+                    print_ok "SSH-ключ добавлен в $auth_keys для пользователя $target_user"
+                fi
+            elif [[ "${key_ready,,}" != "y" ]]; then
                 print_error "Добавьте SSH-ключ перед продолжением: ssh-copy-id user@server"
-                print_info "После добавления ключа повторите установку."
+                print_info "Или повторите установку и выберите 'paste' для вставки ключа."
                 exit 1
             fi
 
@@ -1126,6 +1159,7 @@ do_update() {
         exit 1
     fi
 
+    git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
     run_cmd git -C "$INSTALL_DIR" pull
     run_cmd "$VENV/bin/pip" install --upgrade pip
     run_cmd "$VENV/bin/pip" install -r "$INSTALL_DIR/requirements.txt"

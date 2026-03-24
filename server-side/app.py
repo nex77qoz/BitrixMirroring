@@ -2,11 +2,11 @@ from fastapi import FastAPI, Request, HTTPException
 from pathlib import Path
 from urllib.parse import parse_qs
 import fcntl
+import httpx
 import json
 import logging
 import os
 import re
-import requests
 
 app = FastAPI()
 LOG_FILE = Path(os.getenv("BITRIX_LOG_PATH", "/opt/bitrix-bot/bitrix.log"))
@@ -21,6 +21,16 @@ BITRIX_CLIENT_ID = (
     or os.getenv("BITRIX_BOT_CLIENT_ID", "").strip()
 )
 BITRIX_BOT_ID = os.getenv("BITRIX_BOT_ID", "").strip()  # опционально, как fallback
+BITRIX_WEBHOOK_BRIDGE_ENABLED = os.getenv("BITRIX_WEBHOOK_BRIDGE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+MIRROR_INTERNAL_BASE_URL = os.getenv("MIRROR_INTERNAL_BASE_URL", "").strip().rstrip("/")
+MIRROR_INTERNAL_EVENT_PATH = os.getenv("MIRROR_INTERNAL_EVENT_PATH", "/internal/bitrix/event").strip() or "/internal/bitrix/event"
+MIRROR_INTERNAL_WEBHOOK_SECRET = os.getenv("MIRROR_INTERNAL_WEBHOOK_SECRET", "").strip()
+MIRROR_INTERNAL_TIMEOUT_SECONDS = float(os.getenv("MIRROR_INTERNAL_TIMEOUT_SECONDS", "10"))
+FORWARDED_EVENTS = {
+    item.strip()
+    for item in os.getenv("BITRIX_FORWARDED_EVENTS", "ONIMBOTMESSAGEADD,ONIMBOTJOINCHAT").split(",")
+    if item.strip()
+}
 
 # Webhook authentication: Bitrix sends application_token with every event.
 # If BITRIX_WEBHOOK_TOKEN is empty, the first incoming token will be auto-captured.
@@ -187,6 +197,30 @@ def detect_message_text(payload: dict) -> str:
     return ""
 
 
+def detect_message_id(payload: dict) -> int | None:
+    message_data = payload.get("data", {}).get("MESSAGE", {}) or {}
+    if isinstance(message_data, dict):
+        for key in ("id", "ID", "MESSAGE_ID"):
+            value = message_data.get(key)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.strip().isdigit():
+                return int(value.strip())
+
+    params = payload.get("data", {}).get("PARAMS", {}) or {}
+    for key in ("MESSAGE_ID", "ID"):
+        value = params.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+    return None
+
+
+def _bridge_is_configured() -> bool:
+    return BITRIX_WEBHOOK_BRIDGE_ENABLED and bool(MIRROR_INTERNAL_BASE_URL and MIRROR_INTERNAL_WEBHOOK_SECRET)
+
+
 def send_bot_message(dialog_id: str, message: str, bot_id: str = ""):
     final_bot_id = bot_id or BITRIX_BOT_ID
     if not BITRIX_WEBHOOK_BASE:
@@ -205,11 +239,32 @@ def send_bot_message(dialog_id: str, message: str, bot_id: str = ""):
         "URL_PREVIEW": "N",
     }
 
+    import requests
+
     r = requests.post(url, data=payload, timeout=20)
     write_log("BITRIX_SEND_REQUEST", {"DIALOG_ID": dialog_id, "MESSAGE": message[:200]})
     write_log("BITRIX_SEND_RESPONSE", f"{r.status_code}")
     r.raise_for_status()
     return r.text
+
+
+async def forward_event_to_mirror(*, event: str, dialog_id: str, message_id: int | None) -> None:
+    if not _bridge_is_configured():
+        raise RuntimeError("MIRROR_INTERNAL_BASE_URL or MIRROR_INTERNAL_WEBHOOK_SECRET is not configured")
+
+    target_url = f"{MIRROR_INTERNAL_BASE_URL}{MIRROR_INTERNAL_EVENT_PATH}"
+    payload = {
+        "event": event,
+        "dialog_id": dialog_id,
+        "message_id": message_id,
+    }
+    headers = {"X-Internal-Webhook-Secret": MIRROR_INTERNAL_WEBHOOK_SECRET}
+
+    async with httpx.AsyncClient(timeout=MIRROR_INTERNAL_TIMEOUT_SECONDS) as client:
+        response = await client.post(target_url, json=payload, headers=headers)
+        write_log("MIRROR_BRIDGE_REQUEST", payload)
+        write_log("MIRROR_BRIDGE_RESPONSE", {"status_code": response.status_code, "body": response.text[:500]})
+        response.raise_for_status()
 
 
 @app.get("/health")
@@ -240,6 +295,7 @@ async def bitrix_bot(request: Request):
 
     dialog_id = detect_dialog_id(payload)
     message_text = detect_message_text(payload)
+    message_id = detect_message_id(payload)
     bot_id = detect_bot_id(payload)
 
     write_log(
@@ -247,6 +303,7 @@ async def bitrix_bot(request: Request):
         {
             "event": event,
             "dialog_id": dialog_id,
+            "message_id": message_id,
             "message_text": message_text[:200] if message_text else "",
             "bot_id": bot_id,
             "has_params": bool(params),
@@ -254,7 +311,9 @@ async def bitrix_bot(request: Request):
     )
 
     try:
-        if event == "ONIMBOTJOINCHAT" and dialog_id:
+        if event in FORWARDED_EVENTS and dialog_id and _bridge_is_configured():
+            await forward_event_to_mirror(event=event, dialog_id=dialog_id, message_id=message_id)
+        elif event == "ONIMBOTJOINCHAT" and dialog_id:
             send_bot_message(
                 dialog_id=dialog_id,
                 bot_id=bot_id,
@@ -280,5 +339,6 @@ async def bitrix_bot(request: Request):
     except Exception as e:
         write_log("ERROR", repr(e))
         logger.exception("Bot handler error")
+        raise HTTPException(status_code=502, detail="Bridge delivery failed") from e
 
     return {"result": True}

@@ -131,6 +131,36 @@ ask_secret() {
     printf -v "$var" '%s' "$value"
 }
 
+env_escape() {
+    local value="$1"
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    printf '"%s"' "$value"
+}
+
+load_installer_env() {
+    if [[ ! -f "$ENV_FILE" ]]; then
+        print_error "Файл конфигурации не найден: $ENV_FILE"
+        exit 1
+    fi
+
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+
+    DOMAIN="${APP_DOMAIN:-${DOMAIN:-}}"
+    if [[ -z "$DOMAIN" && -f "$NGINX_CONF" ]]; then
+        DOMAIN=$(awk '/server_name/ {print $2; exit}' "$NGINX_CONF" | tr -d ';')
+    fi
+    MONITOR_ALLOWED_IPS="${MONITOR_ALLOWED_IPS:-}"
+    if [[ -f "$SSL_CERT" && -f "$SSL_KEY" ]]; then
+        SKIP_SSL=false
+    else
+        SKIP_SSL=true
+    fi
+}
+
 run_cmd() {
     log "CMD: $*"
     if ! "$@" >> "$LOG_FILE" 2>&1; then
@@ -388,9 +418,13 @@ step_collect_config() {
 
     # Domain
     ask_input DOMAIN "Домен сервера (например: bot.example.com)"
+    APP_DOMAIN="$DOMAIN"
     BOT_HANDLER_URL="https://${DOMAIN}/bitrix/bot"
+    TELEGRAM_WEBHOOK_PUBLIC_URL="https://${DOMAIN}"
+    TELEGRAM_WEBHOOK_PATH="/telegram/webhook"
     print_info "URL обработчика бота: ${BOLD}${BOT_HANDLER_URL}${RESET}"
     print_info "Укажите этот URL при регистрации бота в Битрикс (поле handler_url)"
+    print_info "URL Telegram webhook: ${BOLD}${TELEGRAM_WEBHOOK_PUBLIC_URL}${TELEGRAM_WEBHOOK_PATH}${RESET}"
 
     # Bot IDs
     ask_input BITRIX_BOT_ID    "BOT_ID бота в Битрикс"
@@ -402,6 +436,40 @@ step_collect_config() {
     # Telegram token
     print_info "Ввод скрыт — символы не отображаются"
     ask_secret TELEGRAM_BOT_TOKEN "Telegram Bot Token"
+
+    echo ""
+    echo -en "  ${YELLOW}Включить Telegram webhook mode и отключить polling в проде? (Y/n): ${RESET}"
+    read -r enable_tg_webhook
+    if [[ "${enable_tg_webhook,,}" == "n" ]]; then
+        TELEGRAM_WEBHOOK_ENABLED="false"
+    else
+        TELEGRAM_WEBHOOK_ENABLED="true"
+        print_info "Ввод скрыт — символы не отображаются"
+        ask_secret TELEGRAM_WEBHOOK_SECRET "Секрет Telegram webhook"
+    fi
+
+    echo ""
+    echo -en "  ${YELLOW}Включить Bitrix -> main internal bridge для мгновенной доставки? (Y/n): ${RESET}"
+    read -r enable_bridge
+    if [[ "${enable_bridge,,}" == "n" ]]; then
+        BITRIX_WEBHOOK_BRIDGE_ENABLED="false"
+        MIRROR_INTERNAL_WEBHOOK_SECRET=""
+    else
+        BITRIX_WEBHOOK_BRIDGE_ENABLED="true"
+        print_info "Ввод скрыт — символы не отображаются"
+        ask_secret MIRROR_INTERNAL_WEBHOOK_SECRET "Секрет внутреннего bridge"
+    fi
+
+    MIRROR_HTTP_HOST="127.0.0.1"
+    MIRROR_HTTP_PORT="8090"
+    MIRROR_INTERNAL_BASE_URL="http://127.0.0.1:8090"
+    MIRROR_INTERNAL_EVENT_PATH="/internal/bitrix/event"
+
+    if [[ "$BITRIX_WEBHOOK_BRIDGE_ENABLED" == "true" ]]; then
+        BITRIX_POLL_INTERVAL_SECONDS_VALUE="60"
+    else
+        BITRIX_POLL_INTERVAL_SECONDS_VALUE="5"
+    fi
 
     # Monitor password
     print_info "Ввод скрыт — символы не отображаются"
@@ -449,19 +517,36 @@ step_write_env() {
 # ============================================================
 
 # Telegram
-TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+APP_DOMAIN=$(env_escape "${APP_DOMAIN}")
+TELEGRAM_BOT_TOKEN=$(env_escape "${TELEGRAM_BOT_TOKEN}")
+TELEGRAM_WEBHOOK_ENABLED=${TELEGRAM_WEBHOOK_ENABLED}
+TELEGRAM_WEBHOOK_PUBLIC_URL=$(env_escape "${TELEGRAM_WEBHOOK_PUBLIC_URL}")
+TELEGRAM_WEBHOOK_PATH=$(env_escape "${TELEGRAM_WEBHOOK_PATH}")
+TELEGRAM_WEBHOOK_SECRET=$(env_escape "${TELEGRAM_WEBHOOK_SECRET:-}")
+TELEGRAM_WEBHOOK_DROP_PENDING_UPDATES=true
+TELEGRAM_WEBHOOK_STRICT_VERIFY=true
 
 # SOCKS5 proxy
 ENABLE_SOCKS5_PROXY=${ENABLE_SOCKS5_PROXY}
-SOCKS5_PROXY_URL=${SOCKS5_PROXY_URL}
+SOCKS5_PROXY_URL=$(env_escape "${SOCKS5_PROXY_URL}")
 
 # Bitrix
-BITRIX_WEBHOOK_BASE=${BITRIX_WEBHOOK_BASE}
-BITRIX_BOT_ID=${BITRIX_BOT_ID}
-BITRIX_BOT_CLIENT_ID=${BITRIX_BOT_CLIENT_ID}
+BITRIX_WEBHOOK_BASE=$(env_escape "${BITRIX_WEBHOOK_BASE}")
+BITRIX_BOT_ID=$(env_escape "${BITRIX_BOT_ID}")
+BITRIX_BOT_CLIENT_ID=$(env_escape "${BITRIX_BOT_CLIENT_ID}")
 
 # Безопасность: webhook authentication
-BITRIX_WEBHOOK_TOKEN=${BITRIX_WEBHOOK_TOKEN:-}
+BITRIX_WEBHOOK_TOKEN=$(env_escape "${BITRIX_WEBHOOK_TOKEN:-}")
+
+# Мгновенный Bitrix -> Telegram bridge
+BITRIX_WEBHOOK_BRIDGE_ENABLED=${BITRIX_WEBHOOK_BRIDGE_ENABLED}
+MIRROR_HTTP_HOST=$(env_escape "${MIRROR_HTTP_HOST}")
+MIRROR_HTTP_PORT=${MIRROR_HTTP_PORT}
+MIRROR_INTERNAL_BASE_URL=$(env_escape "${MIRROR_INTERNAL_BASE_URL}")
+MIRROR_INTERNAL_EVENT_PATH=$(env_escape "${MIRROR_INTERNAL_EVENT_PATH}")
+MIRROR_INTERNAL_WEBHOOK_SECRET=$(env_escape "${MIRROR_INTERNAL_WEBHOOK_SECRET:-}")
+MIRROR_INTERNAL_TIMEOUT_SECONDS=10
+BITRIX_FORWARDED_EVENTS=$(env_escape "ONIMBOTMESSAGEADD,ONIMBOTJOINCHAT")
 
 # Маппинг чатов (добавляется в следующем шаге)
 
@@ -474,11 +559,11 @@ BITRIX_DISABLE_LINK_PREVIEW=true
 # Синхронизация
 SYNC_TELEGRAM_TO_BITRIX=true
 SYNC_BITRIX_TO_TELEGRAM=true
-BITRIX_POLL_INTERVAL_SECONDS=5
+BITRIX_POLL_INTERVAL_SECONDS=${BITRIX_POLL_INTERVAL_SECONDS_VALUE}
 
 # Хранилище
-MIRROR_STATE_DB_PATH=${INSTALL_DIR}/mirror_state.sqlite3
-BITRIX_CURSOR_STATE_PATH=${INSTALL_DIR}/bitrix_cursor_state.json
+MIRROR_STATE_DB_PATH=$(env_escape "${INSTALL_DIR}/mirror_state.sqlite3")
+BITRIX_CURSOR_STATE_PATH=$(env_escape "${INSTALL_DIR}/bitrix_cursor_state.json")
 
 # Retry / backoff
 BITRIX_RETRY_ATTEMPTS=4
@@ -497,7 +582,7 @@ REQUEST_TIMEOUT_SECONDS=20
 
 # Лимиты файлов (100 МБ на файл, 10 ГБ кэш)
 MAX_FILE_SIZE_BYTES=104857600
-FILE_CACHE_DIR=${FILE_CACHE_DIR}
+FILE_CACHE_DIR=$(env_escape "${FILE_CACHE_DIR}")
 FILE_CACHE_MAX_BYTES=10737418240
 
 # Очистка БД (7 дней)
@@ -505,11 +590,12 @@ DB_CLEANUP_MAX_AGE_SECONDS=604800
 
 # Мониторинг-дашборд
 MONITOR_USERNAME=admin
-MONITOR_PASSWORD=${MONITOR_PASSWORD}
+MONITOR_PASSWORD=$(env_escape "${MONITOR_PASSWORD}")
+MONITOR_ALLOWED_IPS=$(env_escape "${MONITOR_ALLOWED_IPS}")
 
 # Логирование
 LOG_LEVEL=INFO
-BITRIX_LOG_PATH=${INSTALL_DIR}/bitrix.log
+BITRIX_LOG_PATH=$(env_escape "${INSTALL_DIR}/bitrix.log")
 EOF
 
     chmod 600 "$ENV_FILE"
@@ -523,9 +609,17 @@ EOF
 step_setup_ssl() {
     print_step "Получение SSL-сертификата через acme.sh (Let's Encrypt)"
 
-    echo -en "  ${YELLOW}Выпустить получение SSL-сертификата? (Y/n): ${RESET}"
+    if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
+        print_info "Telegram webhook mode требует публичный HTTPS endpoint. Пропуск SSL недоступен."
+    fi
+
+    echo -en "  ${YELLOW}Выпустить SSL-сертификат? (Y/n): ${RESET}"
     read -r ssl_answer
     if [[ "${ssl_answer,,}" == "n" ]]; then
+        if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
+            print_error "Нельзя включить Telegram webhook mode без HTTPS. Повторите установку с выпуском SSL-сертификата."
+            exit 1
+        fi
         print_warn "Получение сертификата пропущено. nginx будет настроен на HTTP."
         SKIP_SSL=true
         return 0
@@ -659,6 +753,17 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
+    location /telegram/webhook {
+        limit_req zone=webhook burst=50 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:8090/telegram/webhook;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
     location /monitor {
 ${monitor_ip_block}
         limit_req zone=monitor burst=20 nodelay;
@@ -729,6 +834,17 @@ server {
         limit_req_status 429;
 
         proxy_pass http://127.0.0.1:8081/bitrix/bot;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /telegram/webhook {
+        limit_req zone=webhook burst=50 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:8090/telegram/webhook;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1003,7 +1119,7 @@ step_setup_logrotate() {
     print_step "Настройка ротации логов"
 
     cat > /etc/logrotate.d/bitrix-bot << EOF
-${INSTALL_DIR}/server-side/bitrix.log {
+${INSTALL_DIR}/bitrix.log {
     daily
     rotate 7
     compress
@@ -1051,12 +1167,43 @@ step_health_checks() {
 
     # Webhook /health endpoint
     local code
+    local health_body
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8081/health 2>/dev/null || echo "000")
     if [[ "$code" == "200" ]]; then
         print_ok "Webhook-сервис отвечает на /health (HTTP $code)"
     else
         print_error "Webhook-сервис не отвечает на /health (HTTP $code)"
         all_ok=false
+    fi
+
+    # Main mirror internal /health endpoint
+    if [[ "${BITRIX_WEBHOOK_BRIDGE_ENABLED:-false}" == "true" || "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
+        health_body=$(curl -s --max-time 5 http://127.0.0.1:${MIRROR_HTTP_PORT:-8090}/health 2>/dev/null || true)
+        code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:${MIRROR_HTTP_PORT:-8090}/health 2>/dev/null || echo "000")
+        if [[ "$code" == "200" ]]; then
+            print_ok "Main mirror-process отвечает на internal /health (HTTP $code)"
+            if [[ "${BITRIX_WEBHOOK_BRIDGE_ENABLED:-false}" == "true" ]]; then
+                if grep -q '"bitrix_webhook_bridge_enabled":true' <<< "$health_body"; then
+                    print_ok "Bitrix bridge включён в основном процессе"
+                else
+                    print_error "Main health доступен, но Bitrix bridge не включён в основном процессе"
+                    all_ok=false
+                fi
+            fi
+            if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
+                if grep -q '"telegram_webhook_enabled":true' <<< "$health_body"; then
+                    print_ok "Telegram webhook mode включён в основном процессе"
+                else
+                    print_error "Main health доступен, но Telegram webhook mode не включён"
+                    all_ok=false
+                fi
+            fi
+        else
+            print_error "Main mirror-process не отвечает на internal /health (HTTP $code)"
+            all_ok=false
+        fi
+    else
+        print_info "Internal /health проверка пропущена: main process работает в legacy polling mode"
     fi
 
     # Webhook /bitrix/bot endpoint (POST empty body → 403 means auth is active)
@@ -1084,14 +1231,40 @@ step_health_checks() {
         all_ok=false
     fi
 
-    # nginx HTTPS proxy check (-k для самоподписного сертификата)
-    code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 5 \
-        --resolve "${DOMAIN}:443:127.0.0.1" \
-        "https://${DOMAIN}/health" 2>/dev/null || echo "000")
-    if [[ "$code" == "200" ]]; then
-        print_ok "nginx HTTPS проксирует запросы (HTTP $code)"
+    if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
+        code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 5 \
+            --resolve "${DOMAIN}:443:127.0.0.1" \
+            -X POST \
+            -H "X-Telegram-Bot-Api-Secret-Token: ${TELEGRAM_WEBHOOK_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d '{"update_id":1}' \
+            "https://${DOMAIN}${TELEGRAM_WEBHOOK_PATH}" 2>/dev/null || echo "000")
+        if [[ "$code" == "200" ]]; then
+            print_ok "nginx публикует Telegram webhook endpoint (HTTP $code)"
+        else
+            print_warn "Telegram webhook endpoint через nginx вернул HTTP $code"
+        fi
+    fi
+
+    # nginx proxy check
+    if [[ "$SKIP_SSL" == true ]]; then
+        code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+            --resolve "${DOMAIN}:80:127.0.0.1" \
+            "http://${DOMAIN}/health" 2>/dev/null || echo "000")
+        if [[ "$code" == "200" ]]; then
+            print_ok "nginx HTTP проксирует запросы (HTTP $code)"
+        else
+            print_warn "nginx HTTP: /health вернул HTTP $code (возможно ещё не готов)"
+        fi
     else
-        print_warn "nginx HTTPS: /health вернул HTTP $code (возможно ещё не готов)"
+        code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 5 \
+            --resolve "${DOMAIN}:443:127.0.0.1" \
+            "https://${DOMAIN}/health" 2>/dev/null || echo "000")
+        if [[ "$code" == "200" ]]; then
+            print_ok "nginx HTTPS проксирует запросы (HTTP $code)"
+        else
+            print_warn "nginx HTTPS: /health вернул HTTP $code (возможно ещё не готов)"
+        fi
     fi
 
     # SQLite check
@@ -1125,8 +1298,15 @@ print_summary() {
     echo -e "    nginx-конфиг:   ${CYAN}${NGINX_CONF}${RESET}"
     echo ""
     echo -e "${BOLD}  URL:${RESET}"
-    echo -e "    Обработчик бота:   ${CYAN}https://${DOMAIN}/bitrix/bot${RESET}"
-    echo -e "    Мониторинг:        ${CYAN}https://${DOMAIN}/monitor${RESET}"
+    local scheme="https"
+    if [[ "$SKIP_SSL" == true ]]; then
+        scheme="http"
+    fi
+    echo -e "    Обработчик бота:   ${CYAN}${scheme}://${DOMAIN}/bitrix/bot${RESET}"
+    if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
+        echo -e "    Telegram webhook:  ${CYAN}${scheme}://${DOMAIN}${TELEGRAM_WEBHOOK_PATH}${RESET}"
+    fi
+    echo -e "    Мониторинг:        ${CYAN}${scheme}://${DOMAIN}/monitor${RESET}"
     echo -e "    Логин/пароль:      admin / ***"
     echo ""
     echo -e "${BOLD}  Безопасность:${RESET}"
@@ -1136,6 +1316,8 @@ print_summary() {
     echo -e "    Ротация логов:         ${CYAN}ежедневно, 7 дней${RESET}"
     echo -e "    Очистка БД:            ${CYAN}записи старше 7 дней${RESET}"
     echo -e "    Лимит файлов:          ${CYAN}100 МБ / файл, 10 ГБ кэш${RESET}"
+    echo -e "    Bitrix bridge:         ${CYAN}${BITRIX_WEBHOOK_BRIDGE_ENABLED:-false}${RESET}"
+    echo -e "    Telegram webhook:      ${CYAN}${TELEGRAM_WEBHOOK_ENABLED:-false}${RESET}"
     if [[ -n "$MONITOR_ALLOWED_IPS" ]]; then
         echo -e "    IP мониторинга:        ${CYAN}${MONITOR_ALLOWED_IPS}${RESET}"
     fi
@@ -1152,7 +1334,12 @@ print_summary() {
     echo ""
     echo -e "${YELLOW}${BOLD}  ⚠  Не забудьте зарегистрировать бота в Битрикс!${RESET}"
     echo -e "  URL для поля handler_url при вызове imbot.register:"
-    echo -e "    ${CYAN}https://${DOMAIN}/bitrix/bot${RESET}"
+    echo -e "    ${CYAN}${scheme}://${DOMAIN}/bitrix/bot${RESET}"
+    if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
+        echo ""
+        echo -e "  Telegram webhook будет автоматически зарегистрирован на URL:"
+        echo -e "    ${CYAN}${scheme}://${DOMAIN}${TELEGRAM_WEBHOOK_PATH}${RESET}"
+    fi
     echo ""
     echo -e "  Обновление:    ${CYAN}sudo bash ${INSTALL_DIR}/install.sh --update${RESET}"
     echo -e "  Удаление:      ${CYAN}sudo bash ${INSTALL_DIR}/install.sh --uninstall${RESET}"
@@ -1177,6 +1364,15 @@ do_update() {
     run_cmd "$VENV/bin/pip" install --upgrade pip
     run_cmd "$VENV/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 
+    load_installer_env
+
+    if [[ -n "$DOMAIN" ]]; then
+        step_configure_nginx
+    else
+        print_warn "APP_DOMAIN не найден в $ENV_FILE; пропускаю пересборку nginx-конфига"
+    fi
+    step_create_services
+
     # Fix ownership after pull
     chown -R "${SVC_USER}:${SVC_GROUP}" "$INSTALL_DIR" 2>/dev/null || true
 
@@ -1195,6 +1391,10 @@ do_update() {
             print_error "$svc не запущен — проверьте: journalctl -u $svc -n 50"
         fi
     done
+
+    if [[ -n "$DOMAIN" ]]; then
+        step_health_checks
+    fi
 
     print_ok "Обновление завершено"
 }

@@ -2,7 +2,7 @@
 
 Бот и набор сервисов для двустороннего зеркалирования сообщений между **Telegram-группами** и **Битрикс24-чатами**.
 
-Проект решает практическую задачу: сотрудники могут общаться в привычном Telegram-чате, а сообщения, правки, реакции и часть вложений синхронизируются с соответствующим диалогом в Битрикс24. В обратную сторону сервис опрашивает Bitrix и доставляет новые сообщения обратно в Telegram.
+Проект решает практическую задачу: сотрудники могут общаться в привычном Telegram-чате, а сообщения, правки, реакции и часть вложений синхронизируются с соответствующим диалогом в Битрикс24. В обратную сторону сервис может работать как через polling, так и через webhook bridge для почти мгновенной доставки из Bitrix в Telegram.
 
 ## Что умеет проект
 
@@ -34,9 +34,10 @@
 В типовой схеме используются три независимых процесса:
 
 1. **Mirror service** — основной процесс, который:
-   - получает апдейты Telegram через polling;
+  - получает апдейты Telegram через polling или webhook;
    - отправляет новые сообщения в Битрикс;
-   - периодически опрашивает Битрикс и возвращает новые сообщения в Telegram.
+  - периодически опрашивает Битрикс и возвращает новые сообщения в Telegram;
+  - при включённом bridge принимает внутренние Bitrix webhook-события и немедленно запускает sync для нужного dialog_id.
 2. **Bitrix webhook service** — HTTP endpoint для событий Битрикс-бота.
 3. **Monitoring dashboard** — web-интерфейс для просмотра состояния сервиса, логов и управления связкой чатов.
 
@@ -64,6 +65,8 @@
 3. отфильтровывает служебные и уже зеркалированные сообщения;
 4. пересылает текст или вложение в Telegram;
 5. обновляет курсор и таблицу связей.
+
+Если включён `BITRIX_WEBHOOK_BRIDGE_ENABLED=true`, входящий Bitrix webhook из `server-side/app.py` дополнительно будит синхронизацию немедленно через внутренний endpoint main-процесса. Это позволяет убрать типичную задержку в несколько секунд, не отказываясь от polling как от fallback-механизма.
 
 ### Редактирования и реакции
 
@@ -174,7 +177,7 @@ uvicorn server-side.app:app --host 127.0.0.1 --port 8081
 - `GET /health`
 - `POST /bitrix/bot`
 
-Этот сервис полезен, если вы используете Bitrix bot events и хотите принимать webhook-события отдельно от основного polling-процесса.
+Этот сервис полезен, если вы используете Bitrix bot events и хотите принимать webhook-события отдельно от основного polling-процесса. При настройке `MIRROR_INTERNAL_BASE_URL` и `MIRROR_INTERNAL_WEBHOOK_SECRET` он может не просто логировать события, а сразу пробрасывать их в основной mirror-service.
 
 ### Дэшборд мониторинг
 
@@ -237,6 +240,25 @@ export MONITOR_PASSWORD='change-me'
 - `BITRIX_RETRY_MAX_DELAY_SECONDS=15`
 - `BITRIX_POLL_ERROR_BACKOFF_SECONDS=2`
 - `BITRIX_POLL_MAX_BACKOFF_SECONDS=30`
+
+### Webhook bridge и Telegram webhook
+
+- `BITRIX_WEBHOOK_BRIDGE_ENABLED=true` — включает внутренний bridge Bitrix webhook -> main.py.
+- `MIRROR_HTTP_HOST=127.0.0.1`
+- `MIRROR_HTTP_PORT=8090`
+- `MIRROR_INTERNAL_EVENT_PATH=/internal/bitrix/event`
+- `MIRROR_INTERNAL_WEBHOOK_SECRET=...`
+- `TELEGRAM_WEBHOOK_ENABLED=true` — переводит Telegram-бот на webhook вместо polling.
+- `TELEGRAM_WEBHOOK_PUBLIC_URL=https://bot.example.com`
+- `TELEGRAM_WEBHOOK_PATH=/telegram/webhook`
+- `TELEGRAM_WEBHOOK_SECRET=...`
+- `TELEGRAM_WEBHOOK_DROP_PENDING_UPDATES=true`
+- `TELEGRAM_WEBHOOK_STRICT_VERIFY=true` — после `setWebhook` бот сверяет реальный `getWebhookInfo().url` с ожидаемым URL и поднимает ошибку при mismatch.
+
+Monitoring dashboard также показывает:
+
+- отдельную карточку Telegram webhook: expected URL, actual URL, pending updates и последнюю ошибку Telegram API;
+- отдельную карточку Bitrix bridge: доступность main health endpoint, целевой internal event URL и факт того, что bridge действительно включён в основном mirror-процессе.
 
 ### Производительность
 

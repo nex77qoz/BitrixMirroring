@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
+import shutil
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 from telegram import Message, ReactionTypeEmoji
@@ -35,6 +38,7 @@ class MirrorService:
         self._state_lock = asyncio.Lock()
         self._send_queue: asyncio.Queue[Message] = asyncio.Queue(maxsize=settings.bitrix_send_queue_maxsize)
         self._tg_to_mapping: dict[int, ChatMapping] = {m.tg_chat_id: m for m in settings.chat_mappings}
+        self._cleanup_task: Optional[asyncio.Task[None]] = None
 
     def get_mapping_for_telegram_chat(self, tg_chat_id: int) -> Optional[ChatMapping]:
         return self._tg_to_mapping.get(tg_chat_id)
@@ -86,10 +90,18 @@ class MirrorService:
             asyncio.create_task(self._telegram_to_bitrix_worker(), name=f"bitrix-send-worker-{index}")
             for index in range(self.settings.bitrix_send_workers)
         ]
+        self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop(), name="periodic-cleanup")
         await self.start_bitrix_polling(application)
 
     async def stop(self) -> None:
         self._stop_event.set()
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._cleanup_task = None
         for task in self._bitrix_poll_tasks:
             await task
         self._bitrix_poll_tasks.clear()
@@ -377,6 +389,15 @@ class MirrorService:
             raise ValueError("No uploadable file attachment found in message")
         telegram_file = await file_source.get_file()
         file_bytes = await telegram_file.download_as_bytearray()
+        if len(file_bytes) > self.settings.max_file_size_bytes:
+            logger.warning(
+                "Telegram file too large (%s bytes > %s max), skipping upload for message %s",
+                len(file_bytes), self.settings.max_file_size_bytes, message.message_id,
+            )
+            return await self.bitrix.send_message(
+                self.render_telegram_message(message) + "\n\n[Файл слишком большой для пересылки]",
+                dialog_id=dialog_id,
+            )
         file_path_name = telegram_file.file_path.rsplit("/", 1)[-1] if telegram_file.file_path else None
         filename = original_name or file_path_name or fallback_name
         return await self.bitrix.send_photo(
@@ -405,6 +426,16 @@ class MirrorService:
             )
         try:
             file_bytes = await self.bitrix.download_file_by_id(attachment.file_id, fallback_url=attachment.url_download)
+            if len(file_bytes) > self.settings.max_file_size_bytes:
+                logger.warning(
+                    "Bitrix file too large (%s bytes > %s max), sending text only for message %s",
+                    len(file_bytes), self.settings.max_file_size_bytes, bitrix_message.message_id,
+                )
+                return await application.bot.send_message(
+                    chat_id=tg_chat_id,
+                    text=rendered + "\n\n[Файл слишком большой для пересылки]",
+                    disable_web_page_preview=self.settings.disable_link_preview,
+                )
             mime = attachment.mime_type or ""
             if mime.startswith("image/"):
                 return await application.bot.send_photo(
@@ -733,3 +764,64 @@ class MirrorService:
         digest.update(b"|")
         digest.update(";".join(str(file_id) for file_id in bitrix_message.file_ids).encode("ascii", errors="ignore"))
         return digest.hexdigest()
+
+    # ── Periodic cleanup ──────────────────────────────────────────────────
+
+    async def _periodic_cleanup_loop(self) -> None:
+        """Run DB cleanup and file cache cleanup every hour."""
+        cleanup_interval = 3600  # 1 hour
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=cleanup_interval)
+                break  # stop_event was set
+            except asyncio.TimeoutError:
+                pass
+            try:
+                deleted = await self.state_store.cleanup_old_links(
+                    max_age_seconds=self.settings.db_cleanup_max_age_seconds,
+                )
+                if deleted:
+                    logger.info("Periodic DB cleanup: removed %s old link(s)", deleted)
+                self._cleanup_file_cache()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Periodic cleanup failed")
+
+    def _cleanup_file_cache(self) -> None:
+        """Remove oldest files from file_cache_dir if total size exceeds file_cache_max_bytes."""
+        cache_dir = self.settings.file_cache_dir
+        if not cache_dir:
+            return
+        cache_path = Path(cache_dir)
+        if not cache_path.is_dir():
+            return
+        max_bytes = self.settings.file_cache_max_bytes
+        if max_bytes <= 0:
+            return
+
+        files: list[tuple[float, int, Path]] = []
+        total_size = 0
+        for entry in cache_path.iterdir():
+            if entry.is_file():
+                stat = entry.stat()
+                files.append((stat.st_mtime, stat.st_size, entry))
+                total_size += stat.st_size
+
+        if total_size <= max_bytes:
+            return
+
+        # Sort by modification time, oldest first
+        files.sort(key=lambda x: x[0])
+        removed = 0
+        for mtime, size, fpath in files:
+            if total_size <= max_bytes:
+                break
+            try:
+                fpath.unlink()
+                total_size -= size
+                removed += 1
+            except OSError:
+                pass
+        if removed:
+            logger.info("File cache cleanup: removed %s file(s), cache now ~%s MB", removed, total_size // (1024 * 1024))

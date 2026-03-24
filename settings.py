@@ -183,6 +183,10 @@ class Settings:
     bitrix_send_queue_maxsize: int
     bitrix_send_workers: int
     bitrix_rescan_recent_messages_limit: int
+    max_file_size_bytes: int
+    file_cache_dir: str
+    file_cache_max_bytes: int
+    db_cleanup_max_age_seconds: int
 
     @staticmethod
     def from_env() -> "Settings":
@@ -249,5 +253,9 @@ class Settings:
             bitrix_send_queue_maxsize=_parse_int("BITRIX_SEND_QUEUE_MAXSIZE", "1000", minimum=1),
             bitrix_send_workers=_parse_int("BITRIX_SEND_WORKERS", "2", minimum=1),
             bitrix_rescan_recent_messages_limit=_parse_int("BITRIX_RESCAN_RECENT_MESSAGES_LIMIT", "100", minimum=1),
+            max_file_size_bytes=_parse_int("MAX_FILE_SIZE_BYTES", str(100 * 1024 * 1024), minimum=1),
+            file_cache_dir=_read_env("FILE_CACHE_DIR", ""),
+            file_cache_max_bytes=_parse_int("FILE_CACHE_MAX_BYTES", str(10 * 1024 * 1024 * 1024), minimum=0),
+            db_cleanup_max_age_seconds=_parse_int("DB_CLEANUP_MAX_AGE_SECONDS", str(7 * 24 * 3600), minimum=3600),
         )
 

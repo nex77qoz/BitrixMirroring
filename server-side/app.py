@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from pathlib import Path
 from urllib.parse import parse_qs
 import json
@@ -8,7 +8,8 @@ import re
 import requests
 
 app = FastAPI()
-LOG_FILE = Path("/opt/bitrix-bot/bitrix.log")
+LOG_FILE = Path(os.getenv("BITRIX_LOG_PATH", "/opt/bitrix-bot/bitrix.log"))
+LOG_MAX_SIZE = 50 * 1024 * 1024  # 50 MB per file
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("bitrix-bot")
@@ -20,14 +21,51 @@ BITRIX_CLIENT_ID = (
 )
 BITRIX_BOT_ID = os.getenv("BITRIX_BOT_ID", "").strip()  # опционально, как fallback
 
+# Webhook authentication: Bitrix sends application_token with every event.
+# Set BITRIX_WEBHOOK_TOKEN in .env to the token from your Bitrix app settings.
+WEBHOOK_TOKEN = os.getenv("BITRIX_WEBHOOK_TOKEN", "").strip()
+
+# Secret patterns to redact from logs
+_SECRET_PATTERNS = re.compile(
+    r"(auth|token|password|secret|webhook|key|pwd|access_token|refresh_token)"
+    r"(['\"]?\s*[:=]\s*['\"]?)([^\s'\"&,;}{)\]]{4,})",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_for_log(data) -> str:
+    """Redact sensitive values from data before writing to log."""
+    if isinstance(data, (dict, list)):
+        text = json.dumps(data, ensure_ascii=False, indent=2)
+    else:
+        text = str(data)
+    # Redact secrets
+    text = _SECRET_PATTERNS.sub(lambda m: m.group(1) + m.group(2) + "***REDACTED***", text)
+    # Truncate very long values (e.g. base64 file content)
+    if len(text) > 4096:
+        text = text[:4096] + "\n... [TRUNCATED]"
+    return text
+
+
+def _rotate_log_if_needed() -> None:
+    """Simple size-based log rotation."""
+    if not LOG_FILE.exists():
+        return
+    try:
+        if LOG_FILE.stat().st_size > LOG_MAX_SIZE:
+            rotated = LOG_FILE.with_suffix(".log.1")
+            if rotated.exists():
+                rotated.unlink()
+            LOG_FILE.rename(rotated)
+    except OSError:
+        pass
+
 
 def write_log(title: str, data) -> None:
+    _rotate_log_if_needed()
     with LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(f"\n=== {title} ===\n")
-        if isinstance(data, (dict, list)):
-            f.write(json.dumps(data, ensure_ascii=False, indent=2))
-        else:
-            f.write(str(data))
+        f.write(_sanitize_for_log(data))
         f.write("\n")
 
 
@@ -122,8 +160,8 @@ def send_bot_message(dialog_id: str, message: str, bot_id: str = ""):
     }
 
     r = requests.post(url, data=payload, timeout=20)
-    write_log("BITRIX_SEND_REQUEST", payload)
-    write_log("BITRIX_SEND_RESPONSE", f"{r.status_code} {r.text}")
+    write_log("BITRIX_SEND_REQUEST", {"DIALOG_ID": dialog_id, "MESSAGE": message[:200]})
+    write_log("BITRIX_SEND_RESPONSE", f"{r.status_code}")
     r.raise_for_status()
     return r.text
 
@@ -138,8 +176,20 @@ async def bitrix_bot(request: Request):
     raw = await request.body()
     payload = parse_bitrix_form(raw)
 
-    write_log("RAW", raw.decode("utf-8", errors="ignore"))
-    write_log("PARSED", payload)
+    # ── Webhook authentication ────────────────────────────────────────────
+    if WEBHOOK_TOKEN:
+        incoming_token = (
+            payload.get("auth", {}).get("application_token", "")
+            if isinstance(payload.get("auth"), dict)
+            else ""
+        )
+        if not incoming_token:
+            incoming_token = payload.get("application_token", "")
+        if incoming_token != WEBHOOK_TOKEN:
+            logger.warning("Rejected webhook: invalid or missing application_token")
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    write_log("EVENT", {"event": payload.get("event", ""), "data_keys": list((payload.get("data") or {}).keys())})
 
     event = payload.get("event", "")
     params = payload.get("data", {}).get("PARAMS", {}) or {}
@@ -153,10 +203,9 @@ async def bitrix_bot(request: Request):
         {
             "event": event,
             "dialog_id": dialog_id,
-            "message_text": message_text,
+            "message_text": message_text[:200] if message_text else "",
             "bot_id": bot_id,
             "has_params": bool(params),
-            "client_id_source": "BITRIX_CLIENT_ID" if os.getenv("BITRIX_CLIENT_ID", "").strip() else "BITRIX_BOT_CLIENT_ID",
         },
     )
 

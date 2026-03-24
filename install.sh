@@ -422,8 +422,9 @@ step_collect_config() {
     # Webhook token
     echo ""
     print_info "Bitrix передаёт application_token с каждым webhook-событием."
-    print_info "Токен указан в настройках приложения Bitrix24."
-    ask_optional BITRIX_WEBHOOK_TOKEN "application_token для верификации webhook"
+    print_info "Если у вас уже есть токен — введите его. Если нет — оставьте пустым:"
+    print_info "токен будет автоматически захвачен из первого входящего события Bitrix."
+    ask_optional BITRIX_WEBHOOK_TOKEN "application_token (или Enter для автозахвата)"
 
     # Monitor IP restriction
     echo ""

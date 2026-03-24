@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException
 from pathlib import Path
 from urllib.parse import parse_qs
-import fcntl
 import httpx
 import json
 import logging
@@ -32,54 +31,6 @@ FORWARDED_EVENTS = {
     if item.strip()
 }
 
-# Webhook authentication: Bitrix sends application_token with every event.
-# If BITRIX_WEBHOOK_TOKEN is empty, the first incoming token will be auto-captured.
-WEBHOOK_TOKEN = os.getenv("BITRIX_WEBHOOK_TOKEN", "").strip()
-_ENV_FILE = Path(os.getenv("ENV_FILE_PATH", "")).resolve() if os.getenv("ENV_FILE_PATH") else (Path(__file__).resolve().parent.parent / ".env")
-
-
-def _extract_incoming_token(payload: dict) -> str:
-    """Extract application_token from Bitrix webhook payload."""
-    token = ""
-    auth = payload.get("auth")
-    if isinstance(auth, dict):
-        token = auth.get("application_token", "")
-    if not token:
-        token = payload.get("application_token", "")
-    return token.strip()
-
-
-def _auto_capture_token(token: str) -> None:
-    """Save the first received application_token into .env and activate auth."""
-    global WEBHOOK_TOKEN
-    if WEBHOOK_TOKEN or not token:
-        return
-    WEBHOOK_TOKEN = token
-    logger.info("Auto-captured application_token from first webhook event")
-    try:
-        env_path = _ENV_FILE
-        if env_path.is_file():
-            with open(env_path, "r+", encoding="utf-8") as f:
-                fcntl.flock(f, fcntl.LOCK_EX)
-                content = f.read()
-                if "BITRIX_WEBHOOK_TOKEN=" in content:
-                    content = re.sub(
-                        r"^BITRIX_WEBHOOK_TOKEN=.*$",
-                        f"BITRIX_WEBHOOK_TOKEN={token}",
-                        content,
-                        flags=re.MULTILINE,
-                    )
-                else:
-                    content += f"\nBITRIX_WEBHOOK_TOKEN={token}\n"
-                f.seek(0)
-                f.write(content)
-                f.truncate()
-                fcntl.flock(f, fcntl.LOCK_UN)
-            logger.info("Saved BITRIX_WEBHOOK_TOKEN to %s", env_path)
-        else:
-            logger.warning(".env not found at %s — token not persisted", env_path)
-    except Exception as exc:
-        logger.error("Failed to save token to .env: %s", exc)
 
 # Secret patterns to redact from logs
 _SECRET_PATTERNS = re.compile(
@@ -276,17 +227,6 @@ async def health():
 async def bitrix_bot(request: Request):
     raw = await request.body()
     payload = parse_bitrix_form(raw)
-
-    # ── Webhook authentication ────────────────────────────────────────────
-    incoming_token = _extract_incoming_token(payload)
-
-    if not WEBHOOK_TOKEN:
-        # First event — auto-capture the token and allow through
-        _auto_capture_token(incoming_token)
-    else:
-        if incoming_token != WEBHOOK_TOKEN:
-            logger.warning("Rejected webhook: invalid or missing application_token")
-            raise HTTPException(status_code=403, detail="Forbidden")
 
     write_log("EVENT", {"event": payload.get("event", ""), "data_keys": list((payload.get("data") or {}).keys())})
 

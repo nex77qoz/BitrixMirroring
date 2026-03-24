@@ -66,7 +66,6 @@ sudo bash install.sh
 - **HTTP security headers** — HSTS, X-Content-Type-Options, X-Frame-Options и др.;
 - **Rate limiting** — nginx limit_req для `/bitrix/bot` и `/monitor`;
 - **IP-ограничение** для `/monitor`;
-- **Webhook-аутентификация** — проверка `application_token` Bitrix;
 - **Fail2ban** — автоматическая блокировка IP при превышении лимитов;
 - **UFW файрвол** — только порты 22, 80, 443;
 - **Logrotate** — ежедневная ротация логов, хранение 7 дней;
@@ -621,7 +620,6 @@ sudo systemctl restart bitrix-telegram-mirror.service
 5. в `.env` задан `MONITOR_PASSWORD`;
 6. `MIRROR_STATE_DB_PATH` указывает на один и тот же SQLite-файл для mirror и monitor;
 7. в Bitrix зарегистрирован webhook URL `https://bot.example.com/bitrix/bot`;
-8. `BITRIX_WEBHOOK_TOKEN` задан и совпадает с `application_token` в Bitrix;
 9. HTTPS активен с TLS 1.2+ и security headers;
 10. Fail2ban работает: `sudo fail2ban-client status`;
 11. UFW включен: `sudo ufw status`;
@@ -636,7 +634,6 @@ sudo systemctl restart bitrix-telegram-mirror.service
 
 | Переменная | Описание | По умолчанию |
 |---|---|---|
-| `BITRIX_WEBHOOK_TOKEN` | Токен аутентификации webhook от Bitrix | (обязательный) |
 | `MIRROR_INTERNAL_WEBHOOK_SECRET` | Секрет внутреннего bridge между `server-side/app.py` и `main.py` | (обязательный для bridge) |
 | `TELEGRAM_WEBHOOK_SECRET` | Secret token для Telegram webhook | (обязательный для webhook mode) |
 | `MAX_FILE_SIZE_BYTES` | Макс. размер файла для пересылки | `104857600` (100 МБ) |

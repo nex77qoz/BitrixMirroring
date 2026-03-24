@@ -487,13 +487,6 @@ step_collect_config() {
         SOCKS5_PROXY_URL=""
     fi
 
-    # Webhook token
-    echo ""
-    print_info "Bitrix передаёт application_token с каждым webhook-событием."
-    print_info "Если у вас уже есть токен — введите его. Если нет — оставьте пустым:"
-    print_info "токен будет автоматически захвачен из первого входящего события Bitrix."
-    ask_optional BITRIX_WEBHOOK_TOKEN "application_token (или Enter для автозахвата)"
-
     # Monitor IP restriction
     echo ""
     print_info "Ограничение доступа к /monitor по IP-адресам."
@@ -534,9 +527,6 @@ SOCKS5_PROXY_URL=$(env_escape "${SOCKS5_PROXY_URL}")
 BITRIX_WEBHOOK_BASE=$(env_escape "${BITRIX_WEBHOOK_BASE}")
 BITRIX_BOT_ID=$(env_escape "${BITRIX_BOT_ID}")
 BITRIX_BOT_CLIENT_ID=$(env_escape "${BITRIX_BOT_CLIENT_ID}")
-
-# Безопасность: webhook authentication
-BITRIX_WEBHOOK_TOKEN=$(env_escape "${BITRIX_WEBHOOK_TOKEN:-}")
 
 # Мгновенный Bitrix -> Telegram bridge
 BITRIX_WEBHOOK_BRIDGE_ENABLED=${BITRIX_WEBHOOK_BRIDGE_ENABLED}

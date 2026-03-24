@@ -82,6 +82,10 @@ class MirrorStateStore:
             last_seen_bitrix_likes,
         )
 
+    async def cleanup_old_links(self, max_age_seconds: int = 7 * 24 * 3600) -> int:
+        """Delete message_links older than max_age_seconds. Returns count of deleted rows."""
+        return await asyncio.to_thread(self._cleanup_old_links_sync, max_age_seconds)
+
     def _initialize_sync(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
@@ -388,6 +392,19 @@ class MirrorStateStore:
                 (int(bitrix_liked_by_bot), last_seen_bitrix_likes, now, bitrix_message_id),
             )
             connection.commit()
+
+    def _cleanup_old_links_sync(self, max_age_seconds: int) -> int:
+        cutoff = int(time.time()) - max_age_seconds
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM message_links WHERE created_at_unix < ?",
+                (cutoff,),
+            )
+            deleted = cursor.rowcount
+            connection.commit()
+        if deleted:
+            logger.info("Cleaned up %s old message link(s) older than %s seconds", deleted, max_age_seconds)
+        return deleted
 
     def _row_to_link(self, row: Optional[sqlite3.Row]) -> Optional[MessageMirrorLink]:
         if row is None:

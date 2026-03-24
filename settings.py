@@ -183,6 +183,21 @@ class Settings:
     bitrix_send_queue_maxsize: int
     bitrix_send_workers: int
     bitrix_rescan_recent_messages_limit: int
+    max_file_size_bytes: int
+    file_cache_dir: str
+    file_cache_max_bytes: int
+    db_cleanup_max_age_seconds: int
+    mirror_http_host: str
+    mirror_http_port: int
+    bitrix_webhook_bridge_enabled: bool
+    mirror_internal_event_path: str
+    mirror_internal_webhook_secret: Optional[str]
+    telegram_webhook_enabled: bool
+    telegram_webhook_path: str
+    telegram_webhook_public_url: Optional[str]
+    telegram_webhook_secret: Optional[str]
+    telegram_webhook_drop_pending_updates: bool
+    telegram_webhook_strict_verify: bool
 
     @staticmethod
     def from_env() -> "Settings":
@@ -222,6 +237,32 @@ class Settings:
         if not enable_socks5_proxy:
             socks5_proxy_url = None
 
+        mirror_http_host = _read_env("MIRROR_HTTP_HOST", "127.0.0.1")
+        mirror_http_port = _parse_int("MIRROR_HTTP_PORT", "8090", minimum=1)
+        bitrix_webhook_bridge_enabled = _parse_bool("BITRIX_WEBHOOK_BRIDGE_ENABLED", "false")
+        mirror_internal_event_path = _read_env("MIRROR_INTERNAL_EVENT_PATH", "/internal/bitrix/event")
+        if not mirror_internal_event_path.startswith("/"):
+            mirror_internal_event_path = f"/{mirror_internal_event_path}"
+        mirror_internal_webhook_secret = _read_env("MIRROR_INTERNAL_WEBHOOK_SECRET", "") or None
+        if bitrix_webhook_bridge_enabled and not mirror_internal_webhook_secret:
+            raise ValueError("MIRROR_INTERNAL_WEBHOOK_SECRET is required when BITRIX_WEBHOOK_BRIDGE_ENABLED=true")
+
+        telegram_webhook_enabled = _parse_bool("TELEGRAM_WEBHOOK_ENABLED", "false")
+        telegram_webhook_path = _read_env("TELEGRAM_WEBHOOK_PATH", "/telegram/webhook")
+        if not telegram_webhook_path.startswith("/"):
+            telegram_webhook_path = f"/{telegram_webhook_path}"
+        telegram_webhook_public_url = _read_env("TELEGRAM_WEBHOOK_PUBLIC_URL", "") or None
+        telegram_webhook_secret = _read_env("TELEGRAM_WEBHOOK_SECRET", "") or None
+        telegram_webhook_drop_pending_updates = _parse_bool("TELEGRAM_WEBHOOK_DROP_PENDING_UPDATES", "true")
+        telegram_webhook_strict_verify = _parse_bool("TELEGRAM_WEBHOOK_STRICT_VERIFY", "true")
+        if telegram_webhook_enabled:
+            if not telegram_webhook_public_url:
+                raise ValueError("TELEGRAM_WEBHOOK_PUBLIC_URL is required when TELEGRAM_WEBHOOK_ENABLED=true")
+            if not telegram_webhook_public_url.startswith(("http://", "https://")):
+                raise ValueError("TELEGRAM_WEBHOOK_PUBLIC_URL must start with http:// or https://")
+            if not telegram_webhook_secret:
+                raise ValueError("TELEGRAM_WEBHOOK_SECRET is required when TELEGRAM_WEBHOOK_ENABLED=true")
+
         return Settings(
             telegram_bot_token=telegram_bot_token,
             bitrix_webhook_base=bitrix_webhook_base,
@@ -249,5 +290,20 @@ class Settings:
             bitrix_send_queue_maxsize=_parse_int("BITRIX_SEND_QUEUE_MAXSIZE", "1000", minimum=1),
             bitrix_send_workers=_parse_int("BITRIX_SEND_WORKERS", "2", minimum=1),
             bitrix_rescan_recent_messages_limit=_parse_int("BITRIX_RESCAN_RECENT_MESSAGES_LIMIT", "100", minimum=1),
+            max_file_size_bytes=_parse_int("MAX_FILE_SIZE_BYTES", str(100 * 1024 * 1024), minimum=1),
+            file_cache_dir=_read_env("FILE_CACHE_DIR", ""),
+            file_cache_max_bytes=_parse_int("FILE_CACHE_MAX_BYTES", str(10 * 1024 * 1024 * 1024), minimum=0),
+            db_cleanup_max_age_seconds=_parse_int("DB_CLEANUP_MAX_AGE_SECONDS", str(7 * 24 * 3600), minimum=3600),
+            mirror_http_host=mirror_http_host,
+            mirror_http_port=mirror_http_port,
+            bitrix_webhook_bridge_enabled=bitrix_webhook_bridge_enabled,
+            mirror_internal_event_path=mirror_internal_event_path,
+            mirror_internal_webhook_secret=mirror_internal_webhook_secret,
+            telegram_webhook_enabled=telegram_webhook_enabled,
+            telegram_webhook_path=telegram_webhook_path,
+            telegram_webhook_public_url=telegram_webhook_public_url,
+            telegram_webhook_secret=telegram_webhook_secret,
+            telegram_webhook_drop_pending_updates=telegram_webhook_drop_pending_updates,
+            telegram_webhook_strict_verify=telegram_webhook_strict_verify,
         )
 

@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
+import shutil
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 from telegram import Message, ReactionTypeEmoji
@@ -35,9 +38,17 @@ class MirrorService:
         self._state_lock = asyncio.Lock()
         self._send_queue: asyncio.Queue[Message] = asyncio.Queue(maxsize=settings.bitrix_send_queue_maxsize)
         self._tg_to_mapping: dict[int, ChatMapping] = {m.tg_chat_id: m for m in settings.chat_mappings}
+        self._bitrix_to_mapping: dict[str, ChatMapping] = {m.bitrix_dialog_id: m for m in settings.chat_mappings}
+        self._cleanup_task: Optional[asyncio.Task[None]] = None
+        self._application: Optional[Application] = None
+        self._bitrix_sync_locks: dict[str, asyncio.Lock] = {}
+        self._bitrix_on_demand_tasks: dict[str, asyncio.Task[None]] = {}
 
     def get_mapping_for_telegram_chat(self, tg_chat_id: int) -> Optional[ChatMapping]:
         return self._tg_to_mapping.get(tg_chat_id)
+
+    def get_mapping_for_bitrix_dialog(self, dialog_id: str) -> Optional[ChatMapping]:
+        return self._bitrix_to_mapping.get(dialog_id)
 
     def is_allowed_chat(self, message: Message) -> bool:
         return message.chat_id in self._tg_to_mapping
@@ -79,6 +90,7 @@ class MirrorService:
         return "\n".join(lines).strip()
 
     async def start(self, application: Application) -> None:
+        self._application = application
         self._stop_event.clear()
         await self.state_store.initialize()
         await self._cleanup_stale_chat_links()
@@ -86,13 +98,29 @@ class MirrorService:
             asyncio.create_task(self._telegram_to_bitrix_worker(), name=f"bitrix-send-worker-{index}")
             for index in range(self.settings.bitrix_send_workers)
         ]
+        self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop(), name="periodic-cleanup")
         await self.start_bitrix_polling(application)
 
     async def stop(self) -> None:
         self._stop_event.set()
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._cleanup_task = None
         for task in self._bitrix_poll_tasks:
             await task
         self._bitrix_poll_tasks.clear()
+        for task in self._bitrix_on_demand_tasks.values():
+            task.cancel()
+        for task in self._bitrix_on_demand_tasks.values():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._bitrix_on_demand_tasks.clear()
         for worker in self._telegram_to_bitrix_workers:
             worker.cancel()
         for worker in self._telegram_to_bitrix_workers:
@@ -101,9 +129,46 @@ class MirrorService:
             except asyncio.CancelledError:
                 pass
         self._telegram_to_bitrix_workers.clear()
+        self._application = None
 
     async def enqueue_telegram_message(self, message: Message) -> None:
         await self._send_queue.put(message)
+
+    async def schedule_bitrix_dialog_sync(self, dialog_id: str, *, trigger: str) -> bool:
+        if not self.settings.sync_bitrix_to_telegram:
+            return False
+        if self._application is None:
+            logger.warning("Dropping Bitrix webhook for dialog %s because application is not ready", dialog_id)
+            return False
+        mapping = self.get_mapping_for_bitrix_dialog(dialog_id)
+        if mapping is None:
+            logger.debug("Ignoring Bitrix webhook for unmapped dialog %s", dialog_id)
+            return False
+
+        existing = self._bitrix_on_demand_tasks.get(dialog_id)
+        if existing is not None and not existing.done():
+            logger.debug("Bitrix sync already scheduled for dialog %s; coalescing trigger=%s", dialog_id, trigger)
+            return True
+
+        task = asyncio.create_task(
+            self._sync_bitrix_dialog(self._application, mapping, trigger=trigger),
+            name=f"bitrix-webhook-sync-{dialog_id}",
+        )
+        self._bitrix_on_demand_tasks[dialog_id] = task
+
+        def _clear_task(completed: asyncio.Task[None]) -> None:
+            current = self._bitrix_on_demand_tasks.get(dialog_id)
+            if current is completed:
+                self._bitrix_on_demand_tasks.pop(dialog_id, None)
+            try:
+                completed.result()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("On-demand Bitrix sync failed for dialog %s", dialog_id)
+
+        task.add_done_callback(_clear_task)
+        return True
 
     async def sync_telegram_edit(self, message: Message) -> None:
         link = await self.state_store.get_link_by_telegram_message(
@@ -240,7 +305,7 @@ class MirrorService:
             await self._initialize_bitrix_cursor(mapping)
             while not self._stop_event.is_set():
                 try:
-                    await self._sync_bitrix_messages(application, mapping)
+                    await self._sync_bitrix_dialog(application, mapping, trigger="poll")
                     backoff = self.settings.bitrix_poll_error_backoff_seconds
                     await asyncio.wait_for(self._stop_event.wait(), timeout=self.settings.bitrix_poll_interval_seconds)
                 except asyncio.TimeoutError:
@@ -257,6 +322,13 @@ class MirrorService:
             raise
         finally:
             logger.info("Bitrix polling loop stopped for dialog %s", dialog_id)
+
+    async def _sync_bitrix_dialog(self, application: Application, mapping: ChatMapping, *, trigger: str) -> None:
+        dialog_id = mapping.bitrix_dialog_id
+        lock = self._bitrix_sync_locks.setdefault(dialog_id, asyncio.Lock())
+        async with lock:
+            logger.debug("Running Bitrix sync for dialog %s via trigger=%s", dialog_id, trigger)
+            await self._sync_bitrix_messages(application, mapping)
 
     async def _initialize_bitrix_cursor(self, mapping: ChatMapping) -> None:
         dialog_id = mapping.bitrix_dialog_id
@@ -377,6 +449,15 @@ class MirrorService:
             raise ValueError("No uploadable file attachment found in message")
         telegram_file = await file_source.get_file()
         file_bytes = await telegram_file.download_as_bytearray()
+        if len(file_bytes) > self.settings.max_file_size_bytes:
+            logger.warning(
+                "Telegram file too large (%s bytes > %s max), skipping upload for message %s",
+                len(file_bytes), self.settings.max_file_size_bytes, message.message_id,
+            )
+            return await self.bitrix.send_message(
+                self.render_telegram_message(message) + "\n\n[Файл слишком большой для пересылки]",
+                dialog_id=dialog_id,
+            )
         file_path_name = telegram_file.file_path.rsplit("/", 1)[-1] if telegram_file.file_path else None
         filename = original_name or file_path_name or fallback_name
         return await self.bitrix.send_photo(
@@ -405,6 +486,16 @@ class MirrorService:
             )
         try:
             file_bytes = await self.bitrix.download_file_by_id(attachment.file_id, fallback_url=attachment.url_download)
+            if len(file_bytes) > self.settings.max_file_size_bytes:
+                logger.warning(
+                    "Bitrix file too large (%s bytes > %s max), sending text only for message %s",
+                    len(file_bytes), self.settings.max_file_size_bytes, bitrix_message.message_id,
+                )
+                return await application.bot.send_message(
+                    chat_id=tg_chat_id,
+                    text=rendered + "\n\n[Файл слишком большой для пересылки]",
+                    disable_web_page_preview=self.settings.disable_link_preview,
+                )
             mime = attachment.mime_type or ""
             if mime.startswith("image/"):
                 return await application.bot.send_photo(
@@ -733,3 +824,64 @@ class MirrorService:
         digest.update(b"|")
         digest.update(";".join(str(file_id) for file_id in bitrix_message.file_ids).encode("ascii", errors="ignore"))
         return digest.hexdigest()
+
+    # ── Periodic cleanup ──────────────────────────────────────────────────
+
+    async def _periodic_cleanup_loop(self) -> None:
+        """Run DB cleanup and file cache cleanup every hour."""
+        cleanup_interval = 3600  # 1 hour
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=cleanup_interval)
+                break  # stop_event was set
+            except asyncio.TimeoutError:
+                pass
+            try:
+                deleted = await self.state_store.cleanup_old_links(
+                    max_age_seconds=self.settings.db_cleanup_max_age_seconds,
+                )
+                if deleted:
+                    logger.info("Periodic DB cleanup: removed %s old link(s)", deleted)
+                self._cleanup_file_cache()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Periodic cleanup failed")
+
+    def _cleanup_file_cache(self) -> None:
+        """Remove oldest files from file_cache_dir if total size exceeds file_cache_max_bytes."""
+        cache_dir = self.settings.file_cache_dir
+        if not cache_dir:
+            return
+        cache_path = Path(cache_dir)
+        if not cache_path.is_dir():
+            return
+        max_bytes = self.settings.file_cache_max_bytes
+        if max_bytes <= 0:
+            return
+
+        files: list[tuple[float, int, Path]] = []
+        total_size = 0
+        for entry in cache_path.iterdir():
+            if entry.is_file():
+                stat = entry.stat()
+                files.append((stat.st_mtime, stat.st_size, entry))
+                total_size += stat.st_size
+
+        if total_size <= max_bytes:
+            return
+
+        # Sort by modification time, oldest first
+        files.sort(key=lambda x: x[0])
+        removed = 0
+        for mtime, size, fpath in files:
+            if total_size <= max_bytes:
+                break
+            try:
+                fpath.unlink()
+                total_size -= size
+                removed += 1
+            except OSError:
+                pass
+        if removed:
+            logger.info("File cache cleanup: removed %s file(s), cache now ~%s MB", removed, total_size // (1024 * 1024))

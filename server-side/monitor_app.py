@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
+import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -50,6 +51,15 @@ DB_PATH = (
 
 MONITOR_USERNAME = os.getenv("MONITOR_USERNAME", "admin")
 MONITOR_PASSWORD = os.getenv("MONITOR_PASSWORD", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_WEBHOOK_ENABLED = os.getenv("TELEGRAM_WEBHOOK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+TELEGRAM_WEBHOOK_PUBLIC_URL = os.getenv("TELEGRAM_WEBHOOK_PUBLIC_URL", "").strip().rstrip("/")
+TELEGRAM_WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "/telegram/webhook").strip() or "/telegram/webhook"
+BITRIX_WEBHOOK_BRIDGE_ENABLED = os.getenv("BITRIX_WEBHOOK_BRIDGE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+MIRROR_INTERNAL_BASE_URL = os.getenv("MIRROR_INTERNAL_BASE_URL", "").strip().rstrip("/")
+MIRROR_INTERNAL_EVENT_PATH = os.getenv("MIRROR_INTERNAL_EVENT_PATH", "/internal/bitrix/event").strip() or "/internal/bitrix/event"
+MIRROR_HTTP_HOST = os.getenv("MIRROR_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+MIRROR_HTTP_PORT = int(os.getenv("MIRROR_HTTP_PORT", "8090"))
 
 # Mapping from short key to systemd service name
 SERVICES: dict[str, str] = {
@@ -291,6 +301,94 @@ def _get_journal(service: str, lines: int = 50) -> list[str]:
         return [f"Ошибка чтения journalctl: {exc}"]
 
 
+def _get_telegram_webhook_status() -> dict:
+    expected_url = f"{TELEGRAM_WEBHOOK_PUBLIC_URL}{TELEGRAM_WEBHOOK_PATH}" if TELEGRAM_WEBHOOK_PUBLIC_URL else ""
+    status = {
+        "enabled": TELEGRAM_WEBHOOK_ENABLED,
+        "expected_url": expected_url,
+        "configured_path": TELEGRAM_WEBHOOK_PATH,
+        "internal_health_url": f"http://{MIRROR_HTTP_HOST}:{MIRROR_HTTP_PORT}/health",
+    }
+
+    if not TELEGRAM_WEBHOOK_ENABLED:
+        status["mode"] = "polling"
+        return status
+    if not TELEGRAM_BOT_TOKEN:
+        status["mode"] = "webhook"
+        status["error"] = "TELEGRAM_BOT_TOKEN not configured"
+        return status
+
+    try:
+        response = httpx.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo",
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            status["mode"] = "webhook"
+            status["error"] = payload.get("description") or "Telegram API returned not ok"
+            return status
+        result = payload.get("result") or {}
+        status.update(
+            {
+                "mode": "webhook",
+                "actual_url": result.get("url", ""),
+                "pending_update_count": result.get("pending_update_count", 0),
+                "last_error_date": result.get("last_error_date"),
+                "last_error_message": result.get("last_error_message", ""),
+                "max_connections": result.get("max_connections"),
+                "ip_address": result.get("ip_address", ""),
+                "has_custom_certificate": bool(result.get("has_custom_certificate")),
+                "verified": result.get("url", "") == expected_url,
+            }
+        )
+        return status
+    except Exception as exc:
+        status["mode"] = "webhook"
+        status["error"] = str(exc)
+        return status
+
+
+def _get_bitrix_bridge_status() -> dict:
+    health_url = f"http://{MIRROR_HTTP_HOST}:{MIRROR_HTTP_PORT}/health"
+    expected_event_url = f"{MIRROR_INTERNAL_BASE_URL}{MIRROR_INTERNAL_EVENT_PATH}" if MIRROR_INTERNAL_BASE_URL else ""
+    status = {
+        "enabled": BITRIX_WEBHOOK_BRIDGE_ENABLED,
+        "health_url": health_url,
+        "expected_event_url": expected_event_url,
+        "configured_base_url": MIRROR_INTERNAL_BASE_URL,
+        "configured_event_path": MIRROR_INTERNAL_EVENT_PATH,
+        "reachable": False,
+        "main_ok": False,
+        "mirror_bridge_enabled": False,
+        "verified": False,
+    }
+
+    if not BITRIX_WEBHOOK_BRIDGE_ENABLED:
+        status["mode"] = "disabled"
+        return status
+
+    try:
+        response = httpx.get(health_url, timeout=5)
+        response.raise_for_status()
+        payload = response.json()
+        status["reachable"] = True
+        status["main_ok"] = bool(payload.get("ok"))
+        status["mirror_bridge_enabled"] = bool(payload.get("bitrix_webhook_bridge_enabled"))
+        status["telegram_webhook_enabled"] = bool(payload.get("telegram_webhook_enabled"))
+        webhook_status = payload.get("telegram_webhook_status")
+        if isinstance(webhook_status, dict):
+            status["mirror_telegram_webhook_status"] = webhook_status
+        status["verified"] = status["main_ok"] and status["mirror_bridge_enabled"]
+        if not status["mirror_bridge_enabled"]:
+            status["error"] = "Main mirror process reachable, but Bitrix bridge is disabled there"
+        return status
+    except Exception as exc:
+        status["error"] = str(exc)
+        return status
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -332,6 +430,8 @@ def api_status(_: str = Depends(_check_auth)):
         "services": {k: _get_service_info(v) for k, v in SERVICES.items()},
         "db": _get_db_stats(),
         "env_mappings": _get_env_mappings(),
+    "bitrix_bridge": _get_bitrix_bridge_status(),
+    "telegram_webhook": _get_telegram_webhook_status(),
         "ts": int(time.time()),
     }
 
@@ -504,6 +604,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <!-- Injected by JS -->
         <div class="bg-white rounded-xl shadow p-5 h-40 animate-pulse"></div>
         <div class="bg-white rounded-xl shadow p-5 h-40 animate-pulse"></div>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Telegram Webhook</h2>
+      <div id="telegramWebhookCard" class="bg-white rounded-xl shadow p-5">
+        <div class="text-sm text-gray-400">Загрузка…</div>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Bitrix Bridge</h2>
+      <div id="bitrixBridgeCard" class="bg-white rounded-xl shadow p-5">
+        <div class="text-sm text-gray-400">Загрузка…</div>
       </div>
     </section>
 
@@ -721,11 +835,121 @@ async function loadStatus() {
     if (!r.ok) return;
     const data = await r.json();
     renderServices(data.services || {});
+    renderBitrixBridge(data.bitrix_bridge || {});
+    renderTelegramWebhook(data.telegram_webhook || {});
     renderStats(data.db || {});
     renderEnvMappings(data.env_mappings || []);
     const t = new Date(data.ts * 1000).toLocaleTimeString();
     document.getElementById('lastUpdated').textContent = 'Обновлено: ' + t;
   } catch (_) { /* network hiccup – ignore */ }
+}
+
+function renderBitrixBridge(info) {
+  const el = document.getElementById('bitrixBridgeCard');
+  const enabled = !!info.enabled;
+  const reachable = !!info.reachable;
+  const verified = !!info.verified;
+  const badge = !enabled
+    ? 'bg-gray-100 text-gray-600'
+    : verified
+      ? 'bg-green-100 text-green-800'
+      : reachable
+        ? 'bg-amber-100 text-amber-800'
+        : 'bg-red-100 text-red-800';
+  const badgeLabel = !enabled
+    ? 'Disabled'
+    : verified
+      ? 'Bridge OK'
+      : reachable
+        ? 'Config mismatch'
+        : 'Unreachable';
+  const error = info.error || '—';
+  const healthUrl = info.health_url || '—';
+  const eventUrl = info.expected_event_url || '—';
+  const mainEnabled = info.mirror_bridge_enabled ? 'true' : 'false';
+  const reachableText = reachable ? 'yes' : 'no';
+
+  el.innerHTML = `
+    <div class="flex items-start justify-between gap-4 mb-4">
+      <div>
+        <p class="text-xs text-gray-500 uppercase tracking-wide font-medium">Mode</p>
+        <p class="font-semibold text-gray-800 mt-0.5">${enabled ? 'bridge' : 'disabled'}</p>
+      </div>
+      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${badge}">${escHtml(badgeLabel)}</span>
+    </div>
+    <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm text-gray-600">
+      <div>
+        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Main health URL</dt>
+        <dd class="font-mono break-all text-xs">${escHtml(healthUrl)}</dd>
+      </div>
+      <div>
+        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Forward target</dt>
+        <dd class="font-mono break-all text-xs">${escHtml(eventUrl)}</dd>
+      </div>
+      <div>
+        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Reachable</dt>
+        <dd>${escHtml(reachableText)}</dd>
+      </div>
+      <div>
+        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Bridge enabled in main</dt>
+        <dd>${escHtml(mainEnabled)}</dd>
+      </div>
+      <div class="md:col-span-2">
+        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Last error</dt>
+        <dd class="break-all text-xs">${escHtml(error)}</dd>
+      </div>
+    </dl>
+  `;
+}
+
+function renderTelegramWebhook(info) {
+  const el = document.getElementById('telegramWebhookCard');
+  const enabled = !!info.enabled;
+  const verified = info.verified === true;
+  const mode = enabled ? 'webhook' : 'polling';
+  const badge = !enabled
+    ? 'bg-gray-100 text-gray-600'
+    : verified
+      ? 'bg-green-100 text-green-800'
+      : 'bg-amber-100 text-amber-800';
+  const badgeLabel = !enabled ? 'Polling' : verified ? 'Webhook OK' : 'Webhook mismatch';
+  const actualUrl = info.actual_url || '—';
+  const expectedUrl = info.expected_url || '—';
+  const error = info.last_error_message || info.error || '—';
+  const pending = info.pending_update_count ?? '—';
+  const ip = info.ip_address || '—';
+
+  el.innerHTML = `
+    <div class="flex items-start justify-between gap-4 mb-4">
+      <div>
+        <p class="text-xs text-gray-500 uppercase tracking-wide font-medium">Mode</p>
+        <p class="font-semibold text-gray-800 mt-0.5">${escHtml(mode)}</p>
+      </div>
+      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${badge}">${escHtml(badgeLabel)}</span>
+    </div>
+    <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm text-gray-600">
+      <div>
+        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Expected URL</dt>
+        <dd class="font-mono break-all text-xs">${escHtml(expectedUrl)}</dd>
+      </div>
+      <div>
+        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Actual URL</dt>
+        <dd class="font-mono break-all text-xs">${escHtml(actualUrl)}</dd>
+      </div>
+      <div>
+        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Pending updates</dt>
+        <dd>${escHtml(String(pending))}</dd>
+      </div>
+      <div>
+        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Telegram IP</dt>
+        <dd class="font-mono text-xs">${escHtml(ip)}</dd>
+      </div>
+      <div class="md:col-span-2">
+        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Last error</dt>
+        <dd class="break-all text-xs">${escHtml(error)}</dd>
+      </div>
+    </dl>
+  `;
 }
 
 function startPolling() {

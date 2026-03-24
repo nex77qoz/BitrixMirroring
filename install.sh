@@ -1160,15 +1160,13 @@ step_health_checks() {
         print_info "Internal /health проверка пропущена: main process работает в legacy polling mode"
     fi
 
-    # Webhook /bitrix/bot endpoint (POST empty body → 403 means auth is active)
+    # Webhook /bitrix/bot endpoint
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
         -X POST http://127.0.0.1:8081/bitrix/bot \
         -H "Content-Type: application/json" \
         -d '{}' 2>/dev/null || echo "000")
-    if [[ "$code" == "403" ]]; then
-        print_ok "Endpoint /bitrix/bot доступен, аутентификация активна (HTTP $code)"
-    elif [[ "$code" == "200" ]]; then
-        print_warn "Endpoint /bitrix/bot доступен, но без аутентификации (HTTP $code)"
+    if [[ "$code" == "200" || "$code" == "403" ]]; then
+        print_ok "Endpoint /bitrix/bot доступен (HTTP $code)"
     else
         print_error "Endpoint /bitrix/bot недоступен (HTTP $code)"
         all_ok=false

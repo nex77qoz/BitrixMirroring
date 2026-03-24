@@ -329,10 +329,12 @@ SSHEOF
                 print_ok "SSH-конфигурация обновлена в $sshd_config"
             fi
 
-            # Validate and restart
+            # Validate and restart (Ubuntu=ssh, RHEL=sshd)
+            local ssh_svc="ssh"
+            systemctl list-unit-files sshd.service &>/dev/null && ssh_svc="sshd"
             if sshd -t >> "$LOG_FILE" 2>&1; then
-                run_cmd systemctl restart sshd
-                print_ok "sshd перезапущен с новой конфигурацией"
+                run_cmd systemctl restart "$ssh_svc"
+                print_ok "$ssh_svc перезапущен с новой конфигурацией"
             else
                 print_error "Ошибка в конфигурации sshd! Откатите вручную."
                 [[ -f "$sshd_custom" ]] && rm -f "$sshd_custom"
@@ -350,8 +352,10 @@ SSHEOF
 PubkeyAuthentication yes
 PermitRootLogin prohibit-password
 SSHEOF
+                local ssh_svc="ssh"
+                systemctl list-unit-files sshd.service &>/dev/null && ssh_svc="sshd"
                 if sshd -t >> "$LOG_FILE" 2>&1; then
-                    run_cmd systemctl restart sshd
+                    run_cmd systemctl restart "$ssh_svc"
                     print_ok "Вход по root ограничен (только ключ)"
                 fi
             fi

@@ -301,59 +301,59 @@ def _get_journal(service: str, lines: int = 50) -> list[str]:
         return [f"Ошибка чтения journalctl: {exc}"]
 
 
-    def _get_telegram_webhook_status() -> dict:
-      expected_url = f"{TELEGRAM_WEBHOOK_PUBLIC_URL}{TELEGRAM_WEBHOOK_PATH}" if TELEGRAM_WEBHOOK_PUBLIC_URL else ""
-      status = {
+def _get_telegram_webhook_status() -> dict:
+    expected_url = f"{TELEGRAM_WEBHOOK_PUBLIC_URL}{TELEGRAM_WEBHOOK_PATH}" if TELEGRAM_WEBHOOK_PUBLIC_URL else ""
+    status = {
         "enabled": TELEGRAM_WEBHOOK_ENABLED,
         "expected_url": expected_url,
         "configured_path": TELEGRAM_WEBHOOK_PATH,
         "internal_health_url": f"http://{MIRROR_HTTP_HOST}:{MIRROR_HTTP_PORT}/health",
-      }
+    }
 
-      if not TELEGRAM_WEBHOOK_ENABLED:
+    if not TELEGRAM_WEBHOOK_ENABLED:
         status["mode"] = "polling"
         return status
-      if not TELEGRAM_BOT_TOKEN:
+    if not TELEGRAM_BOT_TOKEN:
         status["mode"] = "webhook"
         status["error"] = "TELEGRAM_BOT_TOKEN not configured"
         return status
 
-      try:
+    try:
         response = httpx.get(
-          f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo",
-          timeout=10,
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo",
+            timeout=10,
         )
         response.raise_for_status()
         payload = response.json()
         if not payload.get("ok"):
-          status["mode"] = "webhook"
-          status["error"] = payload.get("description") or "Telegram API returned not ok"
-          return status
+            status["mode"] = "webhook"
+            status["error"] = payload.get("description") or "Telegram API returned not ok"
+            return status
         result = payload.get("result") or {}
         status.update(
-          {
-            "mode": "webhook",
-            "actual_url": result.get("url", ""),
-            "pending_update_count": result.get("pending_update_count", 0),
-            "last_error_date": result.get("last_error_date"),
-            "last_error_message": result.get("last_error_message", ""),
-            "max_connections": result.get("max_connections"),
-            "ip_address": result.get("ip_address", ""),
-            "has_custom_certificate": bool(result.get("has_custom_certificate")),
-            "verified": result.get("url", "") == expected_url,
-          }
+            {
+                "mode": "webhook",
+                "actual_url": result.get("url", ""),
+                "pending_update_count": result.get("pending_update_count", 0),
+                "last_error_date": result.get("last_error_date"),
+                "last_error_message": result.get("last_error_message", ""),
+                "max_connections": result.get("max_connections"),
+                "ip_address": result.get("ip_address", ""),
+                "has_custom_certificate": bool(result.get("has_custom_certificate")),
+                "verified": result.get("url", "") == expected_url,
+            }
         )
         return status
-      except Exception as exc:
+    except Exception as exc:
         status["mode"] = "webhook"
         status["error"] = str(exc)
         return status
 
 
-    def _get_bitrix_bridge_status() -> dict:
-      health_url = f"http://{MIRROR_HTTP_HOST}:{MIRROR_HTTP_PORT}/health"
-      expected_event_url = f"{MIRROR_INTERNAL_BASE_URL}{MIRROR_INTERNAL_EVENT_PATH}" if MIRROR_INTERNAL_BASE_URL else ""
-      status = {
+def _get_bitrix_bridge_status() -> dict:
+    health_url = f"http://{MIRROR_HTTP_HOST}:{MIRROR_HTTP_PORT}/health"
+    expected_event_url = f"{MIRROR_INTERNAL_BASE_URL}{MIRROR_INTERNAL_EVENT_PATH}" if MIRROR_INTERNAL_BASE_URL else ""
+    status = {
         "enabled": BITRIX_WEBHOOK_BRIDGE_ENABLED,
         "health_url": health_url,
         "expected_event_url": expected_event_url,
@@ -363,13 +363,13 @@ def _get_journal(service: str, lines: int = 50) -> list[str]:
         "main_ok": False,
         "mirror_bridge_enabled": False,
         "verified": False,
-      }
+    }
 
-      if not BITRIX_WEBHOOK_BRIDGE_ENABLED:
+    if not BITRIX_WEBHOOK_BRIDGE_ENABLED:
         status["mode"] = "disabled"
         return status
 
-      try:
+    try:
         response = httpx.get(health_url, timeout=5)
         response.raise_for_status()
         payload = response.json()
@@ -379,12 +379,12 @@ def _get_journal(service: str, lines: int = 50) -> list[str]:
         status["telegram_webhook_enabled"] = bool(payload.get("telegram_webhook_enabled"))
         webhook_status = payload.get("telegram_webhook_status")
         if isinstance(webhook_status, dict):
-          status["mirror_telegram_webhook_status"] = webhook_status
+            status["mirror_telegram_webhook_status"] = webhook_status
         status["verified"] = status["main_ok"] and status["mirror_bridge_enabled"]
         if not status["mirror_bridge_enabled"]:
-          status["error"] = "Main mirror process reachable, but Bitrix bridge is disabled there"
+            status["error"] = "Main mirror process reachable, but Bitrix bridge is disabled there"
         return status
-      except Exception as exc:
+    except Exception as exc:
         status["error"] = str(exc)
         return status
 

@@ -437,55 +437,23 @@ step_collect_config() {
     print_info "Ввод скрыт — символы не отображаются"
     ask_secret TELEGRAM_BOT_TOKEN "Telegram Bot Token"
 
-    echo ""
-    echo -en "  ${YELLOW}Включить Telegram webhook mode и отключить polling в проде? (Y/n): ${RESET}"
-    read -r enable_tg_webhook
-    if [[ "${enable_tg_webhook,,}" == "n" ]]; then
-        TELEGRAM_WEBHOOK_ENABLED="false"
-    else
-        TELEGRAM_WEBHOOK_ENABLED="true"
-        print_info "Ввод скрыт — символы не отображаются"
-        ask_secret TELEGRAM_WEBHOOK_SECRET "Секрет Telegram webhook"
-    fi
+    TELEGRAM_WEBHOOK_ENABLED="true"
+    print_info "Ввод скрыт — символы не отображаются"
+    ask_secret TELEGRAM_WEBHOOK_SECRET "Секрет Telegram webhook"
 
-    echo ""
-    echo -en "  ${YELLOW}Включить Bitrix -> main internal bridge для мгновенной доставки? (Y/n): ${RESET}"
-    read -r enable_bridge
-    if [[ "${enable_bridge,,}" == "n" ]]; then
-        BITRIX_WEBHOOK_BRIDGE_ENABLED="false"
-        MIRROR_INTERNAL_WEBHOOK_SECRET=""
-    else
-        BITRIX_WEBHOOK_BRIDGE_ENABLED="true"
-        print_info "Ввод скрыт — символы не отображаются"
-        ask_secret MIRROR_INTERNAL_WEBHOOK_SECRET "Секрет внутреннего bridge"
-    fi
+    BITRIX_WEBHOOK_BRIDGE_ENABLED="true"
+    MIRROR_INTERNAL_WEBHOOK_SECRET="${TELEGRAM_WEBHOOK_SECRET}"
 
     MIRROR_HTTP_HOST="127.0.0.1"
     MIRROR_HTTP_PORT="8090"
     MIRROR_INTERNAL_BASE_URL="http://127.0.0.1:8090"
     MIRROR_INTERNAL_EVENT_PATH="/internal/bitrix/event"
 
-    if [[ "$BITRIX_WEBHOOK_BRIDGE_ENABLED" == "true" ]]; then
-        BITRIX_POLL_INTERVAL_SECONDS_VALUE="60"
-    else
-        BITRIX_POLL_INTERVAL_SECONDS_VALUE="5"
-    fi
+    BITRIX_POLL_INTERVAL_SECONDS_VALUE="60"
 
     # Monitor password
     print_info "Ввод скрыт — символы не отображаются"
     ask_password MONITOR_PASSWORD "Пароль для мониторинг-дашборда (/monitor)"
-
-    # Optional proxy
-    echo ""
-    echo -en "  ${YELLOW}Использовать SOCKS5-прокси? (y/N): ${RESET}"
-    read -r use_proxy
-    if [[ "${use_proxy,,}" == "y" ]]; then
-        ENABLE_SOCKS5_PROXY="true"
-        ask_input SOCKS5_PROXY_URL "URL SOCKS5-прокси (socks5://user:pass@host:port)"
-    else
-        ENABLE_SOCKS5_PROXY="false"
-        SOCKS5_PROXY_URL=""
-    fi
 
     # Monitor IP restriction
     echo ""
@@ -518,10 +486,6 @@ TELEGRAM_WEBHOOK_PATH=$(env_escape "${TELEGRAM_WEBHOOK_PATH}")
 TELEGRAM_WEBHOOK_SECRET=$(env_escape "${TELEGRAM_WEBHOOK_SECRET:-}")
 TELEGRAM_WEBHOOK_DROP_PENDING_UPDATES=true
 TELEGRAM_WEBHOOK_STRICT_VERIFY=true
-
-# SOCKS5 proxy
-ENABLE_SOCKS5_PROXY=${ENABLE_SOCKS5_PROXY}
-SOCKS5_PROXY_URL=$(env_escape "${SOCKS5_PROXY_URL}")
 
 # Bitrix
 BITRIX_WEBHOOK_BASE=$(env_escape "${BITRIX_WEBHOOK_BASE}")

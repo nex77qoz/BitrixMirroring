@@ -276,6 +276,16 @@ step_create_service_user() {
     # Grant ownership of install directory
     chown -R "$SVC_USER:$SVC_GROUP" "$INSTALL_DIR"
     print_ok "Владелец $INSTALL_DIR → $SVC_USER:$SVC_GROUP"
+
+    # Allow the service user to restart the bot services without a password
+    # (required by the monitoring dashboard's restart endpoint)
+    local sudoers_file="/etc/sudoers.d/bitrix-bot-services"
+    cat > "$sudoers_file" << EOF
+# Allow $SVC_USER to restart bot services (used by monitoring dashboard)
+${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-bot, /usr/bin/systemctl restart bitrix-monitor
+EOF
+    chmod 440 "$sudoers_file"
+    print_ok "Sudoers-правило создано: $sudoers_file"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────

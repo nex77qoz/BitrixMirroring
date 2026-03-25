@@ -495,7 +495,7 @@ def api_restart(service_key: str, _: str = Depends(_check_auth)):
     name = SERVICES[service_key]
     try:
         r = subprocess.run(
-            ["systemctl", "restart", name],
+            ["sudo", "-n", "systemctl", "restart", name],
             capture_output=True,
             text=True,
             timeout=30,
@@ -534,6 +534,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <style>
     [x-cloak] { display: none !important; }
     .log-pre { white-space: pre-wrap; word-break: break-all; }
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+    .details-arrow { display: inline-block; transition: transform 0.2s; }
+    details[open] .details-arrow { transform: rotate(90deg); }
     .dot-pulse::after {
       content: '';
       display: inline-block;
@@ -588,10 +592,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <p id="lastUpdated" class="text-xs text-slate-400 dot-pulse">Подключение…</p>
         </div>
       </div>
-      <button onclick="doLogout()"
-              class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white text-xs rounded-lg transition-colors">
-        Выйти
-      </button>
+      <div class="flex items-center gap-2">
+        <button onclick="loadStatus(); loadMappings()"
+                class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg transition-colors">
+          ↻ Обновить
+        </button>
+        <button onclick="doLogout()"
+                class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white text-xs rounded-lg transition-colors">
+          Выйти
+        </button>
+      </div>
     </div>
   </header>
 
@@ -606,6 +616,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="bg-white rounded-xl shadow p-5 h-40 animate-pulse"></div>
       </div>
     </section>
+
+    <details>
+      <summary class="cursor-pointer select-none mb-3">
+        <span class="inline-flex items-center gap-2 text-sm font-semibold text-gray-500 uppercase tracking-wider hover:text-gray-700 transition-colors">
+          <span class="details-arrow">▶</span> Статус
+        </span>
+      </summary>
+      <div class="space-y-6 mt-3">
 
     <section>
       <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Telegram Webhook</h2>
@@ -635,14 +653,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- DB path card -->
-        <div class="bg-white rounded-xl shadow p-5 flex items-center gap-4 md:col-span-2">
-          <div class="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center text-2xl">🗄️</div>
-          <div class="overflow-hidden">
-            <p class="text-xs text-gray-500">Путь к базе данных</p>
-            <p class="text-sm font-mono text-gray-700 truncate">${DB_PATH}</p>
-          </div>
-        </div>
       </div>
 
       <!-- Per-chat table -->
@@ -664,14 +674,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </table>
       </div>
 
-      <!-- Cursors -->
-      <div class="mt-4 bg-white rounded-xl shadow p-5">
-        <p class="text-sm font-medium text-gray-700 mb-2">Курсоры опроса Bitrix</p>
-        <div id="cursorsContainer" class="flex flex-wrap gap-2">
-          <span class="text-sm text-gray-400">Загрузка…</span>
-        </div>
-      </div>
     </section>
+
+      </div><!-- /Статус -->
+    </details>
 
     <!-- ── Chat Mappings ─────────────────────────────────────────────────── -->
     <section>
@@ -760,7 +766,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </main>
 
   <footer class="max-w-6xl mx-auto px-4 py-4 text-xs text-gray-400 text-center">
-    Монитор Bitrix Bot — автообновление каждые 5 с
+    Монитор Bitrix Bot
   </footer>
 </div>
 
@@ -769,7 +775,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 'use strict';
 
 let AUTH_HEADER = '';
-let pollTimer   = null;
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 function b64(user, pass) {
@@ -813,7 +818,6 @@ function showLoginErr(msg) {
 
 function doLogout() {
   AUTH_HEADER = '';
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   document.getElementById('app').classList.add('hidden');
   document.getElementById('loginError').classList.add('hidden');
   document.getElementById('loginPass').value = '';
@@ -954,8 +958,6 @@ function renderTelegramWebhook(info) {
 
 function startPolling() {
   loadStatus();
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(loadStatus, 5000);
 }
 
 // ── Services ─────────────────────────────────────────────────────────────────
@@ -1138,23 +1140,6 @@ function renderStats(db) {
     }
   }
 
-  const cursorsEl = document.getElementById('cursorsContainer');
-  cursorsEl.innerHTML = '';
-  const cursors = db.cursors || [];
-  if (!cursors.length) {
-    cursorsEl.innerHTML = '<span class="text-sm text-gray-400">Нет данных по курсорам</span>';
-  } else {
-    for (const c of cursors) {
-      const span = document.createElement('span');
-      span.className = 'inline-flex items-center gap-1 px-2.5 py-1 bg-blue-50 text-blue-700 rounded-lg text-xs font-mono';
-      span.textContent = escHtml(c.bitrix_dialog_id) + ': msg #' + (c.last_seen_bitrix_message_id ?? '—');
-      cursorsEl.appendChild(span);
-    }
-  }
-
-  if (db.error) {
-    cursorsEl.innerHTML += '<span class="text-xs text-red-500 ml-2">Ошибка БД: ' + escHtml(db.error) + '</span>';
-  }
 }
 
 // ── Mappings ─────────────────────────────────────────────────────────────────

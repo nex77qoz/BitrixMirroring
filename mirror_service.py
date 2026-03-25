@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
-import shutil
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -677,7 +675,7 @@ class MirrorService:
     ) -> None:
         sender_name = self._resolve_bitrix_sender_name(snapshot, bitrix_message)
         rendered = self.render_bitrix_message(bitrix_message, sender_name=sender_name)
-        photo = self._select_bitrix_photo(snapshot, bitrix_message)
+        photo = self._select_bitrix_file(snapshot, bitrix_message)
         try:
             if photo is None:
                 await application.bot.edit_message_text(

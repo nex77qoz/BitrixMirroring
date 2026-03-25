@@ -163,69 +163,6 @@ def _get_db_stats() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Env-based mappings (read-only display, parsed directly from env vars)
-# ---------------------------------------------------------------------------
-
-
-def _get_env_mappings() -> list[dict]:
-    """Return the chat mappings configured via environment variables."""
-    raw = os.getenv("CHAT_MAPPINGS", "").strip()
-    if raw:
-        try:
-            items = json.loads(raw)
-            if isinstance(items, list):
-                return [
-                    {
-                        "tg_chat_id": i.get("tg_chat_id"),
-                        "bitrix_dialog_id": i.get("bitrix_dialog_id", ""),
-                        "label": "",
-                    }
-                    for i in items
-                    if isinstance(i, dict)
-                ]
-        except Exception:
-            pass
-
-    numbered: list[dict] = []
-    idx = 1
-    while True:
-        entry = os.getenv(f"CHAT_MAPPING_{idx}", "").strip()
-        if not entry:
-            break
-        parts = entry.split(":", 1)
-        if len(parts) == 2:
-            try:
-                numbered.append(
-                    {
-                        "tg_chat_id": int(parts[0].strip()),
-                        "bitrix_dialog_id": parts[1].strip(),
-                        "label": "",
-                    }
-                )
-            except ValueError:
-                pass
-        idx += 1
-    if numbered:
-        return numbered
-
-    # Legacy single-pair
-    bitrix_id = os.getenv("BITRIX_DIALOG_ID", "").strip()
-    tg_id_str = os.getenv("ALLOWED_TELEGRAM_CHAT_ID", "").strip()
-    if bitrix_id and tg_id_str:
-        try:
-            return [
-                {
-                    "tg_chat_id": int(tg_id_str),
-                    "bitrix_dialog_id": bitrix_id,
-                    "label": "",
-                }
-            ]
-        except ValueError:
-            pass
-    return []
-
-
-# ---------------------------------------------------------------------------
 # Systemd helpers
 # ---------------------------------------------------------------------------
 
@@ -429,7 +366,6 @@ def api_status(_: str = Depends(_check_auth)):
     return {
         "services": {k: _get_service_info(v) for k, v in SERVICES.items()},
         "db": _get_db_stats(),
-        "env_mappings": _get_env_mappings(),
     "bitrix_bridge": _get_bitrix_bridge_status(),
     "telegram_webhook": _get_telegram_webhook_status(),
         "ts": int(time.time()),
@@ -692,25 +628,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Env-based mappings (read-only) -->
-      <div class="bg-white rounded-xl shadow overflow-hidden mb-4">
-        <div class="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
-          <span class="font-medium text-gray-700 text-sm">Из .env</span>
-          <span class="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">только чтение</span>
-        </div>
-        <table class="min-w-full text-sm">
-          <thead class="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
-            <tr>
-              <th class="px-5 py-2.5 text-left font-medium" >TG Chat ID</th>
-              <th class="px-5 py-2.5 text-left font-medium">Bitrix Dialog ID</th>
-            </tr>
-          </thead>
-          <tbody id="envMappingsBody" class="divide-y divide-gray-50">
-            <tr><td colspan="2" class="px-5 py-4 text-center text-gray-400">Загрузка…</td></tr>
-          </tbody>
-        </table>
-      </div>
-
       <!-- DB mappings (managed here) -->
       <div class="bg-white rounded-xl shadow overflow-hidden">
         <div class="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
@@ -842,7 +759,6 @@ async function loadStatus() {
     renderBitrixBridge(data.bitrix_bridge || {});
     renderTelegramWebhook(data.telegram_webhook || {});
     renderStats(data.db || {});
-    renderEnvMappings(data.env_mappings || []);
     const t = new Date(data.ts * 1000).toLocaleTimeString();
     document.getElementById('lastUpdated').textContent = 'Обновлено: ' + t;
   } catch (_) { /* network hiccup – ignore */ }
@@ -1143,24 +1059,6 @@ function renderStats(db) {
 }
 
 // ── Mappings ─────────────────────────────────────────────────────────────────
-function renderEnvMappings(mappings) {
-  const tbody = document.getElementById('envMappingsBody');
-  tbody.innerHTML = '';
-  if (!mappings.length) {
-    tbody.innerHTML = '<tr><td colspan="2" class="px-5 py-4 text-sm text-gray-400 text-center">В .env ничего не настроено</td></tr>';
-    return;
-  }
-  for (const m of mappings) {
-    const tr = document.createElement('tr');
-    tr.className = 'hover:bg-gray-50';
-    tr.innerHTML = `
-      <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(String(m.tg_chat_id))}</td>
-      <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(m.bitrix_dialog_id || '')}</td>
-    `;
-    tbody.appendChild(tr);
-  }
-}
-
 async function loadMappings() {
   try {
     const r = await apiFetch('/monitor/api/mappings');

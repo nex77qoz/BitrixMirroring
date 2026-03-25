@@ -512,12 +512,9 @@ MIRROR_INTERNAL_WEBHOOK_SECRET=$(env_escape "${MIRROR_INTERNAL_WEBHOOK_SECRET:-}
 MIRROR_INTERNAL_TIMEOUT_SECONDS=10
 BITRIX_FORWARDED_EVENTS=$(env_escape "ONIMBOTMESSAGEADD,ONIMBOTJOINCHAT")
 
-# Маппинг чатов (добавляется в следующем шаге)
-
 # Форматирование
 PREFIX_WITH_CHAT_TITLE=true
 PREFIX_WITH_SENDER=true
-PREFIX_WITH_TIMESTAMP=true
 BITRIX_DISABLE_LINK_PREVIEW=true
 
 # Синхронизация
@@ -527,7 +524,6 @@ BITRIX_POLL_INTERVAL_SECONDS=${BITRIX_POLL_INTERVAL_SECONDS_VALUE}
 
 # Хранилище
 MIRROR_STATE_DB_PATH=$(env_escape "${INSTALL_DIR}/mirror_state.sqlite3")
-BITRIX_CURSOR_STATE_PATH=$(env_escape "${INSTALL_DIR}/bitrix_cursor_state.json")
 
 # Retry / backoff
 BITRIX_RETRY_ATTEMPTS=4
@@ -537,7 +533,6 @@ BITRIX_POLL_ERROR_BACKOFF_SECONDS=2
 BITRIX_POLL_MAX_BACKOFF_SECONDS=30
 
 # Производительность
-BITRIX_USER_CACHE_TTL_SECONDS=300
 BITRIX_MAX_CONCURRENT_REQUESTS=5
 BITRIX_SEND_QUEUE_MAXSIZE=1000
 BITRIX_SEND_WORKERS=2
@@ -1008,15 +1003,12 @@ SQL
             "INSERT OR REPLACE INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix) \
              VALUES ($tg_id, '$(echo "$bx_id" | sed "s/'/''/g")', '$(echo "$label" | sed "s/'/''/g")', $(date +%s));"
 
-        # Append to .env
-        echo "CHAT_MAPPING_${counter}=${tg_id}:${bx_id}" >> "$ENV_FILE"
-
         print_ok "Маппинг #${counter} добавлен: Telegram ${tg_id} → Bitrix ${bx_id}"
         (( counter++ ))
     done
 
     if [[ $counter -eq 1 ]]; then
-        print_warn "Маппинги не добавлены. Добавьте их вручную позднее в $ENV_FILE"
+        print_warn "Маппинги не добавлены. Добавьте их позднее через дашборд мониторинга: https://${DOMAIN}/monitor"
     fi
 
     # Restart services to pick up new env/db

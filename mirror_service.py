@@ -71,8 +71,6 @@ class MirrorService:
         if self.settings.prefix_with_chat_title:
             chat_title = message.chat.title or message.chat.full_name or str(message.chat_id)
             lines.append(f"Чат: {chat_title}")
-            if message.message_thread_id:
-                lines.append(f"Тема форума: {message.message_thread_id}")
 
         if self.settings.prefix_with_sender:
             sender = self._sender_name(message)
@@ -87,12 +85,11 @@ class MirrorService:
                 and message.reply_to_message.message_id == message.message_thread_id
             )
             if not is_topic_header_reply:
-                reply_sender = self._sender_name(message.reply_to_message)
                 reply_excerpt = self._shorten(self._extract_primary_text(message.reply_to_message), 120)
                 if reply_excerpt:
-                    lines.append(f"Ответ на: {reply_sender} — {reply_excerpt}")
+                    lines.append(f"Ответ на: {reply_excerpt}")
                 else:
-                    lines.append(f"Ответ на сообщение от: {reply_sender}")
+                    lines.append("Ответ на сообщение")
 
         lines.append("")
         lines.append(self._build_body(message))

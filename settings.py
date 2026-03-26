@@ -146,11 +146,6 @@ class Settings:
         mirror_state_db_path = _read_env("MIRROR_STATE_DB_PATH", "mirror_state.sqlite3")
 
         chat_mappings = _load_db_chat_mappings(mirror_state_db_path)
-        if not chat_mappings:
-            raise ValueError(
-                "Chat mappings are not configured. "
-                "Add mappings via the monitoring web dashboard (/monitor)."
-            )
 
         enable_socks5_proxy = _parse_bool("ENABLE_SOCKS5_PROXY", "false")
         socks5_proxy_url = _read_env("SOCKS5_PROXY_URL", "") or None
@@ -191,7 +186,7 @@ class Settings:
             bitrix_bot_id=bitrix_bot_id,
             bitrix_bot_client_id=bitrix_bot_client_id,
             chat_mappings=chat_mappings,
-            prefix_with_chat_title=_parse_bool("PREFIX_WITH_CHAT_TITLE", "true"),
+            prefix_with_chat_title=_parse_bool("PREFIX_WITH_CHAT_TITLE", "false"),
             prefix_with_sender=_parse_bool("PREFIX_WITH_SENDER", "true"),
             disable_link_preview=_parse_bool("BITRIX_DISABLE_LINK_PREVIEW", "true"),
             request_timeout_seconds=_parse_float("REQUEST_TIMEOUT_SECONDS", "20", minimum=0.1),

@@ -91,6 +91,11 @@ class MirrorService:
         self._application = application
         self._stop_event.clear()
         await self.state_store.initialize()
+        if not self.settings.chat_mappings:
+            logger.warning(
+                "No chat mappings are configured. "
+                "Add mappings via the monitoring web dashboard (/monitor) and restart the service."
+            )
         await self._cleanup_stale_chat_links()
         self._telegram_to_bitrix_workers = [
             asyncio.create_task(self._telegram_to_bitrix_worker(), name=f"bitrix-send-worker-{index}")

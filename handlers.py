@@ -72,6 +72,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     ):
         return
 
+    if message.sticker:
+        logger.debug("Ignoring Telegram sticker message %s", message.message_id)
+        return
+
     await mirror.enqueue_telegram_message(message)
 
 

@@ -500,7 +500,7 @@ class MirrorService:
                     disable_web_page_preview=self.settings.disable_link_preview,
                 )
             mime = attachment.mime_type or ""
-            if mime.startswith("image/"):
+            if attachment.is_image:
                 return await application.bot.send_photo(
                     chat_id=tg_chat_id,
                     photo=BytesIO(file_bytes),

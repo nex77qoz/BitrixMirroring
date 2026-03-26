@@ -68,10 +68,6 @@ class MirrorService:
     def render_telegram_message(self, message: Message) -> str:
         lines: list[str] = ["Сообщение из Телеграм"]
 
-        if self.settings.prefix_with_chat_title:
-            chat_title = message.chat.title or message.chat.full_name or str(message.chat_id)
-            lines.append(f"Чат: {chat_title}")
-
         if self.settings.prefix_with_sender:
             sender = self._sender_name(message)
             lines.append(f"Отправитель: {sender}")
@@ -85,7 +81,12 @@ class MirrorService:
                 and message.reply_to_message.message_id == message.message_thread_id
             )
             if not is_topic_header_reply:
-                reply_excerpt = self._shorten(self._extract_primary_text(message.reply_to_message), 120)
+                reply_raw = self._extract_primary_text(message.reply_to_message)
+                # Strip mirrored message headers so only the actual body is shown
+                if reply_raw.startswith(("Сообщение из Битрикс", "Сообщение из Телеграм")):
+                    parts = reply_raw.split("\n\n", 1)
+                    reply_raw = parts[1] if len(parts) > 1 else reply_raw
+                reply_excerpt = self._shorten(reply_raw, 120)
                 if reply_excerpt:
                     lines.append(f"Ответ на: {reply_excerpt}")
                 else:

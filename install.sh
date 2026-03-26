@@ -35,6 +35,9 @@ SVC_GROUP="bitrix-bot"
 # Set to true by step_setup_ssl when user skips SSL
 SKIP_SSL=false
 
+# Set to true when user says Telegram webhook is already configured
+TELEGRAM_WEBHOOK_ALREADY_SET=false
+
 # SSH auth mode: "key" or "both"
 SSH_AUTH_MODE="both"
 
@@ -448,6 +451,18 @@ step_collect_config() {
     ask_secret TELEGRAM_BOT_TOKEN "Telegram Bot Token"
 
     TELEGRAM_WEBHOOK_ENABLED="true"
+
+    echo ""
+    echo -en "  ${YELLOW}Вебхук для бота уже настроен? (y/N): ${RESET}"
+    read -r webhook_already_set
+    if [[ "${webhook_already_set,,}" == "y" ]]; then
+        TELEGRAM_WEBHOOK_ALREADY_SET=true
+        print_info "Вебхук уже настроен — будет запрошен только секрет"
+    else
+        TELEGRAM_WEBHOOK_ALREADY_SET=false
+        print_info "Вебхук будет зарегистрирован автоматически после запуска сервисов"
+    fi
+
     print_info "Ввод скрыт — символы не отображаются"
     ask_secret TELEGRAM_WEBHOOK_SECRET "Секрет Telegram webhook"
 
@@ -937,6 +952,60 @@ EOF
     done
 
     sleep 3
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 8b — Register Telegram webhook
+# ──────────────────────────────────────────────────────────────────────────────
+step_setup_telegram_webhook() {
+    if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" != "true" ]]; then
+        return 0
+    fi
+
+    print_step "Настройка Telegram webhook"
+
+    local webhook_url="https://${DOMAIN}${TELEGRAM_WEBHOOK_PATH}"
+
+    if [[ "$TELEGRAM_WEBHOOK_ALREADY_SET" == "true" ]]; then
+        print_info "Вебхук уже настроен пользователем — регистрация пропущена"
+    else
+        print_info "Регистрация webhook: ${BOLD}${webhook_url}${RESET}"
+
+        local response
+        response=$(curl -s --max-time 15 -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            -H "Content-Type: application/json" \
+            -d "{\"url\": \"${webhook_url}\", \"secret_token\": \"${TELEGRAM_WEBHOOK_SECRET}\"}" \
+            2>/dev/null || echo '{"ok":false,"description":"curl error"}')
+
+        if echo "$response" | grep -q '"ok":true'; then
+            print_ok "Telegram webhook успешно зарегистрирован"
+        else
+            print_error "Ошибка регистрации webhook: $response"
+            print_info "Для ручной регистрации выполните:"
+            echo -e "    ${CYAN}curl -X POST \"https://api.telegram.org/bot<TOKEN>/setWebhook\" \\"
+            echo -e "      -H \"Content-Type: application/json\" \\"
+            echo -e "      -d '{\"url\": \"${webhook_url}\", \"secret_token\": \"<SECRET>\"}'${RESET}"
+        fi
+    fi
+
+    # Verification: send a test request with the secret token
+    print_info "Проверка webhook endpoint (X-Telegram-Bot-Api-Secret-Token)..."
+    local code
+    code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 10 \
+        --resolve "${DOMAIN}:443:127.0.0.1" \
+        -X POST \
+        -H "X-Telegram-Bot-Api-Secret-Token: ${TELEGRAM_WEBHOOK_SECRET}" \
+        -H "Content-Type: application/json" \
+        -d '{"update_id":1}' \
+        "https://${DOMAIN}${TELEGRAM_WEBHOOK_PATH}" 2>/dev/null || echo "000")
+    if [[ "$code" == "200" ]]; then
+        print_ok "Webhook endpoint принимает запросы с корректным секретом (HTTP 200)"
+    elif [[ "$code" == "403" ]]; then
+        print_error "Webhook endpoint вернул 403 — проверьте TELEGRAM_WEBHOOK_SECRET в ${ENV_FILE}"
+    else
+        print_warn "Webhook endpoint вернул HTTP $code — убедитесь, что сервисы запущены и SSL настроен"
+    fi
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1444,6 +1513,7 @@ main() {
             step_setup_ssl
             step_configure_nginx
             step_create_services
+            step_setup_telegram_webhook
             step_setup_fail2ban
             step_setup_firewall
             step_setup_logrotate

@@ -117,6 +117,9 @@ def _ensure_chat_mappings_table() -> None:
             )
             """
         )
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(chat_mappings)").fetchall()}
+        if "topic_ids" not in existing:
+            conn.execute("ALTER TABLE chat_mappings ADD COLUMN topic_ids TEXT DEFAULT ''")
         conn.commit()
     finally:
         conn.close()
@@ -349,6 +352,7 @@ class MappingCreate(BaseModel):
     tg_chat_id: int
     bitrix_dialog_id: str
     label: str = ""
+    topic_ids: list[int] = []
 
 
 # ---------------------------------------------------------------------------
@@ -377,10 +381,16 @@ def api_get_mappings(_: str = Depends(_check_auth)):
     conn = _db_connect()
     try:
         rows = conn.execute(
-            "SELECT tg_chat_id, bitrix_dialog_id, label, created_at_unix "
+            "SELECT tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids "
             "FROM chat_mappings ORDER BY created_at_unix"
         ).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            row = dict(r)
+            raw = row.get("topic_ids") or ""
+            row["topic_ids"] = [int(t) for t in raw.split(",") if t.strip().lstrip("-").isdigit()]
+            result.append(row)
+        return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
@@ -391,16 +401,18 @@ def api_get_mappings(_: str = Depends(_check_auth)):
 def api_add_mapping(body: MappingCreate, _: str = Depends(_check_auth)):
     if not body.bitrix_dialog_id.strip():
         raise HTTPException(status_code=400, detail="bitrix_dialog_id не может быть пустым")
+    topic_ids_str = ",".join(str(t) for t in body.topic_ids)
     conn = _db_connect()
     try:
         conn.execute(
             "INSERT OR REPLACE INTO chat_mappings"
-            "(tg_chat_id, bitrix_dialog_id, label, created_at_unix) VALUES (?,?,?,?)",
+            "(tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) VALUES (?,?,?,?,?)",
             (
                 body.tg_chat_id,
                 body.bitrix_dialog_id.strip(),
                 body.label.strip(),
                 int(time.time()),
+                topic_ids_str,
             ),
         )
         conn.commit()
@@ -640,6 +652,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <th class="px-5 py-2.5 text-left font-medium" >TG Chat ID</th>
               <th class="px-5 py-2.5 text-left font-medium">Bitrix Dialog ID</th>
               <th class="px-5 py-2.5 text-left font-medium">Метка</th>
+              <th class="px-5 py-2.5 text-left font-medium">Темы (topic IDs)</th>
               <th class="px-5 py-2.5"></th>
             </tr>
           </thead>
@@ -669,6 +682,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <input id="newLabel" type="text"
                      class="w-36 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                      placeholder="Канал команды A">
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500">Темы (topic IDs, необязательно)</label>
+              <input id="newTopicIds" type="text"
+                     class="w-40 px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="12,34 (пусто = все)">
             </div>
             <button id="addMappingBtn" onclick="addMapping()"
                     class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50">
@@ -1071,16 +1090,18 @@ function renderDbMappings(mappings) {
   const tbody = document.getElementById('dbMappingsBody');
   tbody.innerHTML = '';
   if (!mappings.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="px-5 py-4 text-sm text-gray-400 text-center">В базе нет связок. Используйте форму ниже, чтобы добавить новую.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="px-5 py-4 text-sm text-gray-400 text-center">В базе нет связок. Используйте форму ниже, чтобы добавить новую.</td></tr>';
     return;
   }
   for (const m of mappings) {
     const tr = document.createElement('tr');
     tr.className = 'hover:bg-gray-50';
+    const topicsLabel = (m.topic_ids && m.topic_ids.length) ? m.topic_ids.join(', ') : '<span class="text-gray-400">все</span>';
     tr.innerHTML = `
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(String(m.tg_chat_id))}</td>
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(m.bitrix_dialog_id)}</td>
       <td class="px-5 py-2.5 text-sm text-gray-500">${escHtml(m.label || '—')}</td>
+      <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${topicsLabel}</td>
       <td class="px-5 py-2.5">
         <button onclick="deleteMapping(${m.tg_chat_id})"
                 class="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-medium rounded-lg transition-colors">
@@ -1107,6 +1128,7 @@ async function addMapping() {
   const tgRaw    = document.getElementById('newTgChatId').value.trim();
   const dialogId = document.getElementById('newBitrixDialogId').value.trim();
   const label    = document.getElementById('newLabel').value.trim();
+  const topicRaw = document.getElementById('newTopicIds').value.trim();
   const msgEl    = document.getElementById('addMappingMsg');
 
   msgEl.className = 'hidden mt-2 text-xs';
@@ -1118,18 +1140,23 @@ async function addMapping() {
   const tgChatId = parseInt(tgRaw, 10);
   if (isNaN(tgChatId)) { showAddMsg('TG Chat ID должен быть целым числом', 'error'); return; }
 
+  const topicIds = topicRaw
+    ? topicRaw.split(',').map(t => parseInt(t.trim(), 10)).filter(n => !isNaN(n))
+    : [];
+
   const btn = document.getElementById('addMappingBtn');
   btn.disabled = true;
   try {
     const r = await apiFetch('/monitor/api/mappings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tg_chat_id: tgChatId, bitrix_dialog_id: dialogId, label })
+      body: JSON.stringify({ tg_chat_id: tgChatId, bitrix_dialog_id: dialogId, label, topic_ids: topicIds })
     });
     if (r.ok) {
       document.getElementById('newTgChatId').value = '';
       document.getElementById('newBitrixDialogId').value = '';
       document.getElementById('newLabel').value = '';
+      document.getElementById('newTopicIds').value = '';
       showAddMsg('Связка добавлена. Перезапустите сервис Mirror, чтобы она заработала.', 'ok');
       loadMappings();
     } else {

@@ -51,6 +51,20 @@ class MirrorService:
     def is_allowed_chat(self, message: Message) -> bool:
         return message.chat_id in self._tg_to_mapping
 
+    def is_allowed_topic(self, message: Message) -> bool:
+        """Return True if this message's forum topic is permitted by the mapping.
+
+        If the mapping has no topic_ids (empty frozenset), all topics are allowed.
+        Otherwise only messages whose message_thread_id is in topic_ids pass.
+        Messages without a thread (regular groups) are always allowed.
+        """
+        mapping = self._tg_to_mapping.get(message.chat_id)
+        if mapping is None:
+            return False
+        if not mapping.topic_ids:
+            return True
+        return message.message_thread_id in mapping.topic_ids
+
     def render_telegram_message(self, message: Message) -> str:
         lines: list[str] = ["Сообщение из Телеграм"]
 
@@ -65,12 +79,20 @@ class MirrorService:
             lines.append(f"Отправитель: {sender}")
 
         if message.reply_to_message:
-            reply_sender = self._sender_name(message.reply_to_message)
-            reply_excerpt = self._shorten(self._extract_primary_text(message.reply_to_message), 120)
-            if reply_excerpt:
-                lines.append(f"Ответ на: {reply_sender} — {reply_excerpt}")
-            else:
-                lines.append(f"Ответ на сообщение от: {reply_sender}")
+            # In Telegram Forum groups every message in a topic has reply_to_message set
+            # to the topic's own header service message (its ID equals message_thread_id).
+            # That is NOT a real user reply — skip it to avoid false "Ответ на сообщение".
+            is_topic_header_reply = (
+                message.message_thread_id is not None
+                and message.reply_to_message.message_id == message.message_thread_id
+            )
+            if not is_topic_header_reply:
+                reply_sender = self._sender_name(message.reply_to_message)
+                reply_excerpt = self._shorten(self._extract_primary_text(message.reply_to_message), 120)
+                if reply_excerpt:
+                    lines.append(f"Ответ на: {reply_sender} — {reply_excerpt}")
+                else:
+                    lines.append(f"Ответ на сообщение от: {reply_sender}")
 
         lines.append("")
         lines.append(self._build_body(message))

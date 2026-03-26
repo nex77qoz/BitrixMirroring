@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3 as _sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path as _Path
 from typing import Optional
 
@@ -58,10 +58,28 @@ def _parse_int(name: str, default: str, *, minimum: int) -> int:
     return value
 
 
+def _parse_topic_ids(raw: str) -> frozenset[int]:
+    """Parse a comma-separated string of integers into a frozenset.
+
+    Empty string or whitespace-only input returns an empty frozenset (= all topics allowed).
+    Invalid tokens are silently ignored.
+    """
+    result: set[int] = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if token:
+            try:
+                result.add(int(token))
+            except ValueError:
+                pass
+    return frozenset(result)
+
+
 @dataclass(frozen=True)
 class ChatMapping:
     tg_chat_id: int
     bitrix_dialog_id: str
+    topic_ids: frozenset[int] = field(default_factory=frozenset)
 
 
 def _load_db_chat_mappings(db_path: str) -> tuple[ChatMapping, ...]:
@@ -78,10 +96,14 @@ def _load_db_chat_mappings(db_path: str) -> tuple[ChatMapping, ...]:
         conn = _sqlite3.connect(str(path))
         try:
             rows = conn.execute(
-                "SELECT tg_chat_id, bitrix_dialog_id FROM chat_mappings"
+                "SELECT tg_chat_id, bitrix_dialog_id, topic_ids FROM chat_mappings"
             ).fetchall()
             return tuple(
-                ChatMapping(tg_chat_id=int(row[0]), bitrix_dialog_id=str(row[1]))
+                ChatMapping(
+                    tg_chat_id=int(row[0]),
+                    bitrix_dialog_id=str(row[1]),
+                    topic_ids=_parse_topic_ids(str(row[2]) if row[2] else ""),
+                )
                 for row in rows
             )
         except _sqlite3.OperationalError:

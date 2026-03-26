@@ -875,6 +875,11 @@ EOF
 # STEP 8 — Create and enable systemd services
 # ──────────────────────────────────────────────────────────────────────────────
 step_create_services() {
+    # Pass --no-start to only write unit files and enable (no start/restart).
+    # Used by do_update to avoid a no-op start on already-running services.
+    local _no_start=false
+    [[ "${1:-}" == "--no-start" ]] && _no_start=true
+
     print_step "Создание systemd-сервисов"
 
     # 1 — main mirror process
@@ -946,12 +951,13 @@ EOF
         print_ok "Сервис $svc включён в автозапуск"
     done
 
-    for svc in "${SERVICES[@]}"; do
-        run_cmd systemctl start "$svc"
-        print_ok "Сервис $svc запущен"
-    done
-
-    sleep 3
+    if [[ "$_no_start" == false ]]; then
+        for svc in "${SERVICES[@]}"; do
+            run_cmd systemctl start "$svc"
+            print_ok "Сервис $svc запущен"
+        done
+        sleep 3
+    fi
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1382,19 +1388,55 @@ do_update() {
         exit 1
     fi
 
+    # ── Защита пользовательских данных ────────────────────────────────────────
+    # .env и mirror_state.sqlite3 перечислены в .gitignore и не затрагиваются
+    # git pull. Выводим явное подтверждение, чтобы было видно что они целы.
+    print_info "Проверка сохранности конфигурации..."
+    for _protected in "$ENV_FILE" "$DB_FILE"; do
+        if [[ -f "$_protected" ]]; then
+            print_ok "Сохранён (не перезаписывается): $(basename "$_protected")"
+        fi
+    done
+
+    # ── git pull ───────────────────────────────────────────────────────────────
     git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
-    run_cmd git -C "$INSTALL_DIR" pull
+    print_info "Получение обновлений из репозитория..."
+    local _pull_output _pull_exit
+    _pull_output=$(git -C "$INSTALL_DIR" pull 2>&1) || _pull_exit=$?
+    log "CMD: git -C $INSTALL_DIR pull"
+    log "OUTPUT: $_pull_output"
+    # Show output line-by-line so user can see what happened
+    while IFS= read -r _line; do
+        print_info "git: $_line"
+    done <<< "$_pull_output"
+    if [[ "${_pull_exit:-0}" -ne 0 ]]; then
+        print_error "git pull завершился с ошибкой — подробности: $LOG_FILE"
+        exit 1
+    fi
+    if echo "$_pull_output" | grep -q "Already up to date"; then
+        print_warn "В репозитории нет новых изменений (Already up to date)."
+        print_warn "Убедитесь, что git push был сделан в правильный remote и ветку."
+    else
+        print_ok "Код бота обновлён из репозитория"
+    fi
+
+    # ── Python-зависимости ────────────────────────────────────────────────────
     run_cmd "$VENV/bin/pip" install --upgrade pip
     run_cmd "$VENV/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 
     load_installer_env
 
+    # ── nginx ─────────────────────────────────────────────────────────────────
     if [[ -n "$DOMAIN" ]]; then
         step_configure_nginx
     else
         print_warn "APP_DOMAIN не найден в $ENV_FILE; пропускаю пересборку nginx-конфига"
     fi
-    step_create_services
+
+    # ── systemd-юниты ─────────────────────────────────────────────────────────
+    # --no-start: только перезаписываем unit-файлы и enable;
+    # сами сервисы перезапускаем ниже через restart (не start).
+    step_create_services --no-start
 
     # Fix ownership after pull
     chown -R "${SVC_USER}:${SVC_GROUP}" "$INSTALL_DIR" 2>/dev/null || true

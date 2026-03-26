@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import logging
+import re
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -17,6 +19,34 @@ from models import BitrixDialogSnapshot, BitrixFile, BitrixMessage, CursorState,
 from settings import ChatMapping, Settings
 
 logger = logging.getLogger("tg-bitrix-mirror")
+
+# BBCode tags used by Bitrix24 chat, mapped to equivalent Telegram HTML tags.
+_BBCODE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\[b\](.*?)\[/b\]", re.DOTALL | re.IGNORECASE), r"<b>\1</b>"),
+    (re.compile(r"\[i\](.*?)\[/i\]", re.DOTALL | re.IGNORECASE), r"<i>\1</i>"),
+    (re.compile(r"\[u\](.*?)\[/u\]", re.DOTALL | re.IGNORECASE), r"<u>\1</u>"),
+    (re.compile(r"\[s\](.*?)\[/s\]", re.DOTALL | re.IGNORECASE), r"<s>\1</s>"),
+    (re.compile(r"\[code\](.*?)\[/code\]", re.DOTALL | re.IGNORECASE), r"<code>\1</code>"),
+    (re.compile(r"\[quote\](.*?)\[/quote\]", re.DOTALL | re.IGNORECASE), r"<blockquote>\1</blockquote>"),
+    # [url=https://example.com]label[/url]
+    (re.compile(r"\[url=([^\]]+)\](.*?)\[/url\]", re.DOTALL | re.IGNORECASE), r'<a href="\1">\2</a>'),
+    # [color=red]text[/color] — Telegram has no colour support; strip the tags, keep content
+    (re.compile(r"\[color=[^\]]+\](.*?)\[/color\]", re.DOTALL | re.IGNORECASE), r"\1"),
+]
+
+
+def _bbcode_to_html(text: str) -> str:
+    """Convert Bitrix BBCode markup to Telegram HTML markup.
+
+    Safely HTML-escapes the raw text first so that any ``<``, ``>``, or ``&``
+    characters in the message body do not break Telegram's HTML parser.  The
+    BBCode square-bracket tags survive ``html.escape`` untouched and are then
+    replaced with the corresponding HTML tags.
+    """
+    escaped = html.escape(text)
+    for pattern, replacement in _BBCODE_PATTERNS:
+        escaped = pattern.sub(replacement, escaped)
+    return escaped
 
 
 class MirrorService:
@@ -99,12 +129,12 @@ class MirrorService:
     def render_bitrix_message(self, bitrix_message: BitrixMessage, sender_name: str) -> str:
         lines: list[str] = [
             "Сообщение из Битрикс",
-            f"Отправитель: {sender_name}",
+            f"Отправитель: {html.escape(sender_name)}",
         ]
         text = bitrix_message.text.strip()
         if text:
             lines.append("")
-            lines.append(text)
+            lines.append(_bbcode_to_html(text))
         return "\n".join(lines).strip()
 
     async def start(self, application: Application) -> None:
@@ -502,6 +532,7 @@ class MirrorService:
                 chat_id=tg_chat_id,
                 message_thread_id=message_thread_id,
                 text=rendered,
+                parse_mode="HTML",
                 disable_web_page_preview=self.settings.disable_link_preview,
             )
         try:
@@ -515,6 +546,7 @@ class MirrorService:
                     chat_id=tg_chat_id,
                     message_thread_id=message_thread_id,
                     text=rendered + "\n\n[Файл слишком большой для пересылки]",
+                    parse_mode="HTML",
                     disable_web_page_preview=self.settings.disable_link_preview,
                 )
             mime = attachment.mime_type or ""
@@ -525,6 +557,7 @@ class MirrorService:
                     photo=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
+                    parse_mode="HTML",
                 )
             elif mime.startswith("video/"):
                 return await application.bot.send_video(
@@ -533,6 +566,7 @@ class MirrorService:
                     video=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
+                    parse_mode="HTML",
                 )
             elif mime.startswith("audio/"):
                 return await application.bot.send_audio(
@@ -541,6 +575,7 @@ class MirrorService:
                     audio=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
+                    parse_mode="HTML",
                 )
             else:
                 return await application.bot.send_document(
@@ -549,6 +584,7 @@ class MirrorService:
                     document=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
+                    parse_mode="HTML",
                 )
         except Exception:
             logger.exception("Failed to forward Bitrix file for message %s, falling back to text", bitrix_message.message_id)
@@ -556,6 +592,7 @@ class MirrorService:
                 chat_id=tg_chat_id,
                 message_thread_id=message_thread_id,
                 text=rendered,
+                parse_mode="HTML",
                 disable_web_page_preview=self.settings.disable_link_preview,
             )
 
@@ -710,6 +747,7 @@ class MirrorService:
                     chat_id=link.telegram_chat_id,
                     message_id=link.telegram_message_id,
                     text=rendered,
+                    parse_mode="HTML",
                     disable_web_page_preview=self.settings.disable_link_preview,
                 )
                 logger.info("Mirrored Bitrix edit %s to Telegram message %s", bitrix_message.message_id, link.telegram_message_id)
@@ -718,6 +756,7 @@ class MirrorService:
                 chat_id=link.telegram_chat_id,
                 message_id=link.telegram_message_id,
                 caption=rendered,
+                parse_mode="HTML",
             )
             logger.info("Mirrored Bitrix caption edit %s to Telegram message %s", bitrix_message.message_id, link.telegram_message_id)
         except ChatMigrated as exc:

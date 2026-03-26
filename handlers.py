@@ -76,6 +76,20 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         logger.debug("Ignoring Telegram sticker message %s", message.message_id)
         return
 
+    if any(
+        [
+            message.contact,
+            message.poll,
+            message.location,
+            message.venue,
+            message.voice,
+            message.video_note,
+            getattr(message, "checklist", None),  # Telegram task lists (Bot API 9+)
+        ]
+    ):
+        logger.debug("Ignoring unsupported message type for Telegram message %s", message.message_id)
+        return
+
     await mirror.enqueue_telegram_message(message)
 
 

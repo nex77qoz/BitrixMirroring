@@ -399,6 +399,12 @@ class MirrorService:
         if bitrix_message.is_sticker:
             logger.debug("Ignoring Bitrix sticker message %s", bitrix_message.message_id)
             return False
+        if bitrix_message.is_meeting:
+            logger.debug("Ignoring Bitrix meeting card %s", bitrix_message.message_id)
+            return False
+        if bitrix_message.is_task:
+            logger.debug("Ignoring Bitrix task card %s", bitrix_message.message_id)
+            return False
         if not bitrix_message.text.strip() and not bitrix_message.file_ids:
             return False
         link = await self.state_store.get_link_by_bitrix_message(bitrix_message_id=bitrix_message.message_id)
@@ -417,8 +423,6 @@ class MirrorService:
             or message.document
             or message.video
             or message.audio
-            or message.voice
-            or message.video_note
         )
 
     async def _forward_telegram_file_to_bitrix(self, message: Message, *, dialog_id: str) -> int:
@@ -438,14 +442,6 @@ class MirrorService:
             file_source = message.audio
             original_name = message.audio.file_name
             fallback_name = f"audio_{message.message_id}.ogg"
-        elif message.voice:
-            file_source = message.voice
-            original_name = None
-            fallback_name = f"voice_{message.message_id}.ogg"
-        elif message.video_note:
-            file_source = message.video_note
-            original_name = None
-            fallback_name = f"video_note_{message.message_id}.mp4"
         else:
             raise ValueError("No uploadable file attachment found in message")
         telegram_file = await file_source.get_file()

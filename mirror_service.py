@@ -390,9 +390,10 @@ class MirrorService:
             if await self._should_forward_bitrix_message(dialog_id, message):
                 fresh_messages.append(message)
 
+        message_thread_id = next(iter(mapping.topic_ids)) if len(mapping.topic_ids) == 1 else None
         for bitrix_message in fresh_messages:
             sender_name = self._resolve_bitrix_sender_name(snapshot, bitrix_message)
-            forwarded = await self._forward_bitrix_message(application, snapshot, bitrix_message, sender_name, tg_chat_id=tg_chat_id)
+            forwarded = await self._forward_bitrix_message(application, snapshot, bitrix_message, sender_name, tg_chat_id=tg_chat_id, message_thread_id=message_thread_id)
             logger.info(
                 "Mirrored Bitrix message %s from dialog %s to Telegram chat %s (photo=%s)",
                 bitrix_message.message_id,
@@ -494,12 +495,14 @@ class MirrorService:
         sender_name: str,
         *,
         tg_chat_id: int,
+        message_thread_id: Optional[int] = None,
     ) -> Message:
         rendered = self.render_bitrix_message(bitrix_message, sender_name=sender_name)
         attachment = self._select_bitrix_file(snapshot, bitrix_message)
         if attachment is None or not attachment.url_download:
             return await application.bot.send_message(
                 chat_id=tg_chat_id,
+                message_thread_id=message_thread_id,
                 text=rendered,
                 disable_web_page_preview=self.settings.disable_link_preview,
             )
@@ -512,6 +515,7 @@ class MirrorService:
                 )
                 return await application.bot.send_message(
                     chat_id=tg_chat_id,
+                    message_thread_id=message_thread_id,
                     text=rendered + "\n\n[Файл слишком большой для пересылки]",
                     disable_web_page_preview=self.settings.disable_link_preview,
                 )
@@ -519,6 +523,7 @@ class MirrorService:
             if attachment.is_image:
                 return await application.bot.send_photo(
                     chat_id=tg_chat_id,
+                    message_thread_id=message_thread_id,
                     photo=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
@@ -526,6 +531,7 @@ class MirrorService:
             elif mime.startswith("video/"):
                 return await application.bot.send_video(
                     chat_id=tg_chat_id,
+                    message_thread_id=message_thread_id,
                     video=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
@@ -533,6 +539,7 @@ class MirrorService:
             elif mime.startswith("audio/"):
                 return await application.bot.send_audio(
                     chat_id=tg_chat_id,
+                    message_thread_id=message_thread_id,
                     audio=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
@@ -540,6 +547,7 @@ class MirrorService:
             else:
                 return await application.bot.send_document(
                     chat_id=tg_chat_id,
+                    message_thread_id=message_thread_id,
                     document=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
@@ -548,6 +556,7 @@ class MirrorService:
             logger.exception("Failed to forward Bitrix file for message %s, falling back to text", bitrix_message.message_id)
             return await application.bot.send_message(
                 chat_id=tg_chat_id,
+                message_thread_id=message_thread_id,
                 text=rendered,
                 disable_web_page_preview=self.settings.disable_link_preview,
             )

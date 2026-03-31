@@ -25,16 +25,19 @@ class BitrixClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def send_message(self, text: str, *, dialog_id: str) -> int:
+    async def send_message(self, text: str, *, dialog_id: str, reply_id: Optional[int] = None) -> int:
+        fields: dict[str, Any] = {
+            "message": text,
+            "system": False,
+            "urlPreview": not self.settings.disable_link_preview,
+        }
+        if reply_id is not None:
+            fields["replyId"] = reply_id
         payload: dict[str, Any] = {
             "botId": self.settings.bitrix_bot_id,
             "botToken": self.settings.bitrix_bot_client_id,
             "dialogId": dialog_id,
-            "fields": {
-                "message": text,
-                "system": False,
-                "urlPreview": not self.settings.disable_link_preview,
-            },
+            "fields": fields,
         }
         data = await self._call("imbot.v2.Chat.Message.send", payload)
         result = data.get("result")
@@ -79,25 +82,29 @@ class BitrixClient:
         if result is not True:
             raise RuntimeError(f"Unexpected Bitrix response: {data}")
 
-    async def send_photo(self, *, caption: str, filename: str, content: bytes, dialog_id: str) -> int:
+    async def send_photo(self, *, caption: str, filename: str, content: bytes, dialog_id: str, reply_id: Optional[int] = None) -> int:
         encoded = base64.b64encode(content).decode("ascii")
         return await self._upload_file(
             dialog_id=dialog_id,
             filename=filename,
             encoded=encoded,
             caption=caption,
+            reply_id=reply_id,
         )
 
-    async def _upload_file(self, *, dialog_id: str, filename: str, encoded: str, caption: str) -> int:
+    async def _upload_file(self, *, dialog_id: str, filename: str, encoded: str, caption: str, reply_id: Optional[int] = None) -> int:
+        file_fields: dict[str, Any] = {
+            "name": filename,
+            "content": encoded,
+            "message": caption,
+        }
+        if reply_id is not None:
+            file_fields["replyId"] = reply_id
         payload: dict[str, Any] = {
             "botId": self.settings.bitrix_bot_id,
             "botToken": self.settings.bitrix_bot_client_id,
             "dialogId": dialog_id,
-            "fields": {
-                "name": filename,
-                "content": encoded,
-                "message": caption,
-            },
+            "fields": file_fields,
         }
         data = await self._call("imbot.v2.File.upload", payload)
         result = data.get("result")
@@ -188,6 +195,9 @@ class BitrixClient:
         if not isinstance(raw_files, (list, dict)):
             raise RuntimeError(f"Unexpected Bitrix files payload: {data}")
 
+        for payload_item in messages:
+            logger.debug("RAW Bitrix message payload: %s", payload_item)
+
         parsed_messages = [
             message
             for payload_item in messages
@@ -256,6 +266,54 @@ class BitrixClient:
         raise RuntimeError(
             f"Unable to download Bitrix file_id={file_id}. Tried: {' | '.join(errors)}"
         )
+
+    async def get_message_reply_id(self, *, dialog_id: str, message_id: int) -> Optional[int]:
+        """Fetch REPLY_ID for a specific message via im.dialog.messages.search.
+
+        im.dialog.messages.get does not return REPLY_ID in params,
+        but im.dialog.messages.search does.
+        """
+        chat_id_str = dialog_id.replace("chat", "")
+        if not chat_id_str.isdigit():
+            logger.debug("Cannot extract chat_id from dialog_id=%s for reply lookup", dialog_id)
+            return None
+        chat_id = int(chat_id_str)
+
+        payload: dict[str, Any] = {
+            "CHAT_ID": chat_id,
+            "LAST_ID": message_id + 1,
+            "LIMIT": 1,
+            "ORDER": {"ID": "DESC"},
+        }
+        try:
+            data = await self._call("im.dialog.messages.search", payload)
+        except Exception:
+            logger.warning("Failed to fetch reply_id via search for message %s", message_id, exc_info=True)
+            return None
+
+        result = data.get("result")
+        if not isinstance(result, dict):
+            return None
+
+        messages = result.get("messages", [])
+        if not isinstance(messages, list):
+            return None
+
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("id") != message_id:
+                continue
+            params = msg.get("params")
+            if not isinstance(params, dict):
+                continue
+            for key in ("REPLY_ID", "replyId", "reply_id"):
+                raw = params.get(key)
+                if isinstance(raw, int) and raw > 0:
+                    return raw
+                if isinstance(raw, str) and raw.strip().isdigit() and int(raw.strip()) > 0:
+                    return int(raw.strip())
+        return None
 
     async def _get_file_download_url(self, file_id: int) -> str:
         payload: dict[str, Any] = {

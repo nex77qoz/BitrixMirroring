@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
+
+_logger = logging.getLogger("tg-bitrix-mirror")
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,7 @@ class BitrixMessage:
     file_ids: tuple[int, ...]
     update_time_unix: Optional[int]
     like_user_ids: tuple[int, ...]
+    reply_id: Optional[int] = None
     is_sticker: bool = False
     is_meeting: bool = False
     is_task: bool = False
@@ -91,6 +95,36 @@ class BitrixMessage:
         is_meeting = isinstance(params, dict) and bool(params.get("MEETING_CONFIRM"))
         is_task = isinstance(params, dict) and bool(params.get("TASK_ID"))
 
+        reply_id: Optional[int] = None
+        # Check top-level payload fields first (im.dialog.messages.get may return it here)
+        for key in ("reply_id", "replyId", "REPLY_ID"):
+            raw = payload.get(key)
+            if isinstance(raw, int) and raw > 0:
+                reply_id = raw
+                break
+            if isinstance(raw, str) and raw.strip().isdigit() and int(raw.strip()) > 0:
+                reply_id = int(raw.strip())
+                break
+        # Fallback: check inside params (webhook / imbot event payload)
+        if reply_id is None and isinstance(params, dict):
+            for key in ("REPLY_ID", "replyId", "reply_id"):
+                raw = params.get(key)
+                if isinstance(raw, int) and raw > 0:
+                    reply_id = raw
+                    break
+                if isinstance(raw, str) and raw.strip().isdigit() and int(raw.strip()) > 0:
+                    reply_id = int(raw.strip())
+                    break
+        if reply_id is not None:
+            _logger.debug("Bitrix message %s has reply_id=%s", raw_message_id, reply_id)
+        elif _logger.isEnabledFor(logging.DEBUG):
+            _logger.debug(
+                "Bitrix message %s payload keys=%s params=%s",
+                raw_message_id,
+                list(payload.keys()),
+                params if isinstance(params, dict) else repr(params),
+            )
+
         return BitrixMessage(
             message_id=raw_message_id,
             author_id=author_id,
@@ -103,6 +137,7 @@ class BitrixMessage:
                 or payload.get("dateModified")
             ),
             like_user_ids=tuple(sorted(like_user_ids)),
+            reply_id=reply_id,
             is_sticker=is_sticker,
             is_meeting=is_meeting,
             is_task=is_task,

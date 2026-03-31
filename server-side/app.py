@@ -168,6 +168,17 @@ def detect_message_id(payload: dict) -> int | None:
     return None
 
 
+def detect_reply_id(payload: dict) -> int | None:
+    params = payload.get("data", {}).get("PARAMS", {}) or {}
+    for key in ("REPLY_ID", "replyId", "reply_id"):
+        value = params.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+        if isinstance(value, str) and value.strip().isdigit() and int(value.strip()) > 0:
+            return int(value.strip())
+    return None
+
+
 def _bridge_is_configured() -> bool:
     return BITRIX_WEBHOOK_BRIDGE_ENABLED and bool(MIRROR_INTERNAL_BASE_URL and MIRROR_INTERNAL_WEBHOOK_SECRET)
 
@@ -200,16 +211,18 @@ async def send_bot_message(dialog_id: str, message: str, bot_id: str = ""):
     return r.text
 
 
-async def forward_event_to_mirror(*, event: str, dialog_id: str, message_id: int | None) -> None:
+async def forward_event_to_mirror(*, event: str, dialog_id: str, message_id: int | None, reply_id: int | None = None) -> None:
     if not _bridge_is_configured():
         raise RuntimeError("MIRROR_INTERNAL_BASE_URL or MIRROR_INTERNAL_WEBHOOK_SECRET is not configured")
 
     target_url = f"{MIRROR_INTERNAL_BASE_URL}{MIRROR_INTERNAL_EVENT_PATH}"
-    payload = {
+    payload: dict = {
         "event": event,
         "dialog_id": dialog_id,
         "message_id": message_id,
     }
+    if reply_id is not None:
+        payload["reply_id"] = reply_id
     headers = {"X-Internal-Webhook-Secret": MIRROR_INTERNAL_WEBHOOK_SECRET}
 
     async with httpx.AsyncClient(timeout=MIRROR_INTERNAL_TIMEOUT_SECONDS) as client:
@@ -237,6 +250,7 @@ async def bitrix_bot(request: Request):
     dialog_id = detect_dialog_id(payload)
     message_text = detect_message_text(payload)
     message_id = detect_message_id(payload)
+    reply_id = detect_reply_id(payload)
     bot_id = detect_bot_id(payload)
 
     write_log(
@@ -245,6 +259,7 @@ async def bitrix_bot(request: Request):
             "event": event,
             "dialog_id": dialog_id,
             "message_id": message_id,
+            "reply_id": reply_id,
             "message_text": message_text[:200] if message_text else "",
             "bot_id": bot_id,
             "has_params": bool(params),
@@ -253,7 +268,7 @@ async def bitrix_bot(request: Request):
 
     try:
         if event in FORWARDED_EVENTS and dialog_id and _bridge_is_configured():
-            await forward_event_to_mirror(event=event, dialog_id=dialog_id, message_id=message_id)
+            await forward_event_to_mirror(event=event, dialog_id=dialog_id, message_id=message_id, reply_id=reply_id)
         elif event == "ONIMBOTJOINCHAT" and dialog_id:
             await send_bot_message(
                 dialog_id=dialog_id,

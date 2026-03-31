@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from urllib.parse import urlparse
 from typing import Any, Optional, cast
 
 import httpx
@@ -28,68 +27,86 @@ class BitrixClient:
 
     async def send_message(self, text: str, *, dialog_id: str) -> int:
         payload: dict[str, Any] = {
-            "DIALOG_ID": dialog_id,
-            "MESSAGE": text,
-            "SYSTEM": "N",
-            "URL_PREVIEW": "N" if self.settings.disable_link_preview else "Y",
-            "CLIENT_ID": self.settings.bitrix_bot_client_id,
+            "botId": self.settings.bitrix_bot_id,
+            "botToken": self.settings.bitrix_bot_client_id,
+            "dialogId": dialog_id,
+            "fields": {
+                "message": text,
+                "system": False,
+                "urlPreview": not self.settings.disable_link_preview,
+            },
         }
-        if self.settings.bitrix_bot_id is not None:
-            payload["BOT_ID"] = self.settings.bitrix_bot_id
-
-        data = await self._call("imbot.message.add", payload)
+        data = await self._call("imbot.v2.Chat.Message.send", payload)
         result = data.get("result")
-        if not isinstance(result, int):
+        if not isinstance(result, dict):
             raise RuntimeError(f"Unexpected Bitrix response: {data}")
-        return result
+        message_id = result.get("id")
+        if not isinstance(message_id, int):
+            raise RuntimeError(f"Missing id in imbot.v2.Chat.Message.send response: {data}")
+        return message_id
 
     async def update_message(self, *, message_id: int, text: str) -> None:
         payload: dict[str, Any] = {
-            "MESSAGE_ID": message_id,
-            "MESSAGE": text,
-            "URL_PREVIEW": "N" if self.settings.disable_link_preview else "Y",
-            "CLIENT_ID": self.settings.bitrix_bot_client_id,
+            "botId": self.settings.bitrix_bot_id,
+            "botToken": self.settings.bitrix_bot_client_id,
+            "messageId": message_id,
+            "fields": {
+                "message": text,
+                "urlPreview": "N" if self.settings.disable_link_preview else "Y",
+            },
         }
-        if self.settings.bitrix_bot_id is not None:
-            payload["BOT_ID"] = self.settings.bitrix_bot_id
-        data = await self._call("imbot.message.update", payload)
+        data = await self._call("imbot.v2.Chat.Message.update", payload)
         result = data.get("result")
-        if result not in (True, "Y", 1):
+        if result is not True:
             raise RuntimeError(f"Unexpected Bitrix response: {data}")
 
     async def set_message_like(self, message_id: int, *, liked: bool) -> None:
-        action = "plus" if liked else "minus"
+        method = "imbot.v2.Chat.Message.Reaction.add" if liked else "imbot.v2.Chat.Message.Reaction.delete"
         payload: dict[str, Any] = {
-            "MESSAGE_ID": message_id,
-            "ACTION": action,
-            "CLIENT_ID": self.settings.bitrix_bot_client_id,
+            "botId": self.settings.bitrix_bot_id,
+            "botToken": self.settings.bitrix_bot_client_id,
+            "messageId": message_id,
+            "reaction": "like",
         }
-        if self.settings.bitrix_bot_id is not None:
-            payload["BOT_ID"] = self.settings.bitrix_bot_id
         try:
-            data = await self._call("imbot.message.like", payload)
+            data = await self._call(method, payload)
         except RuntimeError as exc:
-            if "WITHOUT_CHANGES" in str(exc):
+            err = str(exc)
+            if "REACTION_ALREADY_SET" in err or "REACTION_NOT_FOUND" in err:
                 return
             raise
         result = data.get("result")
-        if result not in (True, "Y", 1):
+        if result is not True:
             raise RuntimeError(f"Unexpected Bitrix response: {data}")
 
     async def send_photo(self, *, caption: str, filename: str, content: bytes, dialog_id: str) -> int:
         encoded = base64.b64encode(content).decode("ascii")
-        previous_message_id = await self.get_latest_message_id(dialog_id=dialog_id)
-        folder_id = await self._get_chat_upload_folder_id(dialog_id)
-        uploaded_file_id = await self._upload_file_to_folder(folder_id=folder_id, filename=filename, encoded_content=encoded)
-        commit_result = await self._commit_chat_file(dialog_id=dialog_id, file_id=uploaded_file_id, message=caption)
-        message_id = self._extract_message_id(commit_result)
-        if message_id is not None:
-            return message_id
-        return await self._find_committed_message_id(
+        return await self._upload_file(
             dialog_id=dialog_id,
-            after_id=previous_message_id,
-            expected_file_id=uploaded_file_id,
+            filename=filename,
+            encoded=encoded,
+            caption=caption,
         )
+
+    async def _upload_file(self, *, dialog_id: str, filename: str, encoded: str, caption: str) -> int:
+        payload: dict[str, Any] = {
+            "botId": self.settings.bitrix_bot_id,
+            "botToken": self.settings.bitrix_bot_client_id,
+            "dialogId": dialog_id,
+            "fields": {
+                "name": filename,
+                "content": encoded,
+                "message": caption,
+            },
+        }
+        data = await self._call("imbot.v2.File.upload", payload)
+        result = data.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Unexpected Bitrix response for imbot.v2.File.upload: {data}")
+        message_id = result.get("messageId")
+        if not isinstance(message_id, int):
+            raise RuntimeError(f"Missing messageId in imbot.v2.File.upload response: {data}")
+        return message_id
 
     async def get_latest_message_id(self, *, dialog_id: str) -> Optional[int]:
         snapshot = await self.get_messages_page(dialog_id=dialog_id, limit=1)
@@ -218,58 +235,42 @@ class BitrixClient:
         raise RuntimeError(f"Bitrix file download exhausted retries for {url}")
 
     async def download_file_by_id(self, file_id: int, fallback_url: Optional[str] = None) -> bytes:
-        candidate_urls = await self._get_file_download_candidates(file_id)
-        if fallback_url:
-            candidate_urls.append(fallback_url)
+        primary_url: Optional[str] = None
+        try:
+            primary_url = await self._get_file_download_url(file_id)
+        except Exception as exc:
+            logger.warning("Failed to resolve download URL for Bitrix file_id=%s: %s", file_id, exc)
+
+        candidate_urls = [u for u in (primary_url, fallback_url) if u]
+        if not candidate_urls:
+            raise RuntimeError(f"Unable to download Bitrix file_id={file_id}: no URLs resolved")
 
         errors: list[str] = []
-        seen: set[str] = set()
-        for candidate_url in candidate_urls:
-            normalized = candidate_url.strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
+        for url in candidate_urls:
             try:
-                return await self.download_file(normalized)
+                return await self.download_file(url)
             except Exception as exc:
-                logger.warning("Failed to download Bitrix file_id=%s using %s: %s", file_id, normalized, exc)
-                errors.append(f"{normalized}: {exc}")
+                logger.warning("Failed to download Bitrix file_id=%s using %s: %s", file_id, url, exc)
+                errors.append(f"{url}: {exc}")
 
         raise RuntimeError(
-            f"Unable to download Bitrix file_id={file_id}. Tried: {' | '.join(errors) if errors else 'no URLs resolved'}"
+            f"Unable to download Bitrix file_id={file_id}. Tried: {' | '.join(errors)}"
         )
 
-    async def _get_file_download_candidates(self, file_id: int) -> list[str]:
-        data = await self._call("disk.file.get", {"id": file_id})
+    async def _get_file_download_url(self, file_id: int) -> str:
+        payload: dict[str, Any] = {
+            "botId": self.settings.bitrix_bot_id,
+            "botToken": self.settings.bitrix_bot_client_id,
+            "fileId": file_id,
+        }
+        data = await self._call("imbot.v2.File.download", payload)
         result = data.get("result")
         if not isinstance(result, dict):
-            raise RuntimeError(f"Unexpected Bitrix response for disk.file.get: {data}")
-
-        candidates: list[str] = []
-        for key in (
-            "DOWNLOAD_URL",
-            "downloadUrl",
-            "URL_DOWNLOAD",
-            "urlDownload",
-            "DETAIL_URL",
-            "detailUrl",
-            "SHOW_URL",
-            "showUrl",
-        ):
-            value = result.get(key)
-            if isinstance(value, str) and value.strip():
-                candidates.append(self._normalize_bitrix_url(value.strip()))
-        return candidates
-
-    def _normalize_bitrix_url(self, value: str) -> str:
-        if value.startswith(("http://", "https://")):
-            return value
-
-        parsed = urlparse(self.settings.bitrix_webhook_base)
-        base = f"{parsed.scheme}://{parsed.netloc}"
-        if value.startswith("/"):
-            return f"{base}{value}"
-        return f"{base}/{value}"
+            raise RuntimeError(f"Unexpected Bitrix response for imbot.v2.File.download: {data}")
+        download_url = result.get("downloadUrl")
+        if not isinstance(download_url, str) or not download_url.strip():
+            raise RuntimeError(f"Missing downloadUrl in imbot.v2.File.download response: {data}")
+        return download_url.strip()
 
     async def _call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = f"{self.settings.bitrix_webhook_base}/{method}"
@@ -314,93 +315,6 @@ class BitrixClient:
                 delay = min(delay * 2, self.settings.bitrix_retry_max_delay_seconds)
 
         raise RuntimeError(f"Bitrix call {method} exhausted retries without returning a response")
-
-    async def _get_chat_upload_folder_id(self, dialog_id: str) -> int:
-        payload: dict[str, Any] = {"DIALOG_ID": dialog_id, "CLIENT_ID": self.settings.bitrix_bot_client_id}
-        if self.settings.bitrix_bot_id is not None:
-            payload["BOT_ID"] = self.settings.bitrix_bot_id
-        data = await self._call("im.disk.folder.get", payload)
-        result = data.get("result")
-        if not isinstance(result, dict):
-            raise RuntimeError(f"Unexpected Bitrix response for im.disk.folder.get: {data}")
-        folder_id = result.get("ID")
-        if not isinstance(folder_id, int):
-            raise RuntimeError(f"Unexpected Bitrix folder payload: {data}")
-        return folder_id
-
-    async def _upload_file_to_folder(self, *, folder_id: int, filename: str, encoded_content: str) -> int:
-        data = await self._call(
-            "disk.folder.uploadfile",
-            {
-                "id": folder_id,
-                "data": {"NAME": filename},
-                "fileContent": [filename, encoded_content],
-                "generateUniqueName": True,
-            },
-        )
-        result = data.get("result")
-        if not isinstance(result, dict):
-            raise RuntimeError(f"Unexpected Bitrix response for disk.folder.uploadfile: {data}")
-        file_id = result.get("ID")
-        if not isinstance(file_id, int):
-            raise RuntimeError(f"Unexpected Bitrix upload payload: {data}")
-        return file_id
-
-    async def _commit_chat_file(self, *, dialog_id: str, file_id: int, message: str) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "DIALOG_ID": dialog_id,
-            "FILE_ID": [file_id],
-            "MESSAGE": message,
-            "CLIENT_ID": self.settings.bitrix_bot_client_id,
-        }
-        if self.settings.bitrix_bot_id is not None:
-            payload["BOT_ID"] = self.settings.bitrix_bot_id
-        data = await self._call(
-            "im.disk.file.commit",
-            payload,
-        )
-        result = data.get("result")
-        if not isinstance(result, dict):
-            raise RuntimeError(f"Unexpected Bitrix response for im.disk.file.commit: {data}")
-        return result
-
-    async def _find_committed_message_id(
-        self,
-        *,
-        dialog_id: str,
-        after_id: Optional[int],
-        expected_file_id: int,
-    ) -> int:
-        first_id = after_id if after_id is not None else 0
-        for attempt in range(4):
-            snapshot = await self.get_messages_after(dialog_id=dialog_id, after_id=first_id)
-            for message in reversed(snapshot.messages):
-                if expected_file_id in message.file_ids:
-                    return message.message_id
-            if attempt < 3:
-                await asyncio.sleep(0.4)
-        raise RuntimeError(
-            f"Bitrix committed a file to dialog {dialog_id}, but the resulting message id could not be resolved"
-        )
-
-    def _extract_message_id(self, payload: Any) -> Optional[int]:
-        if isinstance(payload, dict):
-            for key in ("MESSAGE_ID", "message_id", "messageId"):
-                value = payload.get(key)
-                if isinstance(value, int):
-                    return value
-                if isinstance(value, str) and value.strip().isdigit():
-                    return int(value.strip())
-            for value in payload.values():
-                nested = self._extract_message_id(value)
-                if nested is not None:
-                    return nested
-        if isinstance(payload, list):
-            for item in payload:
-                nested = self._extract_message_id(item)
-                if nested is not None:
-                    return nested
-        return None
 
     def _merge_snapshots(
         self,

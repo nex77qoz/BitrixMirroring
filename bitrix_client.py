@@ -195,6 +195,9 @@ class BitrixClient:
         if not isinstance(raw_files, (list, dict)):
             raise RuntimeError(f"Unexpected Bitrix files payload: {data}")
 
+        for payload_item in messages:
+            logger.debug("RAW Bitrix message payload: %s", payload_item)
+
         parsed_messages = [
             message
             for payload_item in messages

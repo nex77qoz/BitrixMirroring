@@ -18,6 +18,8 @@ from mirror_state_store import MirrorStateStore
 from models import BitrixDialogSnapshot, BitrixFile, BitrixMessage, CursorState, MessageMirrorLink, MirrorOrigin
 from settings import ChatMapping, Settings
 
+import dataclasses
+
 logger = logging.getLogger("tg-bitrix-mirror")
 
 # BBCode tags used by Bitrix24 chat, mapped to equivalent Telegram HTML tags.
@@ -71,6 +73,7 @@ class MirrorService:
         self._application: Optional[Application] = None
         self._bitrix_sync_locks: dict[str, asyncio.Lock] = {}
         self._bitrix_on_demand_tasks: dict[str, asyncio.Task[None]] = {}
+        self._webhook_reply_cache: dict[int, int] = {}
 
     def get_mapping_for_telegram_chat(self, tg_chat_id: int) -> Optional[ChatMapping]:
         return self._tg_to_mapping.get(tg_chat_id)
@@ -167,7 +170,14 @@ class MirrorService:
     async def enqueue_telegram_message(self, message: Message) -> None:
         await self._send_queue.put(message)
 
-    async def schedule_bitrix_dialog_sync(self, dialog_id: str, *, trigger: str) -> bool:
+    async def schedule_bitrix_dialog_sync(
+        self,
+        dialog_id: str,
+        *,
+        trigger: str,
+        message_id: Optional[int] = None,
+        reply_id: Optional[int] = None,
+    ) -> bool:
         if not self.settings.sync_bitrix_to_telegram:
             return False
         if self._application is None:
@@ -177,6 +187,15 @@ class MirrorService:
         if mapping is None:
             logger.debug("Ignoring Bitrix webhook for unmapped dialog %s", dialog_id)
             return False
+
+        if message_id is not None and reply_id is not None:
+            self._webhook_reply_cache[message_id] = reply_id
+            logger.info("Cached webhook reply_id: message %s -> reply_id %s", message_id, reply_id)
+            # Prevent unbounded growth
+            if len(self._webhook_reply_cache) > 1000:
+                oldest_keys = sorted(self._webhook_reply_cache)[:500]
+                for k in oldest_keys:
+                    self._webhook_reply_cache.pop(k, None)
 
         existing = self._bitrix_on_demand_tasks.get(dialog_id)
         if existing is not None and not existing.done():
@@ -409,6 +428,14 @@ class MirrorService:
         fresh_messages: list[BitrixMessage] = []
         for message in snapshot.messages:
             if await self._should_forward_bitrix_message(dialog_id, message):
+                # Supplement reply_id from webhook cache if API didn't provide it
+                if message.reply_id is None and message.message_id in self._webhook_reply_cache:
+                    cached_reply = self._webhook_reply_cache.pop(message.message_id)
+                    message = dataclasses.replace(message, reply_id=cached_reply)
+                    logger.info(
+                        "Supplemented reply_id from webhook cache: message %s -> reply_id %s",
+                        message.message_id, cached_reply,
+                    )
                 fresh_messages.append(message)
 
         message_thread_id = next(iter(mapping.topic_ids)) if len(mapping.topic_ids) == 1 else None
@@ -421,6 +448,15 @@ class MirrorService:
                 )
                 if reply_link is not None:
                     reply_tg_id = reply_link.telegram_message_id
+                    logger.info(
+                        "Reply chain resolved: bitrix_msg=%s reply_id=%s -> tg_msg=%s",
+                        bitrix_message.message_id, bitrix_message.reply_id, reply_tg_id,
+                    )
+                else:
+                    logger.warning(
+                        "Reply chain broken: bitrix_msg=%s reply_id=%s not found in message_links DB",
+                        bitrix_message.message_id, bitrix_message.reply_id,
+                    )
             forwarded = await self._forward_bitrix_message(application, snapshot, bitrix_message, sender_name, tg_chat_id=tg_chat_id, message_thread_id=message_thread_id, reply_to_message_id=reply_tg_id)
             logger.info(
                 "Mirrored Bitrix message %s from dialog %s to Telegram chat %s (photo=%s)",

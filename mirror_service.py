@@ -99,7 +99,7 @@ class MirrorService:
         return message.message_thread_id in mapping.topic_ids
 
     def render_telegram_message(self, message: Message) -> str:
-        lines: list[str] = ["Сообщение из Телеграм"]
+        lines: list[str] = []
 
         if self.settings.prefix_with_sender:
             sender = self._sender_name(message)
@@ -111,7 +111,6 @@ class MirrorService:
 
     def render_bitrix_message(self, bitrix_message: BitrixMessage, sender_name: str) -> str:
         lines: list[str] = [
-            "Сообщение из Битрикс",
             f"Отправитель: <b>{html.escape(sender_name)}</b>",
         ]
         text = bitrix_message.text.strip()

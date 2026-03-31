@@ -102,26 +102,6 @@ class MirrorService:
             sender = self._sender_name(message)
             lines.append(f"Отправитель: [B]{sender}[/B]")
 
-        if message.reply_to_message:
-            # In Telegram Forum groups every message in a topic has reply_to_message set
-            # to the topic's own header service message (its ID equals message_thread_id).
-            # That is NOT a real user reply — skip it to avoid false "Ответ на сообщение".
-            is_topic_header_reply = (
-                message.message_thread_id is not None
-                and message.reply_to_message.message_id == message.message_thread_id
-            )
-            if not is_topic_header_reply:
-                reply_raw = self._extract_primary_text(message.reply_to_message)
-                # Strip mirrored message headers so only the actual body is shown
-                if reply_raw.startswith(("Сообщение из Битрикс", "Сообщение из Телеграм")):
-                    parts = reply_raw.split("\n\n", 1)
-                    reply_raw = parts[1] if len(parts) > 1 else reply_raw
-                reply_excerpt = self._shorten(reply_raw, 120)
-                if reply_excerpt:
-                    lines.append(f"[B]Ответ на:[/B] [I]{reply_excerpt}[/I]")
-                else:
-                    lines.append("[B]Ответ на сообщение[/B]")
-
         lines.append("")
         lines.append(self._build_body(message))
         return "\n".join(lines).strip()
@@ -316,11 +296,24 @@ class MirrorService:
                     logger.warning("No mapping found for telegram chat_id=%s, dropping message", message.chat_id)
                     continue
                 dialog_id = mapping.bitrix_dialog_id
+                reply_bitrix_id: Optional[int] = None
+                if message.reply_to_message:
+                    is_topic_header_reply = (
+                        message.message_thread_id is not None
+                        and message.reply_to_message.message_id == message.message_thread_id
+                    )
+                    if not is_topic_header_reply:
+                        reply_link = await self.state_store.get_link_by_telegram_message(
+                            telegram_chat_id=message.chat_id,
+                            telegram_message_id=message.reply_to_message.message_id,
+                        )
+                        if reply_link is not None:
+                            reply_bitrix_id = reply_link.bitrix_message_id
                 if self._has_uploadable_file(message):
-                    bitrix_message_id = await self._forward_telegram_file_to_bitrix(message, dialog_id=dialog_id)
+                    bitrix_message_id = await self._forward_telegram_file_to_bitrix(message, dialog_id=dialog_id, reply_id=reply_bitrix_id)
                 else:
                     bitrix_message_id = await self.bitrix.send_message(
-                        self.render_telegram_message(message), dialog_id=dialog_id,
+                        self.render_telegram_message(message), dialog_id=dialog_id, reply_id=reply_bitrix_id,
                     )
                 await self.state_store.upsert_link(
                     telegram_chat_id=message.chat_id,
@@ -476,7 +469,7 @@ class MirrorService:
             or message.audio
         )
 
-    async def _forward_telegram_file_to_bitrix(self, message: Message, *, dialog_id: str) -> int:
+    async def _forward_telegram_file_to_bitrix(self, message: Message, *, dialog_id: str, reply_id: Optional[int] = None) -> int:
         if message.photo:
             file_source = message.photo[-1]
             original_name = None
@@ -505,6 +498,7 @@ class MirrorService:
             return await self.bitrix.send_message(
                 self.render_telegram_message(message) + "\n\n[Файл слишком большой для пересылки]",
                 dialog_id=dialog_id,
+                reply_id=reply_id,
             )
         file_path_name = telegram_file.file_path.rsplit("/", 1)[-1] if telegram_file.file_path else None
         filename = original_name or file_path_name or fallback_name
@@ -513,6 +507,7 @@ class MirrorService:
             filename=filename,
             content=bytes(file_bytes),
             dialog_id=dialog_id,
+            reply_id=reply_id,
         )
 
     async def _forward_bitrix_message(

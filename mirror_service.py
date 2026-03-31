@@ -436,6 +436,17 @@ class MirrorService:
                         "Supplemented reply_id from webhook cache: message %s -> reply_id %s",
                         message.message_id, cached_reply,
                     )
+                # Fallback: fetch reply_id via im.dialog.messages.search
+                if message.reply_id is None:
+                    search_reply_id = await self.bitrix.get_message_reply_id(
+                        dialog_id=dialog_id, message_id=message.message_id,
+                    )
+                    if search_reply_id is not None:
+                        message = dataclasses.replace(message, reply_id=search_reply_id)
+                        logger.info(
+                            "Fetched reply_id via search API: message %s -> reply_id %s",
+                            message.message_id, search_reply_id,
+                        )
                 fresh_messages.append(message)
 
         message_thread_id = next(iter(mapping.topic_ids)) if len(mapping.topic_ids) == 1 else None

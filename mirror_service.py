@@ -100,7 +100,7 @@ class MirrorService:
 
         if self.settings.prefix_with_sender:
             sender = self._sender_name(message)
-            lines.append(f"Отправитель: {sender}")
+            lines.append(f"Отправитель: [B]{sender}[/B]")
 
         if message.reply_to_message:
             # In Telegram Forum groups every message in a topic has reply_to_message set
@@ -118,9 +118,9 @@ class MirrorService:
                     reply_raw = parts[1] if len(parts) > 1 else reply_raw
                 reply_excerpt = self._shorten(reply_raw, 120)
                 if reply_excerpt:
-                    lines.append(f"Ответ на: {reply_excerpt}")
+                    lines.append(f"[B]Ответ на:[/B] [I]{reply_excerpt}[/I]")
                 else:
-                    lines.append("Ответ на сообщение")
+                    lines.append("[B]Ответ на сообщение[/B]")
 
         lines.append("")
         lines.append(self._build_body(message))
@@ -129,7 +129,7 @@ class MirrorService:
     def render_bitrix_message(self, bitrix_message: BitrixMessage, sender_name: str) -> str:
         lines: list[str] = [
             "Сообщение из Битрикс",
-            f"Отправитель: {html.escape(sender_name)}",
+            f"Отправитель: <b>{html.escape(sender_name)}</b>",
         ]
         text = bitrix_message.text.strip()
         if text:

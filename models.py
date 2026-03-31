@@ -38,6 +38,7 @@ class BitrixMessage:
     file_ids: tuple[int, ...]
     update_time_unix: Optional[int]
     like_user_ids: tuple[int, ...]
+    reply_id: Optional[int] = None
     is_sticker: bool = False
     is_meeting: bool = False
     is_task: bool = False
@@ -91,6 +92,14 @@ class BitrixMessage:
         is_meeting = isinstance(params, dict) and bool(params.get("MEETING_CONFIRM"))
         is_task = isinstance(params, dict) and bool(params.get("TASK_ID"))
 
+        reply_id: Optional[int] = None
+        if isinstance(params, dict):
+            raw_reply_id = params.get("REPLY_ID") or params.get("replyId")
+            if isinstance(raw_reply_id, int):
+                reply_id = raw_reply_id
+            elif isinstance(raw_reply_id, str) and raw_reply_id.strip().isdigit():
+                reply_id = int(raw_reply_id.strip())
+
         return BitrixMessage(
             message_id=raw_message_id,
             author_id=author_id,
@@ -103,6 +112,7 @@ class BitrixMessage:
                 or payload.get("dateModified")
             ),
             like_user_ids=tuple(sorted(like_user_ids)),
+            reply_id=reply_id,
             is_sticker=is_sticker,
             is_meeting=is_meeting,
             is_task=is_task,

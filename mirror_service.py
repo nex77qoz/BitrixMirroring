@@ -414,7 +414,14 @@ class MirrorService:
         message_thread_id = next(iter(mapping.topic_ids)) if len(mapping.topic_ids) == 1 else None
         for bitrix_message in fresh_messages:
             sender_name = self._resolve_bitrix_sender_name(snapshot, bitrix_message)
-            forwarded = await self._forward_bitrix_message(application, snapshot, bitrix_message, sender_name, tg_chat_id=tg_chat_id, message_thread_id=message_thread_id)
+            reply_tg_id: Optional[int] = None
+            if bitrix_message.reply_id is not None:
+                reply_link = await self.state_store.get_link_by_bitrix_message(
+                    bitrix_message_id=bitrix_message.reply_id
+                )
+                if reply_link is not None:
+                    reply_tg_id = reply_link.telegram_message_id
+            forwarded = await self._forward_bitrix_message(application, snapshot, bitrix_message, sender_name, tg_chat_id=tg_chat_id, message_thread_id=message_thread_id, reply_to_message_id=reply_tg_id)
             logger.info(
                 "Mirrored Bitrix message %s from dialog %s to Telegram chat %s (photo=%s)",
                 bitrix_message.message_id,
@@ -519,6 +526,7 @@ class MirrorService:
         *,
         tg_chat_id: int,
         message_thread_id: Optional[int] = None,
+        reply_to_message_id: Optional[int] = None,
     ) -> Message:
         rendered = self.render_bitrix_message(bitrix_message, sender_name=sender_name)
         attachment = self._select_bitrix_file(snapshot, bitrix_message)
@@ -526,6 +534,7 @@ class MirrorService:
             return await application.bot.send_message(
                 chat_id=tg_chat_id,
                 message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
                 text=rendered,
                 parse_mode="HTML",
                 disable_web_page_preview=self.settings.disable_link_preview,
@@ -540,6 +549,7 @@ class MirrorService:
                 return await application.bot.send_message(
                     chat_id=tg_chat_id,
                     message_thread_id=message_thread_id,
+                    reply_to_message_id=reply_to_message_id,
                     text=rendered + "\n\n[Файл слишком большой для пересылки]",
                     parse_mode="HTML",
                     disable_web_page_preview=self.settings.disable_link_preview,
@@ -549,6 +559,7 @@ class MirrorService:
                 return await application.bot.send_photo(
                     chat_id=tg_chat_id,
                     message_thread_id=message_thread_id,
+                    reply_to_message_id=reply_to_message_id,
                     photo=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
@@ -558,6 +569,7 @@ class MirrorService:
                 return await application.bot.send_video(
                     chat_id=tg_chat_id,
                     message_thread_id=message_thread_id,
+                    reply_to_message_id=reply_to_message_id,
                     video=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
@@ -567,6 +579,7 @@ class MirrorService:
                 return await application.bot.send_audio(
                     chat_id=tg_chat_id,
                     message_thread_id=message_thread_id,
+                    reply_to_message_id=reply_to_message_id,
                     audio=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
@@ -576,6 +589,7 @@ class MirrorService:
                 return await application.bot.send_document(
                     chat_id=tg_chat_id,
                     message_thread_id=message_thread_id,
+                    reply_to_message_id=reply_to_message_id,
                     document=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
@@ -586,6 +600,7 @@ class MirrorService:
             return await application.bot.send_message(
                 chat_id=tg_chat_id,
                 message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
                 text=rendered,
                 parse_mode="HTML",
                 disable_web_page_preview=self.settings.disable_link_preview,

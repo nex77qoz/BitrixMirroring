@@ -35,6 +35,9 @@ SVC_GROUP="bitrix-bot"
 # Set to true by step_setup_ssl when user skips SSL
 SKIP_SSL=false
 
+# Set to true when user says Telegram webhook is already configured
+TELEGRAM_WEBHOOK_ALREADY_SET=false
+
 # SSH auth mode: "key" or "both"
 SSH_AUTH_MODE="both"
 
@@ -276,6 +279,16 @@ step_create_service_user() {
     # Grant ownership of install directory
     chown -R "$SVC_USER:$SVC_GROUP" "$INSTALL_DIR"
     print_ok "Владелец $INSTALL_DIR → $SVC_USER:$SVC_GROUP"
+
+    # Allow the service user to restart the bot services without a password
+    # (required by the monitoring dashboard's restart endpoint)
+    local sudoers_file="/etc/sudoers.d/bitrix-bot-services"
+    cat > "$sudoers_file" << EOF
+# Allow $SVC_USER to restart bot services (used by monitoring dashboard)
+${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-bot, /usr/bin/systemctl restart bitrix-monitor
+EOF
+    chmod 440 "$sudoers_file"
+    print_ok "Sudoers-правило создано: $sudoers_file"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -438,6 +451,18 @@ step_collect_config() {
     ask_secret TELEGRAM_BOT_TOKEN "Telegram Bot Token"
 
     TELEGRAM_WEBHOOK_ENABLED="true"
+
+    echo ""
+    echo -en "  ${YELLOW}Вебхук для бота уже настроен? (y/N): ${RESET}"
+    read -r webhook_already_set
+    if [[ "${webhook_already_set,,}" == "y" ]]; then
+        TELEGRAM_WEBHOOK_ALREADY_SET=true
+        print_info "Вебхук уже настроен — будет запрошен только секрет"
+    else
+        TELEGRAM_WEBHOOK_ALREADY_SET=false
+        print_info "Вебхук будет зарегистрирован автоматически после запуска сервисов"
+    fi
+
     print_info "Ввод скрыт — символы не отображаются"
     ask_secret TELEGRAM_WEBHOOK_SECRET "Секрет Telegram webhook"
 
@@ -502,12 +527,9 @@ MIRROR_INTERNAL_WEBHOOK_SECRET=$(env_escape "${MIRROR_INTERNAL_WEBHOOK_SECRET:-}
 MIRROR_INTERNAL_TIMEOUT_SECONDS=10
 BITRIX_FORWARDED_EVENTS=$(env_escape "ONIMBOTMESSAGEADD,ONIMBOTJOINCHAT")
 
-# Маппинг чатов (добавляется в следующем шаге)
-
 # Форматирование
 PREFIX_WITH_CHAT_TITLE=true
 PREFIX_WITH_SENDER=true
-PREFIX_WITH_TIMESTAMP=true
 BITRIX_DISABLE_LINK_PREVIEW=true
 
 # Синхронизация
@@ -517,7 +539,6 @@ BITRIX_POLL_INTERVAL_SECONDS=${BITRIX_POLL_INTERVAL_SECONDS_VALUE}
 
 # Хранилище
 MIRROR_STATE_DB_PATH=$(env_escape "${INSTALL_DIR}/mirror_state.sqlite3")
-BITRIX_CURSOR_STATE_PATH=$(env_escape "${INSTALL_DIR}/bitrix_cursor_state.json")
 
 # Retry / backoff
 BITRIX_RETRY_ATTEMPTS=4
@@ -527,7 +548,6 @@ BITRIX_POLL_ERROR_BACKOFF_SECONDS=2
 BITRIX_POLL_MAX_BACKOFF_SECONDS=30
 
 # Производительность
-BITRIX_USER_CACHE_TTL_SECONDS=300
 BITRIX_MAX_CONCURRENT_REQUESTS=5
 BITRIX_SEND_QUEUE_MAXSIZE=1000
 BITRIX_SEND_WORKERS=2
@@ -855,6 +875,11 @@ EOF
 # STEP 8 — Create and enable systemd services
 # ──────────────────────────────────────────────────────────────────────────────
 step_create_services() {
+    # Pass --no-start to only write unit files and enable (no start/restart).
+    # Used by do_update to avoid a no-op start on already-running services.
+    local _no_start=false
+    [[ "${1:-}" == "--no-start" ]] && _no_start=true
+
     print_step "Создание systemd-сервисов"
 
     # 1 — main mirror process
@@ -926,12 +951,67 @@ EOF
         print_ok "Сервис $svc включён в автозапуск"
     done
 
-    for svc in "${SERVICES[@]}"; do
-        run_cmd systemctl start "$svc"
-        print_ok "Сервис $svc запущен"
-    done
+    if [[ "$_no_start" == false ]]; then
+        for svc in "${SERVICES[@]}"; do
+            run_cmd systemctl start "$svc"
+            print_ok "Сервис $svc запущен"
+        done
+        sleep 3
+    fi
+}
 
-    sleep 3
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 8b — Register Telegram webhook
+# ──────────────────────────────────────────────────────────────────────────────
+step_setup_telegram_webhook() {
+    if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" != "true" ]]; then
+        return 0
+    fi
+
+    print_step "Настройка Telegram webhook"
+
+    local webhook_url="https://${DOMAIN}${TELEGRAM_WEBHOOK_PATH}"
+
+    if [[ "$TELEGRAM_WEBHOOK_ALREADY_SET" == "true" ]]; then
+        print_info "Вебхук уже настроен пользователем — регистрация пропущена"
+    else
+        print_info "Регистрация webhook: ${BOLD}${webhook_url}${RESET}"
+
+        local response
+        response=$(curl -s --max-time 15 -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            -H "Content-Type: application/json" \
+            -d "{\"url\": \"${webhook_url}\", \"secret_token\": \"${TELEGRAM_WEBHOOK_SECRET}\"}" \
+            2>/dev/null || echo '{"ok":false,"description":"curl error"}')
+
+        if echo "$response" | grep -q '"ok":true'; then
+            print_ok "Telegram webhook успешно зарегистрирован"
+        else
+            print_error "Ошибка регистрации webhook: $response"
+            print_info "Для ручной регистрации выполните:"
+            echo -e "    ${CYAN}curl -X POST \"https://api.telegram.org/bot<TOKEN>/setWebhook\" \\"
+            echo -e "      -H \"Content-Type: application/json\" \\"
+            echo -e "      -d '{\"url\": \"${webhook_url}\", \"secret_token\": \"<SECRET>\"}'${RESET}"
+        fi
+    fi
+
+    # Verification: send a test request with the secret token
+    print_info "Проверка webhook endpoint (X-Telegram-Bot-Api-Secret-Token)..."
+    local code
+    code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 10 \
+        --resolve "${DOMAIN}:443:127.0.0.1" \
+        -X POST \
+        -H "X-Telegram-Bot-Api-Secret-Token: ${TELEGRAM_WEBHOOK_SECRET}" \
+        -H "Content-Type: application/json" \
+        -d '{"update_id":1}' \
+        "https://${DOMAIN}${TELEGRAM_WEBHOOK_PATH}" 2>/dev/null || echo "000")
+    if [[ "$code" == "200" ]]; then
+        print_ok "Webhook endpoint принимает запросы с корректным секретом (HTTP 200)"
+    elif [[ "$code" == "403" ]]; then
+        print_error "Webhook endpoint вернул 403 — проверьте TELEGRAM_WEBHOOK_SECRET в ${ENV_FILE}"
+    else
+        print_warn "Webhook endpoint вернул HTTP $code — убедитесь, что сервисы запущены и SSL настроен"
+    fi
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -998,15 +1078,12 @@ SQL
             "INSERT OR REPLACE INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix) \
              VALUES ($tg_id, '$(echo "$bx_id" | sed "s/'/''/g")', '$(echo "$label" | sed "s/'/''/g")', $(date +%s));"
 
-        # Append to .env
-        echo "CHAT_MAPPING_${counter}=${tg_id}:${bx_id}" >> "$ENV_FILE"
-
         print_ok "Маппинг #${counter} добавлен: Telegram ${tg_id} → Bitrix ${bx_id}"
         (( counter++ ))
     done
 
     if [[ $counter -eq 1 ]]; then
-        print_warn "Маппинги не добавлены. Добавьте их вручную позднее в $ENV_FILE"
+        print_warn "Маппинги не добавлены. Добавьте их позднее через дашборд мониторинга: https://${DOMAIN}/monitor"
     fi
 
     # Restart services to pick up new env/db
@@ -1311,19 +1388,55 @@ do_update() {
         exit 1
     fi
 
+    # ── Защита пользовательских данных ────────────────────────────────────────
+    # .env и mirror_state.sqlite3 перечислены в .gitignore и не затрагиваются
+    # git pull. Выводим явное подтверждение, чтобы было видно что они целы.
+    print_info "Проверка сохранности конфигурации..."
+    for _protected in "$ENV_FILE" "$DB_FILE"; do
+        if [[ -f "$_protected" ]]; then
+            print_ok "Сохранён (не перезаписывается): $(basename "$_protected")"
+        fi
+    done
+
+    # ── git pull ───────────────────────────────────────────────────────────────
     git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
-    run_cmd git -C "$INSTALL_DIR" pull
+    print_info "Получение обновлений из репозитория..."
+    local _pull_output _pull_exit
+    _pull_output=$(git -C "$INSTALL_DIR" pull 2>&1) || _pull_exit=$?
+    log "CMD: git -C $INSTALL_DIR pull"
+    log "OUTPUT: $_pull_output"
+    # Show output line-by-line so user can see what happened
+    while IFS= read -r _line; do
+        print_info "git: $_line"
+    done <<< "$_pull_output"
+    if [[ "${_pull_exit:-0}" -ne 0 ]]; then
+        print_error "git pull завершился с ошибкой — подробности: $LOG_FILE"
+        exit 1
+    fi
+    if echo "$_pull_output" | grep -q "Already up to date"; then
+        print_warn "В репозитории нет новых изменений (Already up to date)."
+        print_warn "Убедитесь, что git push был сделан в правильный remote и ветку."
+    else
+        print_ok "Код бота обновлён из репозитория"
+    fi
+
+    # ── Python-зависимости ────────────────────────────────────────────────────
     run_cmd "$VENV/bin/pip" install --upgrade pip
     run_cmd "$VENV/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 
     load_installer_env
 
+    # ── nginx ─────────────────────────────────────────────────────────────────
     if [[ -n "$DOMAIN" ]]; then
         step_configure_nginx
     else
         print_warn "APP_DOMAIN не найден в $ENV_FILE; пропускаю пересборку nginx-конфига"
     fi
-    step_create_services
+
+    # ── systemd-юниты ─────────────────────────────────────────────────────────
+    # --no-start: только перезаписываем unit-файлы и enable;
+    # сами сервисы перезапускаем ниже через restart (не start).
+    step_create_services --no-start
 
     # Fix ownership after pull
     chown -R "${SVC_USER}:${SVC_GROUP}" "$INSTALL_DIR" 2>/dev/null || true
@@ -1442,6 +1555,7 @@ main() {
             step_setup_ssl
             step_configure_nginx
             step_create_services
+            step_setup_telegram_webhook
             step_setup_fail2ban
             step_setup_firewall
             step_setup_logrotate

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import logging
-import os
-import shutil
+import re
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -19,6 +19,34 @@ from models import BitrixDialogSnapshot, BitrixFile, BitrixMessage, CursorState,
 from settings import ChatMapping, Settings
 
 logger = logging.getLogger("tg-bitrix-mirror")
+
+# BBCode tags used by Bitrix24 chat, mapped to equivalent Telegram HTML tags.
+_BBCODE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\[b\](.*?)\[/b\]", re.DOTALL | re.IGNORECASE), r"<b>\1</b>"),
+    (re.compile(r"\[i\](.*?)\[/i\]", re.DOTALL | re.IGNORECASE), r"<i>\1</i>"),
+    (re.compile(r"\[u\](.*?)\[/u\]", re.DOTALL | re.IGNORECASE), r"<u>\1</u>"),
+    (re.compile(r"\[s\](.*?)\[/s\]", re.DOTALL | re.IGNORECASE), r"<s>\1</s>"),
+    (re.compile(r"\[code\](.*?)\[/code\]", re.DOTALL | re.IGNORECASE), r"<code>\1</code>"),
+    (re.compile(r"\[quote\](.*?)\[/quote\]", re.DOTALL | re.IGNORECASE), r"<blockquote>\1</blockquote>"),
+    # [url=https://example.com]label[/url]
+    (re.compile(r"\[url=([^\]]+)\](.*?)\[/url\]", re.DOTALL | re.IGNORECASE), r'<a href="\1">\2</a>'),
+    # [color=red]text[/color] — Telegram has no colour support; strip the tags, keep content
+    (re.compile(r"\[color=[^\]]+\](.*?)\[/color\]", re.DOTALL | re.IGNORECASE), r"\1"),
+]
+
+
+def _bbcode_to_html(text: str) -> str:
+    """Convert Bitrix BBCode markup to Telegram HTML markup.
+
+    Safely HTML-escapes the raw text first so that any ``<``, ``>``, or ``&``
+    characters in the message body do not break Telegram's HTML parser.  The
+    BBCode square-bracket tags survive ``html.escape`` untouched and are then
+    replaced with the corresponding HTML tags.
+    """
+    escaped = html.escape(text)
+    for pattern, replacement in _BBCODE_PATTERNS:
+        escaped = pattern.sub(replacement, escaped)
+    return escaped
 
 
 class MirrorService:
@@ -53,26 +81,46 @@ class MirrorService:
     def is_allowed_chat(self, message: Message) -> bool:
         return message.chat_id in self._tg_to_mapping
 
+    def is_allowed_topic(self, message: Message) -> bool:
+        """Return True if this message's forum topic is permitted by the mapping.
+
+        If the mapping has no topic_ids (empty frozenset), all topics are allowed.
+        Otherwise only messages whose message_thread_id is in topic_ids pass.
+        Messages without a thread (regular groups) are always allowed.
+        """
+        mapping = self._tg_to_mapping.get(message.chat_id)
+        if mapping is None:
+            return False
+        if not mapping.topic_ids:
+            return True
+        return message.message_thread_id in mapping.topic_ids
+
     def render_telegram_message(self, message: Message) -> str:
         lines: list[str] = ["Сообщение из Телеграм"]
-
-        if self.settings.prefix_with_chat_title:
-            chat_title = message.chat.title or message.chat.full_name or str(message.chat_id)
-            lines.append(f"Чат: {chat_title}")
-            if message.message_thread_id:
-                lines.append(f"Тема форума: {message.message_thread_id}")
 
         if self.settings.prefix_with_sender:
             sender = self._sender_name(message)
             lines.append(f"Отправитель: {sender}")
 
         if message.reply_to_message:
-            reply_sender = self._sender_name(message.reply_to_message)
-            reply_excerpt = self._shorten(self._extract_primary_text(message.reply_to_message), 120)
-            if reply_excerpt:
-                lines.append(f"Ответ на: {reply_sender} — {reply_excerpt}")
-            else:
-                lines.append(f"Ответ на сообщение от: {reply_sender}")
+            # In Telegram Forum groups every message in a topic has reply_to_message set
+            # to the topic's own header service message (its ID equals message_thread_id).
+            # That is NOT a real user reply — skip it to avoid false "Ответ на сообщение".
+            is_topic_header_reply = (
+                message.message_thread_id is not None
+                and message.reply_to_message.message_id == message.message_thread_id
+            )
+            if not is_topic_header_reply:
+                reply_raw = self._extract_primary_text(message.reply_to_message)
+                # Strip mirrored message headers so only the actual body is shown
+                if reply_raw.startswith(("Сообщение из Битрикс", "Сообщение из Телеграм")):
+                    parts = reply_raw.split("\n\n", 1)
+                    reply_raw = parts[1] if len(parts) > 1 else reply_raw
+                reply_excerpt = self._shorten(reply_raw, 120)
+                if reply_excerpt:
+                    lines.append(f"Ответ на: {reply_excerpt}")
+                else:
+                    lines.append("Ответ на сообщение")
 
         lines.append("")
         lines.append(self._build_body(message))
@@ -81,18 +129,23 @@ class MirrorService:
     def render_bitrix_message(self, bitrix_message: BitrixMessage, sender_name: str) -> str:
         lines: list[str] = [
             "Сообщение из Битрикс",
-            f"Отправитель: {sender_name}",
+            f"Отправитель: {html.escape(sender_name)}",
         ]
         text = bitrix_message.text.strip()
         if text:
             lines.append("")
-            lines.append(text)
+            lines.append(_bbcode_to_html(text))
         return "\n".join(lines).strip()
 
     async def start(self, application: Application) -> None:
         self._application = application
         self._stop_event.clear()
         await self.state_store.initialize()
+        if not self.settings.chat_mappings:
+            logger.warning(
+                "No chat mappings are configured. "
+                "Add mappings via the monitoring web dashboard (/monitor) and restart the service."
+            )
         await self._cleanup_stale_chat_links()
         self._telegram_to_bitrix_workers = [
             asyncio.create_task(self._telegram_to_bitrix_worker(), name=f"bitrix-send-worker-{index}")
@@ -365,9 +418,10 @@ class MirrorService:
             if await self._should_forward_bitrix_message(dialog_id, message):
                 fresh_messages.append(message)
 
+        message_thread_id = next(iter(mapping.topic_ids)) if len(mapping.topic_ids) == 1 else None
         for bitrix_message in fresh_messages:
             sender_name = self._resolve_bitrix_sender_name(snapshot, bitrix_message)
-            forwarded = await self._forward_bitrix_message(application, snapshot, bitrix_message, sender_name, tg_chat_id=tg_chat_id)
+            forwarded = await self._forward_bitrix_message(application, snapshot, bitrix_message, sender_name, tg_chat_id=tg_chat_id, message_thread_id=message_thread_id)
             logger.info(
                 "Mirrored Bitrix message %s from dialog %s to Telegram chat %s (photo=%s)",
                 bitrix_message.message_id,
@@ -393,6 +447,15 @@ class MirrorService:
         if bitrix_message.author_id == 0:
             logger.debug("Ignoring Bitrix service message %s from author_id=0", bitrix_message.message_id)
             return False
+        if bitrix_message.is_sticker:
+            logger.debug("Ignoring Bitrix sticker message %s", bitrix_message.message_id)
+            return False
+        if bitrix_message.is_meeting:
+            logger.debug("Ignoring Bitrix meeting card %s", bitrix_message.message_id)
+            return False
+        if bitrix_message.is_task:
+            logger.debug("Ignoring Bitrix task card %s", bitrix_message.message_id)
+            return False
         if not bitrix_message.text.strip() and not bitrix_message.file_ids:
             return False
         link = await self.state_store.get_link_by_bitrix_message(bitrix_message_id=bitrix_message.message_id)
@@ -411,9 +474,6 @@ class MirrorService:
             or message.document
             or message.video
             or message.audio
-            or message.voice
-            or message.video_note
-            or message.sticker
         )
 
     async def _forward_telegram_file_to_bitrix(self, message: Message, *, dialog_id: str) -> int:
@@ -433,18 +493,6 @@ class MirrorService:
             file_source = message.audio
             original_name = message.audio.file_name
             fallback_name = f"audio_{message.message_id}.ogg"
-        elif message.voice:
-            file_source = message.voice
-            original_name = None
-            fallback_name = f"voice_{message.message_id}.ogg"
-        elif message.video_note:
-            file_source = message.video_note
-            original_name = None
-            fallback_name = f"video_note_{message.message_id}.mp4"
-        elif message.sticker:
-            file_source = message.sticker
-            original_name = None
-            fallback_name = f"sticker_{message.message_id}.webp"
         else:
             raise ValueError("No uploadable file attachment found in message")
         telegram_file = await file_source.get_file()
@@ -475,13 +523,16 @@ class MirrorService:
         sender_name: str,
         *,
         tg_chat_id: int,
+        message_thread_id: Optional[int] = None,
     ) -> Message:
         rendered = self.render_bitrix_message(bitrix_message, sender_name=sender_name)
         attachment = self._select_bitrix_file(snapshot, bitrix_message)
         if attachment is None or not attachment.url_download:
             return await application.bot.send_message(
                 chat_id=tg_chat_id,
+                message_thread_id=message_thread_id,
                 text=rendered,
+                parse_mode="HTML",
                 disable_web_page_preview=self.settings.disable_link_preview,
             )
         try:
@@ -493,43 +544,55 @@ class MirrorService:
                 )
                 return await application.bot.send_message(
                     chat_id=tg_chat_id,
+                    message_thread_id=message_thread_id,
                     text=rendered + "\n\n[Файл слишком большой для пересылки]",
+                    parse_mode="HTML",
                     disable_web_page_preview=self.settings.disable_link_preview,
                 )
             mime = attachment.mime_type or ""
-            if mime.startswith("image/"):
+            if attachment.is_image:
                 return await application.bot.send_photo(
                     chat_id=tg_chat_id,
+                    message_thread_id=message_thread_id,
                     photo=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
+                    parse_mode="HTML",
                 )
             elif mime.startswith("video/"):
                 return await application.bot.send_video(
                     chat_id=tg_chat_id,
+                    message_thread_id=message_thread_id,
                     video=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
+                    parse_mode="HTML",
                 )
             elif mime.startswith("audio/"):
                 return await application.bot.send_audio(
                     chat_id=tg_chat_id,
+                    message_thread_id=message_thread_id,
                     audio=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
+                    parse_mode="HTML",
                 )
             else:
                 return await application.bot.send_document(
                     chat_id=tg_chat_id,
+                    message_thread_id=message_thread_id,
                     document=BytesIO(file_bytes),
                     filename=attachment.name,
                     caption=rendered or None,
+                    parse_mode="HTML",
                 )
         except Exception:
             logger.exception("Failed to forward Bitrix file for message %s, falling back to text", bitrix_message.message_id)
             return await application.bot.send_message(
                 chat_id=tg_chat_id,
+                message_thread_id=message_thread_id,
                 text=rendered,
+                parse_mode="HTML",
                 disable_web_page_preview=self.settings.disable_link_preview,
             )
 
@@ -677,13 +740,14 @@ class MirrorService:
     ) -> None:
         sender_name = self._resolve_bitrix_sender_name(snapshot, bitrix_message)
         rendered = self.render_bitrix_message(bitrix_message, sender_name=sender_name)
-        photo = self._select_bitrix_photo(snapshot, bitrix_message)
+        photo = self._select_bitrix_file(snapshot, bitrix_message)
         try:
             if photo is None:
                 await application.bot.edit_message_text(
                     chat_id=link.telegram_chat_id,
                     message_id=link.telegram_message_id,
                     text=rendered,
+                    parse_mode="HTML",
                     disable_web_page_preview=self.settings.disable_link_preview,
                 )
                 logger.info("Mirrored Bitrix edit %s to Telegram message %s", bitrix_message.message_id, link.telegram_message_id)
@@ -692,6 +756,7 @@ class MirrorService:
                 chat_id=link.telegram_chat_id,
                 message_id=link.telegram_message_id,
                 caption=rendered,
+                parse_mode="HTML",
             )
             logger.info("Mirrored Bitrix caption edit %s to Telegram message %s", bitrix_message.message_id, link.telegram_message_id)
         except ChatMigrated as exc:

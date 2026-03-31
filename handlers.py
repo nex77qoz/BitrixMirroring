@@ -58,6 +58,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         logger.debug("Ignoring message from chat_id=%s because it is not allowed", message.chat_id)
         return
 
+    if not mirror.is_allowed_topic(message):
+        logger.debug(
+            "Ignoring message from chat_id=%s thread_id=%s (topic not in allowed list)",
+            message.chat_id, message.message_thread_id,
+        )
+        return
+
     if any(
         [
             message.new_chat_members,
@@ -70,6 +77,24 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             message.migrate_to_chat_id,
         ]
     ):
+        return
+
+    if message.sticker:
+        logger.debug("Ignoring Telegram sticker message %s", message.message_id)
+        return
+
+    if any(
+        [
+            message.contact,
+            message.poll,
+            message.location,
+            message.venue,
+            message.voice,
+            message.video_note,
+            getattr(message, "checklist", None),  # Telegram task lists (Bot API 9+)
+        ]
+    ):
+        logger.debug("Ignoring unsupported message type for Telegram message %s", message.message_id)
         return
 
     await mirror.enqueue_telegram_message(message)
@@ -94,6 +119,13 @@ async def on_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if not mirror.is_allowed_chat(message):
         logger.debug("Ignoring edited message from chat_id=%s because it is not allowed", message.chat_id)
+        return
+
+    if not mirror.is_allowed_topic(message):
+        logger.debug(
+            "Ignoring edited message from chat_id=%s thread_id=%s (topic not in allowed list)",
+            message.chat_id, message.message_thread_id,
+        )
         return
 
     await mirror.sync_telegram_edit(message)

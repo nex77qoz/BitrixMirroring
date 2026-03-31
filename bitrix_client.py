@@ -59,8 +59,15 @@ class BitrixClient:
 
     async def set_message_like(self, message_id: int, *, liked: bool) -> None:
         action = "plus" if liked else "minus"
+        payload: dict[str, Any] = {
+            "MESSAGE_ID": message_id,
+            "ACTION": action,
+            "CLIENT_ID": self.settings.bitrix_bot_client_id,
+        }
+        if self.settings.bitrix_bot_id is not None:
+            payload["BOT_ID"] = self.settings.bitrix_bot_id
         try:
-            data = await self._call("im.message.like", {"MESSAGE_ID": message_id, "ACTION": action})
+            data = await self._call("imbot.message.like", payload)
         except RuntimeError as exc:
             if "WITHOUT_CHANGES" in str(exc):
                 return
@@ -309,7 +316,10 @@ class BitrixClient:
         raise RuntimeError(f"Bitrix call {method} exhausted retries without returning a response")
 
     async def _get_chat_upload_folder_id(self, dialog_id: str) -> int:
-        data = await self._call("im.disk.folder.get", {"DIALOG_ID": dialog_id})
+        payload: dict[str, Any] = {"DIALOG_ID": dialog_id, "CLIENT_ID": self.settings.bitrix_bot_client_id}
+        if self.settings.bitrix_bot_id is not None:
+            payload["BOT_ID"] = self.settings.bitrix_bot_id
+        data = await self._call("im.disk.folder.get", payload)
         result = data.get("result")
         if not isinstance(result, dict):
             raise RuntimeError(f"Unexpected Bitrix response for im.disk.folder.get: {data}")
@@ -337,13 +347,17 @@ class BitrixClient:
         return file_id
 
     async def _commit_chat_file(self, *, dialog_id: str, file_id: int, message: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "DIALOG_ID": dialog_id,
+            "FILE_ID": [file_id],
+            "MESSAGE": message,
+            "CLIENT_ID": self.settings.bitrix_bot_client_id,
+        }
+        if self.settings.bitrix_bot_id is not None:
+            payload["BOT_ID"] = self.settings.bitrix_bot_id
         data = await self._call(
             "im.disk.file.commit",
-            {
-                "DIALOG_ID": dialog_id,
-                "FILE_ID": [file_id],
-                "MESSAGE": message,
-            },
+            payload,
         )
         result = data.get("result")
         if not isinstance(result, dict):

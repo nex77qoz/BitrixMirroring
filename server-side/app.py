@@ -172,7 +172,7 @@ def _bridge_is_configured() -> bool:
     return BITRIX_WEBHOOK_BRIDGE_ENABLED and bool(MIRROR_INTERNAL_BASE_URL and MIRROR_INTERNAL_WEBHOOK_SECRET)
 
 
-def send_bot_message(dialog_id: str, message: str, bot_id: str = ""):
+async def send_bot_message(dialog_id: str, message: str, bot_id: str = ""):
     final_bot_id = bot_id or BITRIX_BOT_ID
     if not BITRIX_WEBHOOK_BASE:
         raise RuntimeError("BITRIX_WEBHOOK_BASE is empty")
@@ -190,9 +190,8 @@ def send_bot_message(dialog_id: str, message: str, bot_id: str = ""):
         "URL_PREVIEW": "N",
     }
 
-    import requests
-
-    r = requests.post(url, data=payload, timeout=20)
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(url, data=payload)
     write_log("BITRIX_SEND_REQUEST", {"DIALOG_ID": dialog_id, "MESSAGE": message[:200]})
     write_log("BITRIX_SEND_RESPONSE", f"{r.status_code}")
     r.raise_for_status()
@@ -254,7 +253,7 @@ async def bitrix_bot(request: Request):
         if event in FORWARDED_EVENTS and dialog_id and _bridge_is_configured():
             await forward_event_to_mirror(event=event, dialog_id=dialog_id, message_id=message_id)
         elif event == "ONIMBOTJOINCHAT" and dialog_id:
-            send_bot_message(
+            await send_bot_message(
                 dialog_id=dialog_id,
                 bot_id=bot_id,
                 message="Привет. Бот подключён и готов к работе."
@@ -270,7 +269,7 @@ async def bitrix_bot(request: Request):
                 reply = "pong"
 
             if reply is not None:
-                send_bot_message(
+                await send_bot_message(
                     dialog_id=dialog_id,
                     bot_id=bot_id,
                     message=reply

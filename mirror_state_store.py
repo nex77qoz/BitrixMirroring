@@ -217,6 +217,12 @@ class MirrorStateStore:
                 )
                 """
             )
+            chat_mapping_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(chat_mappings)").fetchall()
+            }
+            if "topic_ids" not in chat_mapping_columns:
+                connection.execute("ALTER TABLE chat_mappings ADD COLUMN topic_ids TEXT DEFAULT ''")
 
             connection.commit()
 

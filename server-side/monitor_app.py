@@ -117,6 +117,9 @@ def _ensure_chat_mappings_table() -> None:
             )
             """
         )
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(chat_mappings)").fetchall()}
+        if "topic_ids" not in existing:
+            conn.execute("ALTER TABLE chat_mappings ADD COLUMN topic_ids TEXT DEFAULT ''")
         conn.commit()
     finally:
         conn.close()
@@ -160,69 +163,6 @@ def _get_db_stats() -> dict:
             "cursors": [],
             "db_mappings": [],
         }
-
-
-# ---------------------------------------------------------------------------
-# Env-based mappings (read-only display, parsed directly from env vars)
-# ---------------------------------------------------------------------------
-
-
-def _get_env_mappings() -> list[dict]:
-    """Return the chat mappings configured via environment variables."""
-    raw = os.getenv("CHAT_MAPPINGS", "").strip()
-    if raw:
-        try:
-            items = json.loads(raw)
-            if isinstance(items, list):
-                return [
-                    {
-                        "tg_chat_id": i.get("tg_chat_id"),
-                        "bitrix_dialog_id": i.get("bitrix_dialog_id", ""),
-                        "label": "",
-                    }
-                    for i in items
-                    if isinstance(i, dict)
-                ]
-        except Exception:
-            pass
-
-    numbered: list[dict] = []
-    idx = 1
-    while True:
-        entry = os.getenv(f"CHAT_MAPPING_{idx}", "").strip()
-        if not entry:
-            break
-        parts = entry.split(":", 1)
-        if len(parts) == 2:
-            try:
-                numbered.append(
-                    {
-                        "tg_chat_id": int(parts[0].strip()),
-                        "bitrix_dialog_id": parts[1].strip(),
-                        "label": "",
-                    }
-                )
-            except ValueError:
-                pass
-        idx += 1
-    if numbered:
-        return numbered
-
-    # Legacy single-pair
-    bitrix_id = os.getenv("BITRIX_DIALOG_ID", "").strip()
-    tg_id_str = os.getenv("ALLOWED_TELEGRAM_CHAT_ID", "").strip()
-    if bitrix_id and tg_id_str:
-        try:
-            return [
-                {
-                    "tg_chat_id": int(tg_id_str),
-                    "bitrix_dialog_id": bitrix_id,
-                    "label": "",
-                }
-            ]
-        except ValueError:
-            pass
-    return []
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +352,7 @@ class MappingCreate(BaseModel):
     tg_chat_id: int
     bitrix_dialog_id: str
     label: str = ""
+    topic_ids: list[int] = []
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +370,6 @@ def api_status(_: str = Depends(_check_auth)):
     return {
         "services": {k: _get_service_info(v) for k, v in SERVICES.items()},
         "db": _get_db_stats(),
-        "env_mappings": _get_env_mappings(),
     "bitrix_bridge": _get_bitrix_bridge_status(),
     "telegram_webhook": _get_telegram_webhook_status(),
         "ts": int(time.time()),
@@ -441,10 +381,16 @@ def api_get_mappings(_: str = Depends(_check_auth)):
     conn = _db_connect()
     try:
         rows = conn.execute(
-            "SELECT tg_chat_id, bitrix_dialog_id, label, created_at_unix "
+            "SELECT tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids "
             "FROM chat_mappings ORDER BY created_at_unix"
         ).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            row = dict(r)
+            raw = row.get("topic_ids") or ""
+            row["topic_ids"] = [int(t) for t in raw.split(",") if t.strip().lstrip("-").isdigit()]
+            result.append(row)
+        return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
@@ -455,16 +401,18 @@ def api_get_mappings(_: str = Depends(_check_auth)):
 def api_add_mapping(body: MappingCreate, _: str = Depends(_check_auth)):
     if not body.bitrix_dialog_id.strip():
         raise HTTPException(status_code=400, detail="bitrix_dialog_id не может быть пустым")
+    topic_ids_str = ",".join(str(t) for t in body.topic_ids)
     conn = _db_connect()
     try:
         conn.execute(
             "INSERT OR REPLACE INTO chat_mappings"
-            "(tg_chat_id, bitrix_dialog_id, label, created_at_unix) VALUES (?,?,?,?)",
+            "(tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) VALUES (?,?,?,?,?)",
             (
                 body.tg_chat_id,
                 body.bitrix_dialog_id.strip(),
                 body.label.strip(),
                 int(time.time()),
+                topic_ids_str,
             ),
         )
         conn.commit()
@@ -495,7 +443,7 @@ def api_restart(service_key: str, _: str = Depends(_check_auth)):
     name = SERVICES[service_key]
     try:
         r = subprocess.run(
-            ["systemctl", "restart", name],
+            ["sudo", "-n", "systemctl", "restart", name],
             capture_output=True,
             text=True,
             timeout=30,
@@ -534,6 +482,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <style>
     [x-cloak] { display: none !important; }
     .log-pre { white-space: pre-wrap; word-break: break-all; }
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+    .details-arrow { display: inline-block; transition: transform 0.2s; }
+    details[open] .details-arrow { transform: rotate(90deg); }
     .dot-pulse::after {
       content: '';
       display: inline-block;
@@ -588,10 +540,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <p id="lastUpdated" class="text-xs text-slate-400 dot-pulse">Подключение…</p>
         </div>
       </div>
-      <button onclick="doLogout()"
-              class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white text-xs rounded-lg transition-colors">
-        Выйти
-      </button>
+      <div class="flex items-center gap-2">
+        <button onclick="loadStatus(); loadMappings()"
+                class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg transition-colors">
+          ↻ Обновить
+        </button>
+        <button onclick="doLogout()"
+                class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white text-xs rounded-lg transition-colors">
+          Выйти
+        </button>
+      </div>
     </div>
   </header>
 
@@ -606,6 +564,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="bg-white rounded-xl shadow p-5 h-40 animate-pulse"></div>
       </div>
     </section>
+
+    <details>
+      <summary class="cursor-pointer select-none mb-3">
+        <span class="inline-flex items-center gap-2 text-sm font-semibold text-gray-500 uppercase tracking-wider hover:text-gray-700 transition-colors">
+          <span class="details-arrow">▶</span> Статус
+        </span>
+      </summary>
+      <div class="space-y-6 mt-3">
 
     <section>
       <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Telegram Webhook</h2>
@@ -635,14 +601,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- DB path card -->
-        <div class="bg-white rounded-xl shadow p-5 flex items-center gap-4 md:col-span-2">
-          <div class="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center text-2xl">🗄️</div>
-          <div class="overflow-hidden">
-            <p class="text-xs text-gray-500">Путь к базе данных</p>
-            <p class="text-sm font-mono text-gray-700 truncate">${DB_PATH}</p>
-          </div>
-        </div>
       </div>
 
       <!-- Per-chat table -->
@@ -664,14 +622,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </table>
       </div>
 
-      <!-- Cursors -->
-      <div class="mt-4 bg-white rounded-xl shadow p-5">
-        <p class="text-sm font-medium text-gray-700 mb-2">Курсоры опроса Bitrix</p>
-        <div id="cursorsContainer" class="flex flex-wrap gap-2">
-          <span class="text-sm text-gray-400">Загрузка…</span>
-        </div>
-      </div>
     </section>
+
+      </div><!-- /Статус -->
+    </details>
 
     <!-- ── Chat Mappings ─────────────────────────────────────────────────── -->
     <section>
@@ -686,25 +640,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Env-based mappings (read-only) -->
-      <div class="bg-white rounded-xl shadow overflow-hidden mb-4">
-        <div class="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
-          <span class="font-medium text-gray-700 text-sm">Из .env</span>
-          <span class="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">только чтение</span>
-        </div>
-        <table class="min-w-full text-sm">
-          <thead class="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
-            <tr>
-              <th class="px-5 py-2.5 text-left font-medium" >TG Chat ID</th>
-              <th class="px-5 py-2.5 text-left font-medium">Bitrix Dialog ID</th>
-            </tr>
-          </thead>
-          <tbody id="envMappingsBody" class="divide-y divide-gray-50">
-            <tr><td colspan="2" class="px-5 py-4 text-center text-gray-400">Загрузка…</td></tr>
-          </tbody>
-        </table>
-      </div>
-
       <!-- DB mappings (managed here) -->
       <div class="bg-white rounded-xl shadow overflow-hidden">
         <div class="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
@@ -717,6 +652,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <th class="px-5 py-2.5 text-left font-medium" >TG Chat ID</th>
               <th class="px-5 py-2.5 text-left font-medium">Bitrix Dialog ID</th>
               <th class="px-5 py-2.5 text-left font-medium">Метка</th>
+              <th class="px-5 py-2.5 text-left font-medium">Темы (topic IDs)</th>
               <th class="px-5 py-2.5"></th>
             </tr>
           </thead>
@@ -747,6 +683,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                      class="w-36 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                      placeholder="Канал команды A">
             </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500">Темы (topic IDs, необязательно)</label>
+              <input id="newTopicIds" type="text"
+                     class="w-40 px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="12,34 (пусто = все)">
+            </div>
             <button id="addMappingBtn" onclick="addMapping()"
                     class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50">
               Добавить
@@ -760,7 +702,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </main>
 
   <footer class="max-w-6xl mx-auto px-4 py-4 text-xs text-gray-400 text-center">
-    Монитор Bitrix Bot — автообновление каждые 5 с
+    Монитор Bitrix Bot
   </footer>
 </div>
 
@@ -769,7 +711,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 'use strict';
 
 let AUTH_HEADER = '';
-let pollTimer   = null;
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 function b64(user, pass) {
@@ -813,7 +754,6 @@ function showLoginErr(msg) {
 
 function doLogout() {
   AUTH_HEADER = '';
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   document.getElementById('app').classList.add('hidden');
   document.getElementById('loginError').classList.add('hidden');
   document.getElementById('loginPass').value = '';
@@ -838,7 +778,6 @@ async function loadStatus() {
     renderBitrixBridge(data.bitrix_bridge || {});
     renderTelegramWebhook(data.telegram_webhook || {});
     renderStats(data.db || {});
-    renderEnvMappings(data.env_mappings || []);
     const t = new Date(data.ts * 1000).toLocaleTimeString();
     document.getElementById('lastUpdated').textContent = 'Обновлено: ' + t;
   } catch (_) { /* network hiccup – ignore */ }
@@ -954,8 +893,6 @@ function renderTelegramWebhook(info) {
 
 function startPolling() {
   loadStatus();
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(loadStatus, 5000);
 }
 
 // ── Services ─────────────────────────────────────────────────────────────────
@@ -1138,44 +1075,9 @@ function renderStats(db) {
     }
   }
 
-  const cursorsEl = document.getElementById('cursorsContainer');
-  cursorsEl.innerHTML = '';
-  const cursors = db.cursors || [];
-  if (!cursors.length) {
-    cursorsEl.innerHTML = '<span class="text-sm text-gray-400">Нет данных по курсорам</span>';
-  } else {
-    for (const c of cursors) {
-      const span = document.createElement('span');
-      span.className = 'inline-flex items-center gap-1 px-2.5 py-1 bg-blue-50 text-blue-700 rounded-lg text-xs font-mono';
-      span.textContent = escHtml(c.bitrix_dialog_id) + ': msg #' + (c.last_seen_bitrix_message_id ?? '—');
-      cursorsEl.appendChild(span);
-    }
-  }
-
-  if (db.error) {
-    cursorsEl.innerHTML += '<span class="text-xs text-red-500 ml-2">Ошибка БД: ' + escHtml(db.error) + '</span>';
-  }
 }
 
 // ── Mappings ─────────────────────────────────────────────────────────────────
-function renderEnvMappings(mappings) {
-  const tbody = document.getElementById('envMappingsBody');
-  tbody.innerHTML = '';
-  if (!mappings.length) {
-    tbody.innerHTML = '<tr><td colspan="2" class="px-5 py-4 text-sm text-gray-400 text-center">В .env ничего не настроено</td></tr>';
-    return;
-  }
-  for (const m of mappings) {
-    const tr = document.createElement('tr');
-    tr.className = 'hover:bg-gray-50';
-    tr.innerHTML = `
-      <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(String(m.tg_chat_id))}</td>
-      <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(m.bitrix_dialog_id || '')}</td>
-    `;
-    tbody.appendChild(tr);
-  }
-}
-
 async function loadMappings() {
   try {
     const r = await apiFetch('/monitor/api/mappings');
@@ -1188,16 +1090,18 @@ function renderDbMappings(mappings) {
   const tbody = document.getElementById('dbMappingsBody');
   tbody.innerHTML = '';
   if (!mappings.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="px-5 py-4 text-sm text-gray-400 text-center">В базе нет связок. Используйте форму ниже, чтобы добавить новую.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="px-5 py-4 text-sm text-gray-400 text-center">В базе нет связок. Используйте форму ниже, чтобы добавить новую.</td></tr>';
     return;
   }
   for (const m of mappings) {
     const tr = document.createElement('tr');
     tr.className = 'hover:bg-gray-50';
+    const topicsLabel = (m.topic_ids && m.topic_ids.length) ? m.topic_ids.join(', ') : '<span class="text-gray-400">все</span>';
     tr.innerHTML = `
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(String(m.tg_chat_id))}</td>
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(m.bitrix_dialog_id)}</td>
       <td class="px-5 py-2.5 text-sm text-gray-500">${escHtml(m.label || '—')}</td>
+      <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${topicsLabel}</td>
       <td class="px-5 py-2.5">
         <button onclick="deleteMapping(${m.tg_chat_id})"
                 class="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-medium rounded-lg transition-colors">
@@ -1224,6 +1128,7 @@ async function addMapping() {
   const tgRaw    = document.getElementById('newTgChatId').value.trim();
   const dialogId = document.getElementById('newBitrixDialogId').value.trim();
   const label    = document.getElementById('newLabel').value.trim();
+  const topicRaw = document.getElementById('newTopicIds').value.trim();
   const msgEl    = document.getElementById('addMappingMsg');
 
   msgEl.className = 'hidden mt-2 text-xs';
@@ -1235,18 +1140,23 @@ async function addMapping() {
   const tgChatId = parseInt(tgRaw, 10);
   if (isNaN(tgChatId)) { showAddMsg('TG Chat ID должен быть целым числом', 'error'); return; }
 
+  const topicIds = topicRaw
+    ? topicRaw.split(',').map(t => parseInt(t.trim(), 10)).filter(n => !isNaN(n))
+    : [];
+
   const btn = document.getElementById('addMappingBtn');
   btn.disabled = true;
   try {
     const r = await apiFetch('/monitor/api/mappings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tg_chat_id: tgChatId, bitrix_dialog_id: dialogId, label })
+      body: JSON.stringify({ tg_chat_id: tgChatId, bitrix_dialog_id: dialogId, label, topic_ids: topicIds })
     });
     if (r.ok) {
       document.getElementById('newTgChatId').value = '';
       document.getElementById('newBitrixDialogId').value = '';
       document.getElementById('newLabel').value = '';
+      document.getElementById('newTopicIds').value = '';
       showAddMsg('Связка добавлена. Перезапустите сервис Mirror, чтобы она заработала.', 'ok');
       loadMappings();
     } else {

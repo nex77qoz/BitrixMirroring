@@ -181,17 +181,19 @@ async def send_bot_message(dialog_id: str, message: str, bot_id: str = ""):
     if not final_bot_id:
         raise RuntimeError("BOT_ID not found in payload and BITRIX_BOT_ID is empty")
 
-    url = f"{BITRIX_WEBHOOK_BASE}/imbot.message.add.json"
+    url = f"{BITRIX_WEBHOOK_BASE}/imbot.v2.Chat.Message.send"
     payload = {
-        "BOT_ID": final_bot_id,
-        "CLIENT_ID": BITRIX_CLIENT_ID,
-        "DIALOG_ID": dialog_id,
-        "MESSAGE": message,
-        "URL_PREVIEW": "N",
+        "botId": int(final_bot_id),
+        "botToken": BITRIX_CLIENT_ID,
+        "dialogId": dialog_id,
+        "fields": {
+            "message": message,
+            "urlPreview": False,
+        },
     }
 
     async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(url, data=payload)
+        r = await client.post(url, json=payload)
     write_log("BITRIX_SEND_REQUEST", {"DIALOG_ID": dialog_id, "MESSAGE": message[:200]})
     write_log("BITRIX_SEND_RESPONSE", f"{r.status_code}")
     r.raise_for_status()

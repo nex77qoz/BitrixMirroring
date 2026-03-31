@@ -47,7 +47,7 @@ def _parse_float(name: str, default: str, *, minimum: float) -> float:
     return value
 
 
-def _parse_int(name: str, default: str, *, minimum: int) -> int:
+def _parse_int(name: str, default: Optional[str] = None, *, minimum: int) -> int:
     raw = _read_env(name, default)
     try:
         value = int(raw)
@@ -118,7 +118,7 @@ def _load_db_chat_mappings(db_path: str) -> tuple[ChatMapping, ...]:
 class Settings:
     telegram_bot_token: str
     bitrix_webhook_base: str
-    bitrix_bot_id: Optional[int]
+    bitrix_bot_id: int
     bitrix_bot_client_id: str
     chat_mappings: tuple[ChatMapping, ...]
     prefix_with_chat_title: bool
@@ -162,7 +162,7 @@ class Settings:
         if not bitrix_webhook_base.startswith(("http://", "https://")):
             raise ValueError("BITRIX_WEBHOOK_BASE must start with http:// or https://")
 
-        bitrix_bot_id = _parse_optional_int("BITRIX_BOT_ID")
+        bitrix_bot_id = _parse_int("BITRIX_BOT_ID", minimum=1)
         bitrix_bot_client_id = _read_env("BITRIX_BOT_CLIENT_ID")
 
         mirror_state_db_path = _read_env("MIRROR_STATE_DB_PATH", "mirror_state.sqlite3")

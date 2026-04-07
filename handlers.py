@@ -58,6 +58,20 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         logger.debug("Ignoring message from chat_id=%s because it is not allowed", message.chat_id)
         return
 
+    # Opportunistically track topic names
+    if message.message_thread_id:
+        topic_name = None
+        if message.forum_topic_created and message.forum_topic_created.name:
+            topic_name = message.forum_topic_created.name
+        elif message.forum_topic_edited and message.forum_topic_edited.name:
+            topic_name = message.forum_topic_edited.name
+        elif message.reply_to_message and message.reply_to_message.forum_topic_created:
+            topic_name = message.reply_to_message.forum_topic_created.name
+            
+        if topic_name:
+            mirror.cache_topic_name(message.chat_id, message.message_thread_id, topic_name)
+
+
     if not mirror.is_allowed_topic(message):
         logger.debug(
             "Ignoring message from chat_id=%s thread_id=%s (topic not in allowed list)",
@@ -75,6 +89,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             message.pinned_message,
             message.migrate_from_chat_id,
             message.migrate_to_chat_id,
+            message.forum_topic_created,
+            message.forum_topic_edited,
+            message.forum_topic_closed,
+            message.forum_topic_reopened,
         ]
     ):
         return

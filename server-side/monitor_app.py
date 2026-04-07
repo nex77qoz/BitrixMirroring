@@ -237,6 +237,9 @@ def _get_journal(service: str, lines: int = 50) -> list[str]:
             text=True,
             timeout=10,
         )
+        if r.returncode != 0:
+            err = r.stderr.strip() or "Unknown error (stdout empty)"
+            return [f"❌ Ошибка sudo/journalctl (код {r.returncode}):", err]
         result = r.stdout.strip().splitlines()
         return result if result else ["(no log entries)"]
     except Exception as exc:

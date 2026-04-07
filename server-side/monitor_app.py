@@ -27,10 +27,10 @@ from typing import Optional
 
 from dotenv import load_dotenv
 import httpx
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # Config
@@ -220,22 +220,47 @@ def _get_service_info(service: str) -> dict:
         }
 
 
-def _get_journal(service: str, lines: int = 50) -> list[str]:
+def _get_journal(service: str, lines: int = 50, errors_only: bool = False) -> list[str]:
     try:
+        fetch_lines = 1000 if errors_only else lines
+        cmd = [
+            "sudo",
+            "-n",
+            "journalctl",
+            "-u",
+            service,
+            f"-n{fetch_lines}",
+            "--no-pager",
+            "--output=short-iso",
+        ]
         r = subprocess.run(
-            [
-                "journalctl",
-                "-u",
-                service,
-                f"-n{lines}",
-                "--no-pager",
-                "--output=short-iso",
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=10,
         )
+        if r.returncode != 0:
+            err = r.stderr.strip() or "Unknown error (stdout empty)"
+            return [f"❌ Ошибка sudo/journalctl (код {r.returncode}):", err]
+            
         result = r.stdout.strip().splitlines()
+        
+        if errors_only:
+            filtered = []
+            in_error = False
+            for line in result:
+                if any(x in line for x in ["ERROR", "WARNING", "Exception", "Traceback", "CRITICAL"]):
+                    in_error = True
+                    filtered.append(line)
+                elif in_error and (line.startswith(" ") or line.startswith("\t") or "File " in line):
+                    filtered.append(line)
+                elif "INFO" in line or "DEBUG" in line:
+                    if "Exception" not in line:
+                        in_error = False
+                elif in_error:
+                    filtered.append(line)
+            result = filtered[-lines:]
+
         return result if result else ["(no log entries)"]
     except Exception as exc:
         return [f"Ошибка чтения journalctl: {exc}"]
@@ -350,7 +375,11 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
 
 class MappingCreate(BaseModel):
     tg_chat_id: int
-    bitrix_dialog_id: str
+    bitrix_dialog_id: str = Field(
+        ...,
+        pattern=r"^(chat\d+|sg\d+|\d+)$",
+        description="Bitrix dialog ID (e.g., chat123, sg123, or user ID 123)",
+    )
     label: str = ""
     topic_ids: list[int] = []
 
@@ -461,11 +490,14 @@ def api_restart(service_key: str, _: str = Depends(_check_auth)):
 
 @app.get("/monitor/api/journal/{service_key}")
 def api_journal(
-    service_key: str, lines: int = 60, _: str = Depends(_check_auth)
+    service_key: str, 
+    lines: int = Query(60, ge=1, le=1000), 
+    errors_only: bool = False, 
+    _: str = Depends(_check_auth)
 ):
     if service_key not in SERVICES:
         raise HTTPException(status_code=404, detail="Неизвестный ключ сервиса")
-    return {"lines": _get_journal(SERVICES[service_key], min(lines, 300))}
+    return {"lines": _get_journal(SERVICES[service_key], lines, errors_only)}
 
 
 # ---------------------------------------------------------------------------
@@ -989,7 +1021,13 @@ function renderServices(services) {
       <div id="logs-${key}" class="hidden">
         <div class="flex items-center justify-between mb-1">
           <span class="text-xs text-gray-500">Последние 60 строк</span>
-          <button onclick="refreshLogs('${key}')" class="text-xs text-blue-600 hover:underline" >Обновить</button>
+          <div class="flex items-center gap-3">
+            <label class="flex items-center gap-1 cursor-pointer text-xs text-gray-600 hover:text-gray-800">
+              <input type="checkbox" id="errorsOnly-${key}" onchange="refreshLogs('${key}')" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              Только ошибки
+            </label>
+            <button onclick="refreshLogs('${key}')" class="text-xs text-blue-600 hover:underline">Обновить</button>
+          </div>
         </div>
         <pre id="logsText-${key}" class="log-pre text-xs bg-slate-900 text-green-400 p-3 rounded-lg overflow-auto max-h-72 font-mono">Загрузка…</pre>
       </div>
@@ -1032,9 +1070,13 @@ async function toggleLogs(key) {
 
 async function refreshLogs(key) {
   const pre = document.getElementById('logsText-' + key);
+  const cb = document.getElementById('errorsOnly-' + key);
+  const errorsOnly = cb ? cb.checked : false;
   pre.textContent = 'Загрузка…';
   try {
-    const r = await apiFetch('/monitor/api/journal/' + key + '?lines=60');
+    let url = '/monitor/api/journal/' + key + '?lines=60';
+    if (errorsOnly) url += '&errors_only=true';
+    const r = await apiFetch(url);
     const d = await r.json();
     pre.textContent = (d.lines || []).join('\\n') || '(empty)';
     pre.scrollTop = pre.scrollHeight;
@@ -1194,8 +1236,7 @@ document.getElementById('loginPass').addEventListener('keydown', e => {
 </html>
 """
 
-# Inject the actual DB path into the static HTML
-DASHBOARD_HTML = DASHBOARD_HTML.replace("${DB_PATH}", DB_PATH)
+# End of DASHBOARD_HTML
 
 
 @app.get("/monitor", response_class=HTMLResponse)

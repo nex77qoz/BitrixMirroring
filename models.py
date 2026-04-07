@@ -64,7 +64,15 @@ class BitrixMessage:
         params = payload.get("params")
         file_ids: list[int] = []
         if isinstance(params, dict):
-            raw_file_ids = params.get("FILE_ID") or params.get("FILES") or params.get("fileId") or params.get("file_ids")
+            raw_file_ids = (
+                params.get("FILE_ID")
+                or params.get("DISK_ID")
+                or params.get("FILES")
+                or params.get("fileId")
+                or params.get("diskId")
+                or params.get("file_ids")
+                or params.get("disk_id")
+            )
             if isinstance(raw_file_ids, list):
                 for raw_file_id in raw_file_ids:
                     if isinstance(raw_file_id, int):
@@ -150,7 +158,9 @@ class BitrixFile:
     name: str
     url_download: Optional[str]
     mime_type: Optional[str]
+    file_type: str
     is_image: bool
+    author_id: Optional[int] = None
 
     @staticmethod
     def from_api_payload(payload: dict[str, Any]) -> Optional["BitrixFile"]:
@@ -161,7 +171,10 @@ class BitrixFile:
             return None
 
         name = str(payload.get("name") or payload.get("NAME") or payload.get("original_name") or f"file_{raw_file_id}").strip()
-        mime_type_raw = payload.get("type") or payload.get("TYPE") or payload.get("mime_type") or payload.get("MIME_TYPE")
+        # file_type is the Bitrix category: "image", "video", "audio", or "file"
+        file_type = str(payload.get("type") or payload.get("TYPE") or "file").strip().lower()
+        # mime_type is the actual MIME type when available (e.g. "image/png"); may coincide with file_type
+        mime_type_raw = payload.get("mime_type") or payload.get("MIME_TYPE")
         mime_type = str(mime_type_raw).strip() if mime_type_raw else None
         url_download_raw = (
             payload.get("urlDownload")
@@ -172,16 +185,26 @@ class BitrixFile:
             or payload.get("urlPreview")
         )
         url_download = str(url_download_raw).strip() if url_download_raw else None
+        raw_author_id = payload.get("authorId") or payload.get("author_id") or payload.get("AUTHOR_ID")
+        author_id: Optional[int] = None
+        if isinstance(raw_author_id, int):
+            author_id = raw_author_id
+        elif isinstance(raw_author_id, str) and raw_author_id.strip().isdigit():
+            author_id = int(raw_author_id.strip())
         lower_name = name.lower()
-        is_image = bool(mime_type and mime_type.startswith("image/")) or lower_name.endswith(
-            (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+        is_image = (
+            file_type == "image"
+            or bool(mime_type and mime_type.startswith("image/"))
+            or lower_name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"))
         )
         return BitrixFile(
             file_id=raw_file_id,
             name=name,
             url_download=url_download,
             mime_type=mime_type,
+            file_type=file_type,
             is_image=is_image,
+            author_id=author_id,
         )
 
 
@@ -208,6 +231,7 @@ class MessageMirrorLink:
     updated_at_unix: int
     bitrix_liked_by_bot: bool
     last_seen_bitrix_likes: str
+    telegram_message_thread_id: Optional[int] = None
 
 
 def _extract_unix_timestamp(value: Any) -> Optional[int]:

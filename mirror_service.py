@@ -74,12 +74,24 @@ class MirrorService:
         self._bitrix_sync_locks: dict[str, asyncio.Lock] = {}
         self._bitrix_on_demand_tasks: dict[str, asyncio.Task[None]] = {}
         self._webhook_reply_cache: dict[int, int] = {}
+        self._topic_names: dict[tuple[int, int], str] = {}
 
     def get_mapping_for_telegram_chat(self, tg_chat_id: int) -> Optional[ChatMapping]:
         return self._tg_to_mapping.get(tg_chat_id)
 
     def get_mapping_for_bitrix_dialog(self, dialog_id: str) -> Optional[ChatMapping]:
         return self._bitrix_to_mapping.get(dialog_id)
+
+    def _is_multi_topic_mode(self, mapping: ChatMapping) -> bool:
+        """True when multiple Telegram topics map to a single Bitrix dialog."""
+        return len(mapping.topic_ids) != 1
+
+    def cache_topic_name(self, tg_chat_id: int, topic_id: int, name: str) -> None:
+        self._topic_names[(tg_chat_id, topic_id)] = name
+        asyncio.create_task(
+            self.state_store.save_topic_name(tg_chat_id, topic_id, name),
+            name=f"save-topic-name-{tg_chat_id}-{topic_id}",
+        )
 
     def is_allowed_chat(self, message: Message) -> bool:
         return message.chat_id in self._tg_to_mapping
@@ -100,6 +112,11 @@ class MirrorService:
 
     def render_telegram_message(self, message: Message) -> str:
         lines: list[str] = []
+
+        mapping = self._tg_to_mapping.get(message.chat_id)
+        if mapping is not None and self._is_multi_topic_mode(mapping) and message.message_thread_id:
+            topic_name = self._topic_names.get((message.chat_id, message.message_thread_id)) or f"#{message.message_thread_id}"
+            lines.append(f"Ветка: [B]{topic_name}[/B]")
 
         if self.settings.prefix_with_sender:
             sender = self._sender_name(message)
@@ -123,6 +140,7 @@ class MirrorService:
         self._application = application
         self._stop_event.clear()
         await self.state_store.initialize()
+        self._topic_names = await self.state_store.load_topic_names()
         if not self.settings.chat_mappings:
             logger.warning(
                 "No chat mappings are configured. "
@@ -600,7 +618,6 @@ class MirrorService:
                     parse_mode="HTML",
                     disable_web_page_preview=self.settings.disable_link_preview,
                 )
-            mime = attachment.mime_type or ""
             if attachment.is_image:
                 return await application.bot.send_photo(
                     chat_id=tg_chat_id,
@@ -611,7 +628,7 @@ class MirrorService:
                     caption=rendered or None,
                     parse_mode="HTML",
                 )
-            elif mime.startswith("video/"):
+            elif attachment.file_type == "video" or (attachment.mime_type or "").startswith("video/"):
                 return await application.bot.send_video(
                     chat_id=tg_chat_id,
                     message_thread_id=message_thread_id,
@@ -621,7 +638,7 @@ class MirrorService:
                     caption=rendered or None,
                     parse_mode="HTML",
                 )
-            elif mime.startswith("audio/"):
+            elif attachment.file_type == "audio" or (attachment.mime_type or "").startswith("audio/"):
                 return await application.bot.send_audio(
                     chat_id=tg_chat_id,
                     message_thread_id=message_thread_id,
@@ -653,10 +670,23 @@ class MirrorService:
             )
 
     def _select_bitrix_file(self, snapshot: BitrixDialogSnapshot, bitrix_message: BitrixMessage) -> Optional[BitrixFile]:
+        # Primary: use explicit file_ids extracted from message params
         for file_id in bitrix_message.file_ids:
             file = snapshot.files_by_id.get(file_id)
             if file:
                 return file
+        # Fallback: if no file_ids were parsed (e.g. key name mismatch in params),
+        # try to find an unmatched file in the snapshot uploaded by the same author.
+        if not bitrix_message.file_ids and bitrix_message.author_id is not None:
+            for file in snapshot.files_by_id.values():
+                if file.author_id is not None and file.author_id == bitrix_message.author_id:
+                    logger.debug(
+                        "Matched file %s to message %s by author_id=%s (fallback heuristic)",
+                        file.file_id,
+                        bitrix_message.message_id,
+                        bitrix_message.author_id,
+                    )
+                    return file
         return None
 
     def _resolve_bitrix_sender_name(self, snapshot: BitrixDialogSnapshot, bitrix_message: BitrixMessage) -> str:
@@ -881,7 +911,18 @@ class MirrorService:
         await self.state_store.delete_links_by_telegram_chat(telegram_chat_id=old_chat_id)
 
     def _sender_name(self, message: Message) -> str:
+        if message.sender_chat:
+            title = message.sender_chat.title or "Анонимный администратор"
+            if message.author_signature:
+                return f"{title} ({message.author_signature})"
+            return title
+
         if message.from_user:
+            if message.from_user.username == "GroupAnonymousBot":
+                if message.author_signature:
+                    return f"Анонимный администратор ({message.author_signature})"
+                return "Анонимный администратор"
+
             full_name = message.from_user.full_name.strip()
             username = message.from_user.username
             if username:

@@ -231,6 +231,7 @@ class MessageMirrorLink:
     updated_at_unix: int
     bitrix_liked_by_bot: bool
     last_seen_bitrix_likes: str
+    telegram_message_thread_id: Optional[int] = None
 
 
 def _extract_unix_timestamp(value: Any) -> Optional[int]:

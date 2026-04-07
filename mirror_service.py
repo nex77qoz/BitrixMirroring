@@ -74,12 +74,24 @@ class MirrorService:
         self._bitrix_sync_locks: dict[str, asyncio.Lock] = {}
         self._bitrix_on_demand_tasks: dict[str, asyncio.Task[None]] = {}
         self._webhook_reply_cache: dict[int, int] = {}
+        self._topic_names: dict[tuple[int, int], str] = {}
 
     def get_mapping_for_telegram_chat(self, tg_chat_id: int) -> Optional[ChatMapping]:
         return self._tg_to_mapping.get(tg_chat_id)
 
     def get_mapping_for_bitrix_dialog(self, dialog_id: str) -> Optional[ChatMapping]:
         return self._bitrix_to_mapping.get(dialog_id)
+
+    def _is_multi_topic_mode(self, mapping: ChatMapping) -> bool:
+        """True when multiple Telegram topics map to a single Bitrix dialog."""
+        return len(mapping.topic_ids) != 1
+
+    def cache_topic_name(self, tg_chat_id: int, topic_id: int, name: str) -> None:
+        self._topic_names[(tg_chat_id, topic_id)] = name
+        asyncio.create_task(
+            self.state_store.save_topic_name(tg_chat_id, topic_id, name),
+            name=f"save-topic-name-{tg_chat_id}-{topic_id}",
+        )
 
     def is_allowed_chat(self, message: Message) -> bool:
         return message.chat_id in self._tg_to_mapping
@@ -100,6 +112,11 @@ class MirrorService:
 
     def render_telegram_message(self, message: Message) -> str:
         lines: list[str] = []
+
+        mapping = self._tg_to_mapping.get(message.chat_id)
+        if mapping is not None and self._is_multi_topic_mode(mapping) and message.message_thread_id:
+            topic_name = self._topic_names.get((message.chat_id, message.message_thread_id)) or f"#{message.message_thread_id}"
+            lines.append(f"Ветка: [B]{topic_name}[/B]")
 
         if self.settings.prefix_with_sender:
             sender = self._sender_name(message)
@@ -123,6 +140,7 @@ class MirrorService:
         self._application = application
         self._stop_event.clear()
         await self.state_store.initialize()
+        self._topic_names = await self.state_store.load_topic_names()
         if not self.settings.chat_mappings:
             logger.warning(
                 "No chat mappings are configured. "

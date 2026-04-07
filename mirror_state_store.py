@@ -35,6 +35,7 @@ class MirrorStateStore:
         telegram_message_date_unix: Optional[int],
         bitrix_author_id: Optional[int],
         last_seen_bitrix_revision: str,
+        telegram_message_thread_id: Optional[int] = None,
     ) -> None:
         await asyncio.to_thread(
             self._upsert_link_sync,
@@ -45,6 +46,7 @@ class MirrorStateStore:
             telegram_message_date_unix,
             bitrix_author_id,
             last_seen_bitrix_revision,
+            telegram_message_thread_id,
         )
 
     async def get_link_by_telegram_message(
@@ -81,6 +83,12 @@ class MirrorStateStore:
             bitrix_liked_by_bot,
             last_seen_bitrix_likes,
         )
+
+    async def save_topic_name(self, tg_chat_id: int, topic_id: int, name: str) -> None:
+        await asyncio.to_thread(self._save_topic_name_sync, tg_chat_id, topic_id, name)
+
+    async def load_topic_names(self) -> dict[tuple[int, int], str]:
+        return await asyncio.to_thread(self._load_topic_names_sync)
 
     async def cleanup_old_links(self, max_age_seconds: int = 7 * 24 * 3600) -> int:
         """Delete message_links older than max_age_seconds. Returns count of deleted rows."""
@@ -201,6 +209,8 @@ class MirrorStateStore:
                 connection.execute("ALTER TABLE message_links ADD COLUMN bitrix_liked_by_bot INTEGER DEFAULT 0")
             if "last_seen_bitrix_likes" not in current_columns:
                 connection.execute("ALTER TABLE message_links ADD COLUMN last_seen_bitrix_likes TEXT DEFAULT ''")
+            if "telegram_message_thread_id" not in current_columns:
+                connection.execute("ALTER TABLE message_links ADD COLUMN telegram_message_thread_id INTEGER")
 
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_message_links_bitrix_message_id ON message_links(bitrix_message_id)"
@@ -223,6 +233,18 @@ class MirrorStateStore:
             }
             if "topic_ids" not in chat_mapping_columns:
                 connection.execute("ALTER TABLE chat_mappings ADD COLUMN topic_ids TEXT DEFAULT ''")
+
+            # topic_names table — cache for Telegram forum topic names
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS topic_names (
+                    tg_chat_id INTEGER NOT NULL,
+                    topic_id   INTEGER NOT NULL,
+                    name       TEXT NOT NULL,
+                    PRIMARY KEY (tg_chat_id, topic_id)
+                )
+                """
+            )
 
             connection.commit()
 
@@ -272,6 +294,7 @@ class MirrorStateStore:
         telegram_message_date_unix: Optional[int],
         bitrix_author_id: Optional[int],
         last_seen_bitrix_revision: str,
+        telegram_message_thread_id: Optional[int] = None,
     ) -> None:
         now = int(time.time())
         with self._connect() as connection:
@@ -304,15 +327,17 @@ class MirrorStateStore:
                     bitrix_author_id,
                     last_seen_bitrix_revision,
                     created_at_unix,
-                    updated_at_unix
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    updated_at_unix,
+                    telegram_message_thread_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(telegram_chat_id, telegram_message_id) DO UPDATE SET
                     bitrix_message_id = excluded.bitrix_message_id,
                     origin = excluded.origin,
                     telegram_message_date_unix = excluded.telegram_message_date_unix,
                     bitrix_author_id = excluded.bitrix_author_id,
                     last_seen_bitrix_revision = excluded.last_seen_bitrix_revision,
-                    updated_at_unix = excluded.updated_at_unix
+                    updated_at_unix = excluded.updated_at_unix,
+                    telegram_message_thread_id = excluded.telegram_message_thread_id
                 """,
                 (
                     telegram_chat_id,
@@ -324,6 +349,7 @@ class MirrorStateStore:
                     last_seen_bitrix_revision,
                     now,
                     now,
+                    telegram_message_thread_id,
                 ),
             )
             connection.commit()
@@ -338,7 +364,8 @@ class MirrorStateStore:
                 """
                 SELECT telegram_chat_id, telegram_message_id, bitrix_message_id, origin,
                        telegram_message_date_unix, bitrix_author_id, last_seen_bitrix_revision,
-                       created_at_unix, updated_at_unix, bitrix_liked_by_bot, last_seen_bitrix_likes
+                       created_at_unix, updated_at_unix, bitrix_liked_by_bot, last_seen_bitrix_likes,
+                       telegram_message_thread_id
                 FROM message_links
                 WHERE telegram_chat_id = ? AND telegram_message_id = ?
                 """,
@@ -352,7 +379,8 @@ class MirrorStateStore:
                 """
                 SELECT telegram_chat_id, telegram_message_id, bitrix_message_id, origin,
                        telegram_message_date_unix, bitrix_author_id, last_seen_bitrix_revision,
-                       created_at_unix, updated_at_unix, bitrix_liked_by_bot, last_seen_bitrix_likes
+                       created_at_unix, updated_at_unix, bitrix_liked_by_bot, last_seen_bitrix_likes,
+                       telegram_message_thread_id
                 FROM message_links
                 WHERE bitrix_message_id = ?
                 """,
@@ -427,7 +455,25 @@ class MirrorStateStore:
             updated_at_unix=int(row[8]),
             bitrix_liked_by_bot=bool(row[9]) if row[9] is not None else False,
             last_seen_bitrix_likes=str(row[10]) if row[10] is not None else "",
+            telegram_message_thread_id=int(row[11]) if row[11] is not None else None,
         )
+
+    def _save_topic_name_sync(self, tg_chat_id: int, topic_id: int, name: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO topic_names (tg_chat_id, topic_id, name)
+                VALUES (?, ?, ?)
+                ON CONFLICT(tg_chat_id, topic_id) DO UPDATE SET name = excluded.name
+                """,
+                (tg_chat_id, topic_id, name),
+            )
+            connection.commit()
+
+    def _load_topic_names_sync(self) -> dict[tuple[int, int], str]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT tg_chat_id, topic_id, name FROM topic_names").fetchall()
+        return {(int(row[0]), int(row[1])): str(row[2]) for row in rows}
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path)

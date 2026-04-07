@@ -911,7 +911,18 @@ class MirrorService:
         await self.state_store.delete_links_by_telegram_chat(telegram_chat_id=old_chat_id)
 
     def _sender_name(self, message: Message) -> str:
+        if message.sender_chat:
+            title = message.sender_chat.title or "Анонимный администратор"
+            if message.author_signature:
+                return f"{title} ({message.author_signature})"
+            return title
+
         if message.from_user:
+            if message.from_user.username == "GroupAnonymousBot":
+                if message.author_signature:
+                    return f"Анонимный администратор ({message.author_signature})"
+                return "Анонимный администратор"
+
             full_name = message.from_user.full_name.strip()
             username = message.from_user.username
             if username:

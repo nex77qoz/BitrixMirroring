@@ -48,8 +48,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     if message.from_user and message.from_user.is_bot:
-        logger.debug("Ignoring Telegram bot message %s to avoid loops", message.message_id)
-        return
+        is_anonymous_admin = (
+            message.from_user.username == "GroupAnonymousBot" or
+            (message.sender_chat and message.sender_chat.id == message.chat_id)
+        )
+        if not is_anonymous_admin:
+            logger.debug("Ignoring Telegram bot message %s to avoid loops", message.message_id)
+            return
 
     if message.chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
         return
@@ -129,8 +134,13 @@ async def on_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if message.from_user and message.from_user.is_bot:
-        logger.debug("Ignoring Telegram bot edit %s to avoid loops", message.message_id)
-        return
+        is_anonymous_admin = (
+            message.from_user.username == "GroupAnonymousBot" or
+            (message.sender_chat and message.sender_chat.id == message.chat_id)
+        )
+        if not is_anonymous_admin:
+            logger.debug("Ignoring Telegram bot edit %s to avoid loops", message.message_id)
+            return
 
     if message.chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
         return

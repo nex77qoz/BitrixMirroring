@@ -27,10 +27,10 @@ from typing import Optional
 
 from dotenv import load_dotenv
 import httpx
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # Config
@@ -375,7 +375,11 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
 
 class MappingCreate(BaseModel):
     tg_chat_id: int
-    bitrix_dialog_id: str
+    bitrix_dialog_id: str = Field(
+        ...,
+        pattern=r"^(chat\d+|sg\d+|\d+)$",
+        description="Bitrix dialog ID (e.g., chat123, sg123, or user ID 123)",
+    )
     label: str = ""
     topic_ids: list[int] = []
 
@@ -486,11 +490,14 @@ def api_restart(service_key: str, _: str = Depends(_check_auth)):
 
 @app.get("/monitor/api/journal/{service_key}")
 def api_journal(
-    service_key: str, lines: int = 60, errors_only: bool = False, _: str = Depends(_check_auth)
+    service_key: str, 
+    lines: int = Query(60, ge=1, le=1000), 
+    errors_only: bool = False, 
+    _: str = Depends(_check_auth)
 ):
     if service_key not in SERVICES:
         raise HTTPException(status_code=404, detail="Неизвестный ключ сервиса")
-    return {"lines": _get_journal(SERVICES[service_key], min(lines, 300), errors_only)}
+    return {"lines": _get_journal(SERVICES[service_key], lines, errors_only)}
 
 
 # ---------------------------------------------------------------------------
@@ -1229,8 +1236,7 @@ document.getElementById('loginPass').addEventListener('keydown', e => {
 </html>
 """
 
-# Inject the actual DB path into the static HTML
-DASHBOARD_HTML = DASHBOARD_HTML.replace("${DB_PATH}", DB_PATH)
+# End of DASHBOARD_HTML
 
 
 @app.get("/monitor", response_class=HTMLResponse)

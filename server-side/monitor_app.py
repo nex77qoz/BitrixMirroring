@@ -224,6 +224,8 @@ def _get_journal(service: str, lines: int = 50) -> list[str]:
     try:
         r = subprocess.run(
             [
+                "sudo",
+                "-n",
                 "journalctl",
                 "-u",
                 service,

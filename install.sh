@@ -280,12 +280,12 @@ step_create_service_user() {
     chown -R "$SVC_USER:$SVC_GROUP" "$INSTALL_DIR"
     print_ok "Владелец $INSTALL_DIR → $SVC_USER:$SVC_GROUP"
 
-    # Allow the service user to restart the bot services without a password
-    # (required by the monitoring dashboard's restart endpoint)
+    # Allow the service user to restart bot services and view logs without a password
+    # (required by the monitoring dashboard's restart and log viewer endpoints)
     local sudoers_file="/etc/sudoers.d/bitrix-bot-services"
     cat > "$sudoers_file" << EOF
-# Allow $SVC_USER to restart bot services (used by monitoring dashboard)
-${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-bot, /usr/bin/systemctl restart bitrix-monitor
+# Allow $SVC_USER to restart bot services and view logs (used by monitoring dashboard)
+${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-bot, /usr/bin/systemctl restart bitrix-monitor, /usr/bin/journalctl -u bitrix-telegram-mirror *, /usr/bin/journalctl -u bitrix-bot *, /usr/bin/journalctl -u bitrix-monitor *
 EOF
     chmod 440 "$sudoers_file"
     print_ok "Sudoers-правило создано: $sudoers_file"
@@ -1436,6 +1436,7 @@ do_update() {
     # ── systemd-юниты ─────────────────────────────────────────────────────────
     # --no-start: только перезаписываем unit-файлы и enable;
     # сами сервисы перезапускаем ниже через restart (не start).
+    step_create_service_user
     step_create_services --no-start
 
     # Fix ownership after pull

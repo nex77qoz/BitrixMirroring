@@ -600,7 +600,6 @@ class MirrorService:
                     parse_mode="HTML",
                     disable_web_page_preview=self.settings.disable_link_preview,
                 )
-            mime = attachment.mime_type or ""
             if attachment.is_image:
                 return await application.bot.send_photo(
                     chat_id=tg_chat_id,
@@ -611,7 +610,7 @@ class MirrorService:
                     caption=rendered or None,
                     parse_mode="HTML",
                 )
-            elif mime.startswith("video/"):
+            elif attachment.file_type == "video" or (attachment.mime_type or "").startswith("video/"):
                 return await application.bot.send_video(
                     chat_id=tg_chat_id,
                     message_thread_id=message_thread_id,
@@ -621,7 +620,7 @@ class MirrorService:
                     caption=rendered or None,
                     parse_mode="HTML",
                 )
-            elif mime.startswith("audio/"):
+            elif attachment.file_type == "audio" or (attachment.mime_type or "").startswith("audio/"):
                 return await application.bot.send_audio(
                     chat_id=tg_chat_id,
                     message_thread_id=message_thread_id,
@@ -653,10 +652,23 @@ class MirrorService:
             )
 
     def _select_bitrix_file(self, snapshot: BitrixDialogSnapshot, bitrix_message: BitrixMessage) -> Optional[BitrixFile]:
+        # Primary: use explicit file_ids extracted from message params
         for file_id in bitrix_message.file_ids:
             file = snapshot.files_by_id.get(file_id)
             if file:
                 return file
+        # Fallback: if no file_ids were parsed (e.g. key name mismatch in params),
+        # try to find an unmatched file in the snapshot uploaded by the same author.
+        if not bitrix_message.file_ids and bitrix_message.author_id is not None:
+            for file in snapshot.files_by_id.values():
+                if file.author_id is not None and file.author_id == bitrix_message.author_id:
+                    logger.debug(
+                        "Matched file %s to message %s by author_id=%s (fallback heuristic)",
+                        file.file_id,
+                        bitrix_message.message_id,
+                        bitrix_message.author_id,
+                    )
+                    return file
         return None
 
     def _resolve_bitrix_sender_name(self, snapshot: BitrixDialogSnapshot, bitrix_message: BitrixMessage) -> str:

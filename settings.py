@@ -192,7 +192,7 @@ class Settings:
             telegram_webhook_path = f"/{telegram_webhook_path}"
         telegram_webhook_public_url = _read_env("TELEGRAM_WEBHOOK_PUBLIC_URL", "") or None
         telegram_webhook_secret = _read_env("TELEGRAM_WEBHOOK_SECRET", "") or None
-        telegram_webhook_drop_pending_updates = _parse_bool("TELEGRAM_WEBHOOK_DROP_PENDING_UPDATES", "true")
+        telegram_webhook_drop_pending_updates = _parse_bool("TELEGRAM_WEBHOOK_DROP_PENDING_UPDATES", "false")
         telegram_webhook_strict_verify = _parse_bool("TELEGRAM_WEBHOOK_STRICT_VERIFY", "true")
         if telegram_webhook_enabled:
             if not telegram_webhook_public_url:

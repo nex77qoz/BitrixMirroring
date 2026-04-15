@@ -58,28 +58,38 @@ def _parse_int(name: str, default: Optional[str] = None, *, minimum: int) -> int
     return value
 
 
-def _parse_topic_ids(raw: str) -> frozenset[int]:
-    """Parse a comma-separated string of integers into a frozenset.
+def _parse_topic_ids(raw: str) -> tuple[int, ...]:
+    """Parse a comma-separated string of integers into an ordered unique tuple.
 
-    Empty string or whitespace-only input returns an empty frozenset (= all topics allowed).
+    Empty string or whitespace-only input returns an empty tuple (= all topics allowed).
     Invalid tokens are silently ignored.
     """
-    result: set[int] = set()
+    result: list[int] = []
+    seen: set[int] = set()
     for token in raw.split(","):
         token = token.strip()
         if token:
             try:
-                result.add(int(token))
+                value = int(token)
+                if value not in seen:
+                    seen.add(value)
+                    result.append(value)
             except ValueError:
                 pass
-    return frozenset(result)
+    return tuple(result)
 
 
 @dataclass(frozen=True)
 class ChatMapping:
+    mapping_id: int
     tg_chat_id: int
     bitrix_dialog_id: str
-    topic_ids: frozenset[int] = field(default_factory=frozenset)
+    topic_ids: tuple[int, ...] = field(default_factory=tuple)
+    label: str = ""
+
+    @property
+    def default_topic_id(self) -> Optional[int]:
+        return self.topic_ids[0] if self.topic_ids else None
 
 
 def _load_db_chat_mappings(db_path: str) -> tuple[ChatMapping, ...]:
@@ -96,22 +106,44 @@ def _load_db_chat_mappings(db_path: str) -> tuple[ChatMapping, ...]:
         conn = _sqlite3.connect(str(path))
         try:
             rows = conn.execute(
-                "SELECT tg_chat_id, bitrix_dialog_id, topic_ids FROM chat_mappings"
+                "SELECT id, tg_chat_id, bitrix_dialog_id, topic_ids, label FROM chat_mappings ORDER BY created_at_unix, id"
             ).fetchall()
-            return tuple(
+            mappings = tuple(
                 ChatMapping(
-                    tg_chat_id=int(row[0]),
-                    bitrix_dialog_id=str(row[1]),
-                    topic_ids=_parse_topic_ids(str(row[2]) if row[2] else ""),
+                    mapping_id=int(row[0]),
+                    tg_chat_id=int(row[1]),
+                    bitrix_dialog_id=str(row[2]),
+                    topic_ids=_parse_topic_ids(str(row[3]) if row[3] else ""),
+                    label=str(row[4]) if row[4] is not None else "",
                 )
                 for row in rows
             )
+            _validate_chat_mappings(mappings)
+            return mappings
         except _sqlite3.OperationalError:
             return ()  # table doesn't exist yet
         finally:
             conn.close()
     except Exception:
         return ()
+
+
+def _validate_chat_mappings(mappings: tuple[ChatMapping, ...]) -> None:
+    bitrix_dialog_ids: set[str] = set()
+    used_topics: dict[tuple[int, int], str] = {}
+    for mapping in mappings:
+        if mapping.bitrix_dialog_id in bitrix_dialog_ids:
+            raise ValueError(f"Duplicate bitrix_dialog_id in chat_mappings: {mapping.bitrix_dialog_id}")
+        bitrix_dialog_ids.add(mapping.bitrix_dialog_id)
+        for topic_id in mapping.topic_ids:
+            key = (mapping.tg_chat_id, topic_id)
+            previous_dialog_id = used_topics.get(key)
+            if previous_dialog_id is not None and previous_dialog_id != mapping.bitrix_dialog_id:
+                raise ValueError(
+                    f"Conflicting topic mapping for tg_chat_id={mapping.tg_chat_id}, topic_id={topic_id}: "
+                    f"{previous_dialog_id} vs {mapping.bitrix_dialog_id}"
+                )
+            used_topics[key] = mapping.bitrix_dialog_id
 
 
 @dataclass(frozen=True)

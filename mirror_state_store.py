@@ -220,10 +220,12 @@ class MirrorStateStore:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_mappings (
-                    tg_chat_id       INTEGER PRIMARY KEY,
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tg_chat_id       INTEGER NOT NULL,
                     bitrix_dialog_id TEXT NOT NULL,
                     label            TEXT DEFAULT '',
-                    created_at_unix  INTEGER NOT NULL
+                    created_at_unix  INTEGER NOT NULL,
+                    topic_ids        TEXT DEFAULT ''
                 )
                 """
             )
@@ -231,8 +233,43 @@ class MirrorStateStore:
                 row[1]
                 for row in connection.execute("PRAGMA table_info(chat_mappings)").fetchall()
             }
+            if "id" not in chat_mapping_columns:
+                logger.warning("Migrating SQLite schema: rebuilding chat_mappings for multi-mapping support")
+                connection.execute("ALTER TABLE chat_mappings RENAME TO chat_mappings_legacy")
+                connection.execute(
+                    """
+                    CREATE TABLE chat_mappings (
+                        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                        tg_chat_id       INTEGER NOT NULL,
+                        bitrix_dialog_id TEXT NOT NULL,
+                        label            TEXT DEFAULT '',
+                        created_at_unix  INTEGER NOT NULL,
+                        topic_ids        TEXT DEFAULT ''
+                    )
+                    """
+                )
+                legacy_columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(chat_mappings_legacy)").fetchall()
+                }
+                topic_select = "topic_ids" if "topic_ids" in legacy_columns else "''"
+                connection.execute(
+                    f"""
+                    INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids)
+                    SELECT tg_chat_id, bitrix_dialog_id, label, created_at_unix, {topic_select}
+                    FROM chat_mappings_legacy
+                    """
+                )
+                connection.execute("DROP TABLE chat_mappings_legacy")
+                chat_mapping_columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(chat_mappings)").fetchall()
+                }
             if "topic_ids" not in chat_mapping_columns:
                 connection.execute("ALTER TABLE chat_mappings ADD COLUMN topic_ids TEXT DEFAULT ''")
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_mappings_bitrix_dialog_id ON chat_mappings(bitrix_dialog_id)"
+            )
 
             # topic_names table — cache for Telegram forum topic names
             connection.execute(

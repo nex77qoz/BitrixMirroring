@@ -67,7 +67,9 @@ class MirrorService:
         self._stop_event = asyncio.Event()
         self._state_lock = asyncio.Lock()
         self._send_queue: asyncio.Queue[Message] = asyncio.Queue(maxsize=settings.bitrix_send_queue_maxsize)
-        self._tg_to_mapping: dict[int, ChatMapping] = {m.tg_chat_id: m for m in settings.chat_mappings}
+        self._tg_to_mappings: dict[int, list[ChatMapping]] = {}
+        for mapping in settings.chat_mappings:
+            self._tg_to_mappings.setdefault(mapping.tg_chat_id, []).append(mapping)
         self._bitrix_to_mapping: dict[str, ChatMapping] = {m.bitrix_dialog_id: m for m in settings.chat_mappings}
         self._cleanup_task: Optional[asyncio.Task[None]] = None
         self._application: Optional[Application] = None
@@ -77,10 +79,50 @@ class MirrorService:
         self._topic_names: dict[tuple[int, int], str] = {}
 
     def get_mapping_for_telegram_chat(self, tg_chat_id: int) -> Optional[ChatMapping]:
-        return self._tg_to_mapping.get(tg_chat_id)
+        mappings = self._tg_to_mappings.get(tg_chat_id)
+        return mappings[0] if mappings else None
+
+    def get_mappings_for_telegram_chat(self, tg_chat_id: int) -> tuple[ChatMapping, ...]:
+        return tuple(self._tg_to_mappings.get(tg_chat_id, ()))
 
     def get_mapping_for_bitrix_dialog(self, dialog_id: str) -> Optional[ChatMapping]:
         return self._bitrix_to_mapping.get(dialog_id)
+
+    def resolve_mapping_for_telegram_message(self, message: Message) -> Optional[ChatMapping]:
+        return self.resolve_mapping_for_chat_and_thread(message.chat_id, message.message_thread_id)
+
+    def resolve_mapping_for_chat_and_thread(
+        self,
+        tg_chat_id: int,
+        message_thread_id: Optional[int],
+    ) -> Optional[ChatMapping]:
+        mappings = self._tg_to_mappings.get(tg_chat_id)
+        if not mappings:
+            return None
+
+        topic_matches = [mapping for mapping in mappings if mapping.topic_ids and message_thread_id in mapping.topic_ids]
+        if len(topic_matches) == 1:
+            return topic_matches[0]
+        if len(topic_matches) > 1:
+            logger.warning(
+                "Multiple topic mappings matched tg_chat_id=%s thread_id=%s; using first mapping_id=%s",
+                tg_chat_id,
+                message_thread_id,
+                topic_matches[0].mapping_id,
+            )
+            return topic_matches[0]
+
+        catch_all_mappings = [mapping for mapping in mappings if not mapping.topic_ids]
+        if len(catch_all_mappings) == 1:
+            return catch_all_mappings[0]
+        if len(catch_all_mappings) > 1:
+            logger.warning(
+                "Multiple catch-all mappings matched tg_chat_id=%s; using first mapping_id=%s",
+                tg_chat_id,
+                catch_all_mappings[0].mapping_id,
+            )
+            return catch_all_mappings[0]
+        return None
 
     def _is_multi_topic_mode(self, mapping: ChatMapping) -> bool:
         """True when multiple Telegram topics map to a single Bitrix dialog."""
@@ -94,7 +136,7 @@ class MirrorService:
         )
 
     def is_allowed_chat(self, message: Message) -> bool:
-        return message.chat_id in self._tg_to_mapping
+        return message.chat_id in self._tg_to_mappings
 
     def is_allowed_topic(self, message: Message) -> bool:
         """Return True if this message's forum topic is permitted by the mapping.
@@ -103,17 +145,12 @@ class MirrorService:
         Otherwise only messages whose message_thread_id is in topic_ids pass.
         Messages without a thread (regular groups) are always allowed.
         """
-        mapping = self._tg_to_mapping.get(message.chat_id)
-        if mapping is None:
-            return False
-        if not mapping.topic_ids:
-            return True
-        return message.message_thread_id in mapping.topic_ids
+        return self.resolve_mapping_for_telegram_message(message) is not None
 
     def render_telegram_message(self, message: Message) -> str:
         lines: list[str] = []
 
-        mapping = self._tg_to_mapping.get(message.chat_id)
+        mapping = self.resolve_mapping_for_telegram_message(message)
         if mapping is not None and self._is_multi_topic_mode(mapping) and message.message_thread_id:
             topic_name = self._topic_names.get((message.chat_id, message.message_thread_id)) or f"#{message.message_thread_id}"
             lines.append(f"Ветка: [B]{topic_name}[/B]")
@@ -327,9 +364,13 @@ class MirrorService:
                 raise
 
             try:
-                mapping = self.get_mapping_for_telegram_chat(message.chat_id)
+                mapping = self.resolve_mapping_for_telegram_message(message)
                 if mapping is None:
-                    logger.warning("No mapping found for telegram chat_id=%s, dropping message", message.chat_id)
+                    logger.warning(
+                        "No mapping found for telegram chat_id=%s thread_id=%s, dropping message",
+                        message.chat_id,
+                        message.message_thread_id,
+                    )
                     continue
                 dialog_id = mapping.bitrix_dialog_id
                 reply_bitrix_id: Optional[int] = None
@@ -359,6 +400,7 @@ class MirrorService:
                     telegram_message_date_unix=int(message.date.timestamp()) if message.date else None,
                     bitrix_author_id=None,
                     last_seen_bitrix_revision="telegram-origin",
+                    telegram_message_thread_id=message.message_thread_id,
                 )
                 logger.info(
                     "Mirrored Telegram message %s from chat %s to Bitrix dialog %s as message %s",
@@ -466,16 +508,19 @@ class MirrorService:
                         )
                 fresh_messages.append(message)
 
-        message_thread_id = next(iter(mapping.topic_ids)) if len(mapping.topic_ids) == 1 else None
+        default_thread_id = mapping.default_topic_id
         for bitrix_message in fresh_messages:
             sender_name = self._resolve_bitrix_sender_name(snapshot, bitrix_message)
             reply_tg_id: Optional[int] = None
+            message_thread_id = default_thread_id
             if bitrix_message.reply_id is not None:
                 reply_link = await self.state_store.get_link_by_bitrix_message(
                     bitrix_message_id=bitrix_message.reply_id
                 )
                 if reply_link is not None:
                     reply_tg_id = reply_link.telegram_message_id
+                    if reply_link.telegram_chat_id == tg_chat_id and reply_link.telegram_message_thread_id is not None:
+                        message_thread_id = reply_link.telegram_message_thread_id
                     logger.info(
                         "Reply chain resolved: bitrix_msg=%s reply_id=%s -> tg_msg=%s",
                         bitrix_message.message_id, bitrix_message.reply_id, reply_tg_id,
@@ -501,6 +546,7 @@ class MirrorService:
                 telegram_message_date_unix=int(forwarded.date.timestamp()) if forwarded.date else None,
                 bitrix_author_id=bitrix_message.author_id,
                 last_seen_bitrix_revision=self._build_bitrix_revision(bitrix_message),
+                telegram_message_thread_id=message_thread_id,
             )
             await self._persist_cursor(dialog_id, bitrix_message.message_id)
 
@@ -752,6 +798,7 @@ class MirrorService:
                             telegram_message_date_unix=link.telegram_message_date_unix,
                             bitrix_author_id=bitrix_message.author_id,
                             last_seen_bitrix_revision=current_revision,
+                            telegram_message_thread_id=link.telegram_message_thread_id,
                         )
 
             # --- Like/reaction reconciliation (all origins) ---

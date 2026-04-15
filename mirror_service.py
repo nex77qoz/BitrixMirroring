@@ -636,7 +636,6 @@ class MirrorService:
             filename=filename,
             content=bytes(file_bytes),
             dialog_id=dialog_id,
-            reply_id=reply_id,
         )
 
     async def _forward_bitrix_message(

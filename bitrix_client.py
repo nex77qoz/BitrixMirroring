@@ -55,7 +55,7 @@ class BitrixClient:
             "messageId": message_id,
             "fields": {
                 "message": text,
-                "urlPreview": "N" if self.settings.disable_link_preview else "Y",
+                "urlPreview": not self.settings.disable_link_preview,
             },
         }
         data = await self._call("imbot.v2.Chat.Message.update", payload)
@@ -82,24 +82,21 @@ class BitrixClient:
         if result is not True:
             raise RuntimeError(f"Unexpected Bitrix response: {data}")
 
-    async def send_photo(self, *, caption: str, filename: str, content: bytes, dialog_id: str, reply_id: Optional[int] = None) -> int:
+    async def send_photo(self, *, caption: str, filename: str, content: bytes, dialog_id: str) -> int:
         encoded = base64.b64encode(content).decode("ascii")
         return await self._upload_file(
             dialog_id=dialog_id,
             filename=filename,
             encoded=encoded,
             caption=caption,
-            reply_id=reply_id,
         )
 
-    async def _upload_file(self, *, dialog_id: str, filename: str, encoded: str, caption: str, reply_id: Optional[int] = None) -> int:
+    async def _upload_file(self, *, dialog_id: str, filename: str, encoded: str, caption: str) -> int:
         file_fields: dict[str, Any] = {
             "name": filename,
             "content": encoded,
             "message": caption,
         }
-        if reply_id is not None:
-            file_fields["replyId"] = reply_id
         payload: dict[str, Any] = {
             "botId": self.settings.bitrix_bot_id,
             "botToken": self.settings.bitrix_bot_client_id,

@@ -112,6 +112,18 @@ class MirrorService:
             )
             return topic_matches[0]
 
+        if message_thread_id is None:
+            multi_topic_mappings = [mapping for mapping in mappings if len(mapping.topic_ids) > 1]
+            if len(multi_topic_mappings) == 1:
+                return multi_topic_mappings[0]
+            if len(multi_topic_mappings) > 1:
+                logger.warning(
+                    "Main feed is ambiguous for tg_chat_id=%s: multiple many-topics mappings found (%s); dropping message",
+                    tg_chat_id,
+                    ", ".join(str(mapping.mapping_id) for mapping in multi_topic_mappings),
+                )
+                return None
+
         catch_all_mappings = [mapping for mapping in mappings if not mapping.topic_ids]
         if len(catch_all_mappings) == 1:
             return catch_all_mappings[0]

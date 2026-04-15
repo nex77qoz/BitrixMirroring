@@ -1221,18 +1221,26 @@ function renderDbMappings(mappings) {
     const tr = document.createElement('tr');
     tr.className = 'hover:bg-gray-50';
     const topicsLabel = (m.topic_ids && m.topic_ids.length) ? m.topic_ids.join(', ') : '<span class="text-gray-400">все</span>';
+    const tgChatIdAttr = escHtml(String(m.tg_chat_id));
+    const dialogIdAttr = escHtml(m.bitrix_dialog_id);
     tr.innerHTML = `
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(String(m.tg_chat_id))}</td>
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(m.bitrix_dialog_id)}</td>
       <td class="px-5 py-2.5 text-sm text-gray-500">${escHtml(m.label || '—')}</td>
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${topicsLabel}</td>
       <td class="px-5 py-2.5">
-        <button onclick="deleteMapping(${m.id}, ${JSON.stringify(String(m.tg_chat_id))}, ${JSON.stringify(m.bitrix_dialog_id)})"
+        <button data-mapping-id="${m.id}" data-tg-chat-id="${tgChatIdAttr}" data-dialog-id="${dialogIdAttr}"
                 class="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-medium rounded-lg transition-colors">
           Удалить
         </button>
       </td>
     `;
+    const deleteBtn = tr.querySelector('button[data-mapping-id]');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', () => {
+        deleteMapping(m.id, String(m.tg_chat_id), m.bitrix_dialog_id);
+      });
+    }
     tbody.appendChild(tr);
   }
 }

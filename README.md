@@ -372,3 +372,19 @@ uvicorn server-side.app:app --reload --port 8081
 ```bash
 uvicorn server-side.monitor_app:app --reload --port 8082
 ```
+
+## Tests
+
+The repository includes a `unittest` test suite in `tests/`.
+
+Run all tests:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Run a single module:
+
+```bash
+python -m unittest tests.test_main_http -v
+```

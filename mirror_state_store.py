@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import logging
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from models import CursorState, MessageMirrorLink, MirrorOrigin
 
@@ -512,7 +513,11 @@ class MirrorStateStore:
             rows = connection.execute("SELECT tg_chat_id, topic_id, name FROM topic_names").fetchall()
         return {(int(row[0]), int(row[1])): str(row[2]) for row in rows}
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self._path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            yield connection
+        finally:
+            connection.close()

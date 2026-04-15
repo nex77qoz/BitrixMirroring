@@ -508,7 +508,7 @@ class MirrorService:
                         )
                 fresh_messages.append(message)
 
-        default_thread_id = mapping.default_topic_id
+        default_thread_id = None if self._is_multi_topic_mode(mapping) else mapping.default_topic_id
         for bitrix_message in fresh_messages:
             sender_name = self._resolve_bitrix_sender_name(snapshot, bitrix_message)
             reply_tg_id: Optional[int] = None
@@ -638,16 +638,32 @@ class MirrorService:
         message_thread_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
     ) -> Message:
+        async def _send_with_thread_fallback(send_callable):
+            try:
+                return await send_callable(message_thread_id, reply_to_message_id)
+            except BadRequest as exc:
+                if message_thread_id is None or "Message thread not found" not in str(exc):
+                    raise
+                logger.warning(
+                    "Telegram thread_id=%s not found for Bitrix message %s in chat %s; falling back to main feed",
+                    message_thread_id,
+                    bitrix_message.message_id,
+                    tg_chat_id,
+                )
+                return await send_callable(None, None)
+
         rendered = self.render_bitrix_message(bitrix_message, sender_name=sender_name)
         attachment = self._select_bitrix_file(snapshot, bitrix_message)
         if attachment is None or not attachment.url_download:
-            return await application.bot.send_message(
-                chat_id=tg_chat_id,
-                message_thread_id=message_thread_id,
-                reply_to_message_id=reply_to_message_id,
-                text=rendered,
-                parse_mode="HTML",
-                disable_web_page_preview=self.settings.disable_link_preview,
+            return await _send_with_thread_fallback(
+                lambda thread_id, reply_id: application.bot.send_message(
+                    chat_id=tg_chat_id,
+                    message_thread_id=thread_id,
+                    reply_to_message_id=reply_id,
+                    text=rendered,
+                    parse_mode="HTML",
+                    disable_web_page_preview=self.settings.disable_link_preview,
+                )
             )
         try:
             file_bytes = await self.bitrix.download_file_by_id(attachment.file_id, fallback_url=attachment.url_download)
@@ -656,63 +672,75 @@ class MirrorService:
                     "Bitrix file too large (%s bytes > %s max), sending text only for message %s",
                     len(file_bytes), self.settings.max_file_size_bytes, bitrix_message.message_id,
                 )
-                return await application.bot.send_message(
-                    chat_id=tg_chat_id,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    text=rendered + "\n\n[Файл слишком большой для пересылки]",
-                    parse_mode="HTML",
-                    disable_web_page_preview=self.settings.disable_link_preview,
+                return await _send_with_thread_fallback(
+                    lambda thread_id, reply_id: application.bot.send_message(
+                        chat_id=tg_chat_id,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=reply_id,
+                        text=rendered + "\n\n[Файл слишком большой для пересылки]",
+                        parse_mode="HTML",
+                        disable_web_page_preview=self.settings.disable_link_preview,
+                    )
                 )
             if attachment.is_image:
-                return await application.bot.send_photo(
-                    chat_id=tg_chat_id,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    photo=BytesIO(file_bytes),
-                    filename=attachment.name,
-                    caption=rendered or None,
-                    parse_mode="HTML",
+                return await _send_with_thread_fallback(
+                    lambda thread_id, reply_id: application.bot.send_photo(
+                        chat_id=tg_chat_id,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=reply_id,
+                        photo=BytesIO(file_bytes),
+                        filename=attachment.name,
+                        caption=rendered or None,
+                        parse_mode="HTML",
+                    )
                 )
             elif attachment.file_type == "video" or (attachment.mime_type or "").startswith("video/"):
-                return await application.bot.send_video(
-                    chat_id=tg_chat_id,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    video=BytesIO(file_bytes),
-                    filename=attachment.name,
-                    caption=rendered or None,
-                    parse_mode="HTML",
+                return await _send_with_thread_fallback(
+                    lambda thread_id, reply_id: application.bot.send_video(
+                        chat_id=tg_chat_id,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=reply_id,
+                        video=BytesIO(file_bytes),
+                        filename=attachment.name,
+                        caption=rendered or None,
+                        parse_mode="HTML",
+                    )
                 )
             elif attachment.file_type == "audio" or (attachment.mime_type or "").startswith("audio/"):
-                return await application.bot.send_audio(
-                    chat_id=tg_chat_id,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    audio=BytesIO(file_bytes),
-                    filename=attachment.name,
-                    caption=rendered or None,
-                    parse_mode="HTML",
+                return await _send_with_thread_fallback(
+                    lambda thread_id, reply_id: application.bot.send_audio(
+                        chat_id=tg_chat_id,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=reply_id,
+                        audio=BytesIO(file_bytes),
+                        filename=attachment.name,
+                        caption=rendered or None,
+                        parse_mode="HTML",
+                    )
                 )
             else:
-                return await application.bot.send_document(
-                    chat_id=tg_chat_id,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    document=BytesIO(file_bytes),
-                    filename=attachment.name,
-                    caption=rendered or None,
-                    parse_mode="HTML",
+                return await _send_with_thread_fallback(
+                    lambda thread_id, reply_id: application.bot.send_document(
+                        chat_id=tg_chat_id,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=reply_id,
+                        document=BytesIO(file_bytes),
+                        filename=attachment.name,
+                        caption=rendered or None,
+                        parse_mode="HTML",
+                    )
                 )
         except Exception:
             logger.exception("Failed to forward Bitrix file for message %s, falling back to text", bitrix_message.message_id)
-            return await application.bot.send_message(
-                chat_id=tg_chat_id,
-                message_thread_id=message_thread_id,
-                reply_to_message_id=reply_to_message_id,
-                text=rendered,
-                parse_mode="HTML",
-                disable_web_page_preview=self.settings.disable_link_preview,
+            return await _send_with_thread_fallback(
+                lambda thread_id, reply_id: application.bot.send_message(
+                    chat_id=tg_chat_id,
+                    message_thread_id=thread_id,
+                    reply_to_message_id=reply_id,
+                    text=rendered,
+                    parse_mode="HTML",
+                    disable_web_page_preview=self.settings.disable_link_preview,
+                )
             )
 
     def _select_bitrix_file(self, snapshot: BitrixDialogSnapshot, bitrix_message: BitrixMessage) -> Optional[BitrixFile]:

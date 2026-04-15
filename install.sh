@@ -101,14 +101,34 @@ ask_optional() {
     printf -v "$var" '%s' "$value"
 }
 
+read_asterisks() {
+    local var="$1" prompt="$2"
+    local val="" char=""
+    echo -en "  ${YELLOW}${prompt}: ${RESET}"
+    while IFS= read -r -s -n1 char; do
+        if [[ -z "$char" ]]; then
+            break
+        fi
+        if [[ "$char" == $'\x7f' || "$char" == $'\b' ]]; then
+            if [[ -n "$val" ]]; then
+                val="${val%?}"
+                echo -en "\b \b"
+            fi
+        else
+            val+="$char"
+            echo -en "*"
+        fi
+    done
+    echo ""
+    printf -v "$var" '%s' "$val"
+}
+
 ask_password() {
     local var="$1" prompt="$2"
     local pw="" pw2=""
     while true; do
-        echo -en "  ${YELLOW}${prompt}: ${RESET}"
-        read -rs pw; echo
-        echo -en "  ${YELLOW}Повторите пароль ${CYAN}(ввод скрыт)${YELLOW}: ${RESET}"
-        read -rs pw2; echo
+        read_asterisks pw "$prompt"
+        read_asterisks pw2 "Повторите пароль"
         if [[ -z "$pw" ]]; then
             print_error "Пароль не может быть пустым."
         elif [[ "$pw" != "$pw2" ]]; then
@@ -125,8 +145,7 @@ ask_secret() {
     local var="$1" prompt="$2"
     local value=""
     while [[ -z "$value" ]]; do
-        echo -en "  ${YELLOW}${prompt}: ${RESET}"
-        read -rs value; echo
+        read_asterisks value "$prompt"
         if [[ -z "$value" ]]; then
             print_error "Значение не может быть пустым."
         fi
@@ -311,9 +330,9 @@ step_configure_ssh() {
             print_info "Режим: только SSH-ключ"
             echo ""
             print_warn "Убедитесь, что ваш SSH-ключ уже добавлен в ~/.ssh/authorized_keys!"
-            echo -en "  ${YELLOW}Ваш SSH-ключ настроен? (y/N/paste): ${RESET}"
+            echo -en "  ${YELLOW}Ваш публичный SSH-ключ уже добавлен на сервер? (y/N/paste): ${RESET}"
             read -r key_ready
-            if [[ "${key_ready,,}" == "paste" || "${key_ready,,}" == "p" ]]; then
+            if [[ "${key_ready,,}" == "paste" || "${key_ready,,}" == "p" || "${key_ready,,}" == "вставить" || "${key_ready,,}" == "в" ]]; then
                 # Let user paste their public key directly
                 echo ""
                 echo -e "  ${CYAN}Вставьте ваш публичный SSH-ключ (ssh-rsa ... или ssh-ed25519 ...):${RESET}"
@@ -422,7 +441,7 @@ step_collect_config() {
 
     # Bitrix webhook
     while true; do
-        ask_input BITRIX_WEBHOOK_BASE "URL вебхука Битрикс (https://company.bitrix24.ru/rest/1/CODE)"
+        ask_secret BITRIX_WEBHOOK_BASE "URL вебхука Битрикс (https://company.bitrix24.ru/rest/1/CODE)"
         if [[ "$BITRIX_WEBHOOK_BASE" == https://* ]]; then
             break
         fi
@@ -440,22 +459,21 @@ step_collect_config() {
     print_info "URL Telegram webhook: ${BOLD}${TELEGRAM_WEBHOOK_PUBLIC_URL}${TELEGRAM_WEBHOOK_PATH}${RESET}"
 
     # Bot IDs
-    ask_input BITRIX_BOT_ID    "BOT_ID бота в Битрикс"
-    ask_input BITRIX_BOT_CLIENT_ID "CLIENT_ID бота в Битрикс"
+    ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
+    ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
 
     # Email for SSL certificate (acme.sh)
-    ask_input ACME_EMAIL "Email для SSL-сертификата (Let's Encrypt уведомления)"
+    ask_input ACME_EMAIL "Email для получения уведомлений от Let's Encrypt"
 
     # Telegram token
-    print_info "Ввод скрыт — символы не отображаются"
-    ask_secret TELEGRAM_BOT_TOKEN "Telegram Bot Token"
+    ask_secret TELEGRAM_BOT_TOKEN "Токен Telegram-бота (Bot Token)"
 
     TELEGRAM_WEBHOOK_ENABLED="true"
 
     echo ""
-    echo -en "  ${YELLOW}Вебхук для бота уже настроен? (y/N): ${RESET}"
+    echo -en "  ${YELLOW}Вебхук для Telegram-бота уже настроен? (y/N): ${RESET}"
     read -r webhook_already_set
-    if [[ "${webhook_already_set,,}" == "y" ]]; then
+    if [[ "${webhook_already_set,,}" == "y" || "${webhook_already_set,,}" == "д" ]]; then
         TELEGRAM_WEBHOOK_ALREADY_SET=true
         print_info "Вебхук уже настроен — будет запрошен только секрет"
     else
@@ -463,8 +481,7 @@ step_collect_config() {
         print_info "Вебхук будет зарегистрирован автоматически после запуска сервисов"
     fi
 
-    print_info "Ввод скрыт — символы не отображаются"
-    ask_secret TELEGRAM_WEBHOOK_SECRET "Секрет Telegram webhook"
+    ask_secret TELEGRAM_WEBHOOK_SECRET "Секретный токен для Telegram-вебхука"
 
     BITRIX_WEBHOOK_BRIDGE_ENABLED="true"
     MIRROR_INTERNAL_WEBHOOK_SECRET="${TELEGRAM_WEBHOOK_SECRET}"
@@ -477,15 +494,14 @@ step_collect_config() {
     BITRIX_POLL_INTERVAL_SECONDS_VALUE="60"
 
     # Monitor password
-    print_info "Ввод скрыт — символы не отображаются"
-    ask_password MONITOR_PASSWORD "Пароль для мониторинг-дашборда (/monitor)"
+    ask_password MONITOR_PASSWORD "Пароль для панели мониторинга (/monitor)"
 
     # Monitor IP restriction
     echo ""
     print_info "Ограничение доступа к /monitor по IP-адресам."
     print_info "Укажите IP-адреса или подсети через запятую (например: 1.2.3.4,10.0.0.0/8)"
     print_info "Если оставить пустым, доступ будет открыт (только HTTP Basic Auth)."
-    ask_optional MONITOR_ALLOWED_IPS "IP-адреса для /monitor"
+    ask_optional MONITOR_ALLOWED_IPS "Разрешённые IP-адреса для панели мониторинга"
 
     print_ok "Конфигурация собрана"
 }
@@ -589,7 +605,7 @@ step_setup_ssl() {
 
     echo -en "  ${YELLOW}Выпустить SSL-сертификат? (Y/n): ${RESET}"
     read -r ssl_answer
-    if [[ "${ssl_answer,,}" == "n" ]]; then
+    if [[ "${ssl_answer,,}" == "n" || "${ssl_answer,,}" == "н" ]]; then
         if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
             print_error "Нельзя включить Telegram webhook mode без HTTPS. Повторите установку с выпуском SSL-сертификата."
             exit 1
@@ -1053,7 +1069,7 @@ SQL
         echo ""
         echo -en "  ${YELLOW}Добавить маппинг чата? (y/N): ${RESET}"
         read -r answer
-        [[ "${answer,,}" != "y" ]] && break
+        [[ "${answer,,}" != "y" && "${answer,,}" != "д" ]] && break
 
         # Telegram chat ID
         local tg_id=""
@@ -1473,9 +1489,9 @@ do_uninstall() {
     check_root
 
     echo -e "${RED}${BOLD}Это действие удалит бота и все его данные!${RESET}"
-    echo -en "${YELLOW}Вы уверены? Введите 'yes' для подтверждения: ${RESET}"
+    echo -en "${YELLOW}Вы уверены? Введите 'yes' или 'да' для подтверждения: ${RESET}"
     read -r confirm
-    if [[ "$confirm" != "yes" ]]; then
+    if [[ "$confirm" != "yes" && "${confirm,,}" != "да" ]]; then
         echo "Отменено."
         exit 0
     fi
@@ -1516,7 +1532,7 @@ do_uninstall() {
     if id "$SVC_USER" &>/dev/null; then
         echo -en "${YELLOW}Удалить системного пользователя ${SVC_USER}? (y/N): ${RESET}"
         read -r del_user
-        if [[ "${del_user,,}" == "y" ]]; then
+        if [[ "${del_user,,}" == "y" || "${del_user,,}" == "д" ]]; then
             userdel "$SVC_USER" 2>/dev/null || true
             print_ok "Пользователь $SVC_USER удалён"
         fi

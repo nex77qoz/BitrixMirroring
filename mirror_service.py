@@ -67,7 +67,9 @@ class MirrorService:
         self._stop_event = asyncio.Event()
         self._state_lock = asyncio.Lock()
         self._send_queue: asyncio.Queue[Message] = asyncio.Queue(maxsize=settings.bitrix_send_queue_maxsize)
-        self._tg_to_mapping: dict[int, ChatMapping] = {m.tg_chat_id: m for m in settings.chat_mappings}
+        self._tg_to_mappings: dict[int, list[ChatMapping]] = {}
+        for mapping in settings.chat_mappings:
+            self._tg_to_mappings.setdefault(mapping.tg_chat_id, []).append(mapping)
         self._bitrix_to_mapping: dict[str, ChatMapping] = {m.bitrix_dialog_id: m for m in settings.chat_mappings}
         self._cleanup_task: Optional[asyncio.Task[None]] = None
         self._application: Optional[Application] = None
@@ -77,10 +79,62 @@ class MirrorService:
         self._topic_names: dict[tuple[int, int], str] = {}
 
     def get_mapping_for_telegram_chat(self, tg_chat_id: int) -> Optional[ChatMapping]:
-        return self._tg_to_mapping.get(tg_chat_id)
+        mappings = self._tg_to_mappings.get(tg_chat_id)
+        return mappings[0] if mappings else None
+
+    def get_mappings_for_telegram_chat(self, tg_chat_id: int) -> tuple[ChatMapping, ...]:
+        return tuple(self._tg_to_mappings.get(tg_chat_id, ()))
 
     def get_mapping_for_bitrix_dialog(self, dialog_id: str) -> Optional[ChatMapping]:
         return self._bitrix_to_mapping.get(dialog_id)
+
+    def resolve_mapping_for_telegram_message(self, message: Message) -> Optional[ChatMapping]:
+        return self.resolve_mapping_for_chat_and_thread(message.chat_id, message.message_thread_id)
+
+    def resolve_mapping_for_chat_and_thread(
+        self,
+        tg_chat_id: int,
+        message_thread_id: Optional[int],
+    ) -> Optional[ChatMapping]:
+        mappings = self._tg_to_mappings.get(tg_chat_id)
+        if not mappings:
+            return None
+
+        topic_matches = [mapping for mapping in mappings if mapping.topic_ids and message_thread_id in mapping.topic_ids]
+        if len(topic_matches) == 1:
+            return topic_matches[0]
+        if len(topic_matches) > 1:
+            logger.warning(
+                "Multiple topic mappings matched tg_chat_id=%s thread_id=%s; using first mapping_id=%s",
+                tg_chat_id,
+                message_thread_id,
+                topic_matches[0].mapping_id,
+            )
+            return topic_matches[0]
+
+        if message_thread_id is None:
+            multi_topic_mappings = [mapping for mapping in mappings if len(mapping.topic_ids) > 1]
+            if len(multi_topic_mappings) == 1:
+                return multi_topic_mappings[0]
+            if len(multi_topic_mappings) > 1:
+                logger.warning(
+                    "Main feed is ambiguous for tg_chat_id=%s: multiple many-topics mappings found (%s); dropping message",
+                    tg_chat_id,
+                    ", ".join(str(mapping.mapping_id) for mapping in multi_topic_mappings),
+                )
+                return None
+
+        catch_all_mappings = [mapping for mapping in mappings if not mapping.topic_ids]
+        if len(catch_all_mappings) == 1:
+            return catch_all_mappings[0]
+        if len(catch_all_mappings) > 1:
+            logger.warning(
+                "Multiple catch-all mappings matched tg_chat_id=%s; using first mapping_id=%s",
+                tg_chat_id,
+                catch_all_mappings[0].mapping_id,
+            )
+            return catch_all_mappings[0]
+        return None
 
     def _is_multi_topic_mode(self, mapping: ChatMapping) -> bool:
         """True when multiple Telegram topics map to a single Bitrix dialog."""
@@ -94,7 +148,7 @@ class MirrorService:
         )
 
     def is_allowed_chat(self, message: Message) -> bool:
-        return message.chat_id in self._tg_to_mapping
+        return message.chat_id in self._tg_to_mappings
 
     def is_allowed_topic(self, message: Message) -> bool:
         """Return True if this message's forum topic is permitted by the mapping.
@@ -103,17 +157,12 @@ class MirrorService:
         Otherwise only messages whose message_thread_id is in topic_ids pass.
         Messages without a thread (regular groups) are always allowed.
         """
-        mapping = self._tg_to_mapping.get(message.chat_id)
-        if mapping is None:
-            return False
-        if not mapping.topic_ids:
-            return True
-        return message.message_thread_id in mapping.topic_ids
+        return self.resolve_mapping_for_telegram_message(message) is not None
 
     def render_telegram_message(self, message: Message) -> str:
         lines: list[str] = []
 
-        mapping = self._tg_to_mapping.get(message.chat_id)
+        mapping = self.resolve_mapping_for_telegram_message(message)
         if mapping is not None and self._is_multi_topic_mode(mapping) and message.message_thread_id:
             topic_name = self._topic_names.get((message.chat_id, message.message_thread_id)) or f"#{message.message_thread_id}"
             lines.append(f"Ветка: [B]{topic_name}[/B]")
@@ -327,9 +376,13 @@ class MirrorService:
                 raise
 
             try:
-                mapping = self.get_mapping_for_telegram_chat(message.chat_id)
+                mapping = self.resolve_mapping_for_telegram_message(message)
                 if mapping is None:
-                    logger.warning("No mapping found for telegram chat_id=%s, dropping message", message.chat_id)
+                    logger.warning(
+                        "No mapping found for telegram chat_id=%s thread_id=%s, dropping message",
+                        message.chat_id,
+                        message.message_thread_id,
+                    )
                     continue
                 dialog_id = mapping.bitrix_dialog_id
                 reply_bitrix_id: Optional[int] = None
@@ -359,6 +412,7 @@ class MirrorService:
                     telegram_message_date_unix=int(message.date.timestamp()) if message.date else None,
                     bitrix_author_id=None,
                     last_seen_bitrix_revision="telegram-origin",
+                    telegram_message_thread_id=message.message_thread_id,
                 )
                 logger.info(
                     "Mirrored Telegram message %s from chat %s to Bitrix dialog %s as message %s",
@@ -442,40 +496,43 @@ class MirrorService:
             last_seen,
             len(snapshot.messages),
         )
-        fresh_messages: list[BitrixMessage] = []
-        for message in snapshot.messages:
-            if await self._should_forward_bitrix_message(dialog_id, message):
-                # Supplement reply_id from webhook cache if API didn't provide it
-                if message.reply_id is None and message.message_id in self._webhook_reply_cache:
-                    cached_reply = self._webhook_reply_cache.pop(message.message_id)
-                    message = dataclasses.replace(message, reply_id=cached_reply)
-                    logger.info(
-                        "Supplemented reply_id from webhook cache: message %s -> reply_id %s",
-                        message.message_id, cached_reply,
-                    )
-                # Fallback: fetch reply_id via im.dialog.messages.search
-                if message.reply_id is None:
-                    search_reply_id = await self.bitrix.get_message_reply_id(
-                        dialog_id=dialog_id, message_id=message.message_id,
-                    )
-                    if search_reply_id is not None:
-                        message = dataclasses.replace(message, reply_id=search_reply_id)
-                        logger.info(
-                            "Fetched reply_id via search API: message %s -> reply_id %s",
-                            message.message_id, search_reply_id,
-                        )
-                fresh_messages.append(message)
+        default_thread_id = None if self._is_multi_topic_mode(mapping) else mapping.default_topic_id
+        for bitrix_message in sorted(snapshot.messages, key=lambda item: item.message_id):
+            if not await self._should_forward_bitrix_message(dialog_id, bitrix_message):
+                await self._persist_cursor(dialog_id, bitrix_message.message_id)
+                continue
 
-        message_thread_id = next(iter(mapping.topic_ids)) if len(mapping.topic_ids) == 1 else None
-        for bitrix_message in fresh_messages:
+            # Supplement reply_id from webhook cache if API didn't provide it
+            if bitrix_message.reply_id is None and bitrix_message.message_id in self._webhook_reply_cache:
+                cached_reply = self._webhook_reply_cache.pop(bitrix_message.message_id)
+                bitrix_message = dataclasses.replace(bitrix_message, reply_id=cached_reply)
+                logger.info(
+                    "Supplemented reply_id from webhook cache: message %s -> reply_id %s",
+                    bitrix_message.message_id, cached_reply,
+                )
+            # Fallback: fetch reply_id via im.dialog.messages.search
+            if bitrix_message.reply_id is None:
+                search_reply_id = await self.bitrix.get_message_reply_id(
+                    dialog_id=dialog_id, message_id=bitrix_message.message_id,
+                )
+                if search_reply_id is not None:
+                    bitrix_message = dataclasses.replace(bitrix_message, reply_id=search_reply_id)
+                    logger.info(
+                        "Fetched reply_id via search API: message %s -> reply_id %s",
+                        bitrix_message.message_id, search_reply_id,
+                    )
+
             sender_name = self._resolve_bitrix_sender_name(snapshot, bitrix_message)
             reply_tg_id: Optional[int] = None
+            message_thread_id = default_thread_id
             if bitrix_message.reply_id is not None:
                 reply_link = await self.state_store.get_link_by_bitrix_message(
                     bitrix_message_id=bitrix_message.reply_id
                 )
                 if reply_link is not None:
                     reply_tg_id = reply_link.telegram_message_id
+                    if reply_link.telegram_chat_id == tg_chat_id and reply_link.telegram_message_thread_id is not None:
+                        message_thread_id = reply_link.telegram_message_thread_id
                     logger.info(
                         "Reply chain resolved: bitrix_msg=%s reply_id=%s -> tg_msg=%s",
                         bitrix_message.message_id, bitrix_message.reply_id, reply_tg_id,
@@ -501,6 +558,7 @@ class MirrorService:
                 telegram_message_date_unix=int(forwarded.date.timestamp()) if forwarded.date else None,
                 bitrix_author_id=bitrix_message.author_id,
                 last_seen_bitrix_revision=self._build_bitrix_revision(bitrix_message),
+                telegram_message_thread_id=message_thread_id,
             )
             await self._persist_cursor(dialog_id, bitrix_message.message_id)
 
@@ -578,7 +636,6 @@ class MirrorService:
             filename=filename,
             content=bytes(file_bytes),
             dialog_id=dialog_id,
-            reply_id=reply_id,
         )
 
     async def _forward_bitrix_message(
@@ -592,16 +649,32 @@ class MirrorService:
         message_thread_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
     ) -> Message:
+        async def _send_with_thread_fallback(send_callable):
+            try:
+                return await send_callable(message_thread_id, reply_to_message_id)
+            except BadRequest as exc:
+                if message_thread_id is None or "Message thread not found" not in str(exc):
+                    raise
+                logger.warning(
+                    "Telegram thread_id=%s not found for Bitrix message %s in chat %s; falling back to main feed",
+                    message_thread_id,
+                    bitrix_message.message_id,
+                    tg_chat_id,
+                )
+                return await send_callable(None, None)
+
         rendered = self.render_bitrix_message(bitrix_message, sender_name=sender_name)
         attachment = self._select_bitrix_file(snapshot, bitrix_message)
         if attachment is None or not attachment.url_download:
-            return await application.bot.send_message(
-                chat_id=tg_chat_id,
-                message_thread_id=message_thread_id,
-                reply_to_message_id=reply_to_message_id,
-                text=rendered,
-                parse_mode="HTML",
-                disable_web_page_preview=self.settings.disable_link_preview,
+            return await _send_with_thread_fallback(
+                lambda thread_id, reply_id: application.bot.send_message(
+                    chat_id=tg_chat_id,
+                    message_thread_id=thread_id,
+                    reply_to_message_id=reply_id,
+                    text=rendered,
+                    parse_mode="HTML",
+                    disable_web_page_preview=self.settings.disable_link_preview,
+                )
             )
         try:
             file_bytes = await self.bitrix.download_file_by_id(attachment.file_id, fallback_url=attachment.url_download)
@@ -610,63 +683,75 @@ class MirrorService:
                     "Bitrix file too large (%s bytes > %s max), sending text only for message %s",
                     len(file_bytes), self.settings.max_file_size_bytes, bitrix_message.message_id,
                 )
-                return await application.bot.send_message(
-                    chat_id=tg_chat_id,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    text=rendered + "\n\n[Файл слишком большой для пересылки]",
-                    parse_mode="HTML",
-                    disable_web_page_preview=self.settings.disable_link_preview,
+                return await _send_with_thread_fallback(
+                    lambda thread_id, reply_id: application.bot.send_message(
+                        chat_id=tg_chat_id,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=reply_id,
+                        text=rendered + "\n\n[Файл слишком большой для пересылки]",
+                        parse_mode="HTML",
+                        disable_web_page_preview=self.settings.disable_link_preview,
+                    )
                 )
             if attachment.is_image:
-                return await application.bot.send_photo(
-                    chat_id=tg_chat_id,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    photo=BytesIO(file_bytes),
-                    filename=attachment.name,
-                    caption=rendered or None,
-                    parse_mode="HTML",
+                return await _send_with_thread_fallback(
+                    lambda thread_id, reply_id: application.bot.send_photo(
+                        chat_id=tg_chat_id,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=reply_id,
+                        photo=BytesIO(file_bytes),
+                        filename=attachment.name,
+                        caption=rendered or None,
+                        parse_mode="HTML",
+                    )
                 )
             elif attachment.file_type == "video" or (attachment.mime_type or "").startswith("video/"):
-                return await application.bot.send_video(
-                    chat_id=tg_chat_id,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    video=BytesIO(file_bytes),
-                    filename=attachment.name,
-                    caption=rendered or None,
-                    parse_mode="HTML",
+                return await _send_with_thread_fallback(
+                    lambda thread_id, reply_id: application.bot.send_video(
+                        chat_id=tg_chat_id,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=reply_id,
+                        video=BytesIO(file_bytes),
+                        filename=attachment.name,
+                        caption=rendered or None,
+                        parse_mode="HTML",
+                    )
                 )
             elif attachment.file_type == "audio" or (attachment.mime_type or "").startswith("audio/"):
-                return await application.bot.send_audio(
-                    chat_id=tg_chat_id,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    audio=BytesIO(file_bytes),
-                    filename=attachment.name,
-                    caption=rendered or None,
-                    parse_mode="HTML",
+                return await _send_with_thread_fallback(
+                    lambda thread_id, reply_id: application.bot.send_audio(
+                        chat_id=tg_chat_id,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=reply_id,
+                        audio=BytesIO(file_bytes),
+                        filename=attachment.name,
+                        caption=rendered or None,
+                        parse_mode="HTML",
+                    )
                 )
             else:
-                return await application.bot.send_document(
-                    chat_id=tg_chat_id,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    document=BytesIO(file_bytes),
-                    filename=attachment.name,
-                    caption=rendered or None,
-                    parse_mode="HTML",
+                return await _send_with_thread_fallback(
+                    lambda thread_id, reply_id: application.bot.send_document(
+                        chat_id=tg_chat_id,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=reply_id,
+                        document=BytesIO(file_bytes),
+                        filename=attachment.name,
+                        caption=rendered or None,
+                        parse_mode="HTML",
+                    )
                 )
         except Exception:
             logger.exception("Failed to forward Bitrix file for message %s, falling back to text", bitrix_message.message_id)
-            return await application.bot.send_message(
-                chat_id=tg_chat_id,
-                message_thread_id=message_thread_id,
-                reply_to_message_id=reply_to_message_id,
-                text=rendered,
-                parse_mode="HTML",
-                disable_web_page_preview=self.settings.disable_link_preview,
+            return await _send_with_thread_fallback(
+                lambda thread_id, reply_id: application.bot.send_message(
+                    chat_id=tg_chat_id,
+                    message_thread_id=thread_id,
+                    reply_to_message_id=reply_id,
+                    text=rendered,
+                    parse_mode="HTML",
+                    disable_web_page_preview=self.settings.disable_link_preview,
+                )
             )
 
     def _select_bitrix_file(self, snapshot: BitrixDialogSnapshot, bitrix_message: BitrixMessage) -> Optional[BitrixFile]:
@@ -704,6 +789,11 @@ class MirrorService:
 
     async def _persist_cursor(self, dialog_id: str, message_id: Optional[int]) -> None:
         async with self._state_lock:
+            current_message_id = self._last_seen_bitrix_message_ids.get(dialog_id)
+            if current_message_id is not None and message_id is not None:
+                message_id = max(current_message_id, message_id)
+            elif current_message_id is not None and message_id is None:
+                message_id = current_message_id
             self._last_seen_bitrix_message_ids[dialog_id] = message_id
             await self.state_store.save_cursor(dialog_id, CursorState(last_seen_bitrix_message_id=message_id))
 
@@ -752,6 +842,7 @@ class MirrorService:
                             telegram_message_date_unix=link.telegram_message_date_unix,
                             bitrix_author_id=bitrix_message.author_id,
                             last_seen_bitrix_revision=current_revision,
+                            telegram_message_thread_id=link.telegram_message_thread_id,
                         )
 
             # --- Like/reaction reconciliation (all origins) ---

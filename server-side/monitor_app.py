@@ -110,16 +110,44 @@ def _ensure_chat_mappings_table() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chat_mappings (
-                tg_chat_id       INTEGER PRIMARY KEY,
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_chat_id       INTEGER NOT NULL,
                 bitrix_dialog_id TEXT NOT NULL,
                 label            TEXT DEFAULT '',
-                created_at_unix  INTEGER NOT NULL
+                created_at_unix  INTEGER NOT NULL,
+                topic_ids        TEXT DEFAULT ''
             )
             """
         )
         existing = {row[1] for row in conn.execute("PRAGMA table_info(chat_mappings)").fetchall()}
+        if "id" not in existing:
+            conn.execute("ALTER TABLE chat_mappings RENAME TO chat_mappings_legacy")
+            conn.execute(
+                """
+                CREATE TABLE chat_mappings (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tg_chat_id       INTEGER NOT NULL,
+                    bitrix_dialog_id TEXT NOT NULL,
+                    label            TEXT DEFAULT '',
+                    created_at_unix  INTEGER NOT NULL,
+                    topic_ids        TEXT DEFAULT ''
+                )
+                """
+            )
+            legacy_columns = {row[1] for row in conn.execute("PRAGMA table_info(chat_mappings_legacy)").fetchall()}
+            topic_select = "topic_ids" if "topic_ids" in legacy_columns else "''"
+            conn.execute(
+                f"""
+                INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids)
+                SELECT tg_chat_id, bitrix_dialog_id, label, created_at_unix, {topic_select}
+                FROM chat_mappings_legacy
+                """
+            )
+            conn.execute("DROP TABLE chat_mappings_legacy")
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(chat_mappings)").fetchall()}
         if "topic_ids" not in existing:
             conn.execute("ALTER TABLE chat_mappings ADD COLUMN topic_ids TEXT DEFAULT ''")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_mappings_bitrix_dialog_id ON chat_mappings(bitrix_dialog_id)")
         conn.commit()
     finally:
         conn.close()
@@ -144,7 +172,7 @@ def _get_db_stats() -> dict:
                 "SELECT bitrix_dialog_id, last_seen_bitrix_message_id FROM cursor_state"
             ).fetchall()
             db_mappings = conn.execute(
-                "SELECT tg_chat_id, bitrix_dialog_id, label, created_at_unix "
+                "SELECT id, tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids "
                 "FROM chat_mappings ORDER BY created_at_unix"
             ).fetchall()
         finally:
@@ -384,6 +412,49 @@ class MappingCreate(BaseModel):
     topic_ids: list[int] = []
 
 
+def _normalize_topic_ids(topic_ids: list[int]) -> list[int]:
+    result: list[int] = []
+    seen: set[int] = set()
+    for topic_id in topic_ids:
+        if topic_id not in seen:
+            seen.add(topic_id)
+            result.append(topic_id)
+    return result
+
+
+def _validate_mapping_conflicts(
+    conn: sqlite3.Connection,
+    *,
+    tg_chat_id: int,
+    bitrix_dialog_id: str,
+    topic_ids: list[int],
+) -> None:
+    existing_dialog = conn.execute(
+        "SELECT id FROM chat_mappings WHERE bitrix_dialog_id = ?",
+        (bitrix_dialog_id,),
+    ).fetchone()
+    if existing_dialog is not None:
+        raise HTTPException(status_code=400, detail="Этот Bitrix Dialog ID уже привязан к другому mapping")
+
+    if not topic_ids:
+        return
+
+    rows = conn.execute(
+        "SELECT bitrix_dialog_id, topic_ids FROM chat_mappings WHERE tg_chat_id = ?",
+        (tg_chat_id,),
+    ).fetchall()
+    used_topics: dict[int, str] = {}
+    for row in rows:
+        existing_topic_ids = [int(t) for t in str(row[1] or "").split(",") if t.strip().lstrip("-").isdigit()]
+        for topic_id in existing_topic_ids:
+            used_topics[topic_id] = str(row[0])
+
+    conflicts = [topic_id for topic_id in topic_ids if topic_id in used_topics]
+    if conflicts:
+        details = ", ".join(f"{topic_id}→{used_topics[topic_id]}" for topic_id in conflicts)
+        raise HTTPException(status_code=400, detail=f"Темы уже заняты другими mapping: {details}")
+
+
 # ---------------------------------------------------------------------------
 # API routes
 # ---------------------------------------------------------------------------
@@ -399,8 +470,8 @@ def api_status(_: str = Depends(_check_auth)):
     return {
         "services": {k: _get_service_info(v) for k, v in SERVICES.items()},
         "db": _get_db_stats(),
-    "bitrix_bridge": _get_bitrix_bridge_status(),
-    "telegram_webhook": _get_telegram_webhook_status(),
+        "bitrix_bridge": _get_bitrix_bridge_status(),
+        "telegram_webhook": _get_telegram_webhook_status(),
         "ts": int(time.time()),
     }
 
@@ -410,7 +481,7 @@ def api_get_mappings(_: str = Depends(_check_auth)):
     conn = _db_connect()
     try:
         rows = conn.execute(
-            "SELECT tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids "
+            "SELECT id, tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids "
             "FROM chat_mappings ORDER BY created_at_unix"
         ).fetchall()
         result = []
@@ -430,11 +501,18 @@ def api_get_mappings(_: str = Depends(_check_auth)):
 def api_add_mapping(body: MappingCreate, _: str = Depends(_check_auth)):
     if not body.bitrix_dialog_id.strip():
         raise HTTPException(status_code=400, detail="bitrix_dialog_id не может быть пустым")
-    topic_ids_str = ",".join(str(t) for t in body.topic_ids)
+    topic_ids = _normalize_topic_ids(body.topic_ids)
+    topic_ids_str = ",".join(str(t) for t in topic_ids)
     conn = _db_connect()
     try:
+        _validate_mapping_conflicts(
+            conn,
+            tg_chat_id=body.tg_chat_id,
+            bitrix_dialog_id=body.bitrix_dialog_id.strip(),
+            topic_ids=topic_ids,
+        )
         conn.execute(
-            "INSERT OR REPLACE INTO chat_mappings"
+            "INSERT INTO chat_mappings"
             "(tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) VALUES (?,?,?,?,?)",
             (
                 body.tg_chat_id,
@@ -446,17 +524,21 @@ def api_add_mapping(body: MappingCreate, _: str = Depends(_check_auth)):
         )
         conn.commit()
         return {"ok": True}
+    except HTTPException:
+        raise
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
         conn.close()
 
 
-@app.delete("/monitor/api/mappings/{tg_chat_id}")
-def api_delete_mapping(tg_chat_id: int, _: str = Depends(_check_auth)):
+@app.delete("/monitor/api/mappings/{mapping_id}")
+def api_delete_mapping(mapping_id: int, _: str = Depends(_check_auth)):
     conn = _db_connect()
     try:
-        conn.execute("DELETE FROM chat_mappings WHERE tg_chat_id = ?", (tg_chat_id,))
+        conn.execute("DELETE FROM chat_mappings WHERE id = ?", (mapping_id,))
         conn.commit()
         return {"ok": True}
     except Exception as exc:
@@ -1139,25 +1221,33 @@ function renderDbMappings(mappings) {
     const tr = document.createElement('tr');
     tr.className = 'hover:bg-gray-50';
     const topicsLabel = (m.topic_ids && m.topic_ids.length) ? m.topic_ids.join(', ') : '<span class="text-gray-400">все</span>';
+    const tgChatIdAttr = escHtml(String(m.tg_chat_id));
+    const dialogIdAttr = escHtml(m.bitrix_dialog_id);
     tr.innerHTML = `
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(String(m.tg_chat_id))}</td>
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(m.bitrix_dialog_id)}</td>
       <td class="px-5 py-2.5 text-sm text-gray-500">${escHtml(m.label || '—')}</td>
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${topicsLabel}</td>
       <td class="px-5 py-2.5">
-        <button onclick="deleteMapping(${m.tg_chat_id})"
+        <button data-mapping-id="${m.id}" data-tg-chat-id="${tgChatIdAttr}" data-dialog-id="${dialogIdAttr}"
                 class="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-medium rounded-lg transition-colors">
           Удалить
         </button>
       </td>
     `;
+    const deleteBtn = tr.querySelector('button[data-mapping-id]');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', () => {
+        deleteMapping(m.id, String(m.tg_chat_id), m.bitrix_dialog_id);
+      });
+    }
     tbody.appendChild(tr);
   }
 }
 
-async function deleteMapping(tgChatId) {
-  if (!confirm('Удалить связку для TG-чата ' + tgChatId + '?\\nПосле этого нужно будет перезапустить сервис Mirror.')) return;
-  const r = await apiFetch('/monitor/api/mappings/' + tgChatId, { method: 'DELETE' });
+async function deleteMapping(mappingId, tgChatId, dialogId) {
+  if (!confirm('Удалить связку TG ' + tgChatId + ' → ' + dialogId + '?\\nПосле этого нужно будет перезапустить сервис Mirror.')) return;
+  const r = await apiFetch('/monitor/api/mappings/' + mappingId, { method: 'DELETE' });
   if (r.ok) {
     loadMappings();
   } else {

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from mirror_service import MirrorService, _bbcode_to_html
+from models import BitrixDialogSnapshot, BitrixMessage, CursorState, MirrorOrigin
 from tests.helpers import make_mapping, make_message, make_settings
 
 
@@ -68,7 +69,54 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.bitrix.set_message_like.assert_awaited_once_with(99, liked=True)
         self.state_store.update_reaction_state.assert_awaited_once()
 
+    async def test_suppressed_telegram_origin_bitrix_message_advances_cursor(self) -> None:
+        mapping = self.service.settings.chat_mappings[0]
+        self.service._last_seen_bitrix_message_ids[mapping.bitrix_dialog_id] = 5
+        self.bitrix.get_recent_messages.return_value = BitrixDialogSnapshot(
+            messages=[],
+            users_by_id={},
+            files_by_id={},
+        )
+        self.bitrix.get_messages_after.return_value = BitrixDialogSnapshot(
+            messages=[
+                BitrixMessage(
+                    message_id=10,
+                    author_id=123,
+                    text="already mirrored from telegram",
+                    file_ids=(),
+                    update_time_unix=None,
+                    like_user_ids=(),
+                )
+            ],
+            users_by_id={},
+            files_by_id={},
+        )
+        self.state_store.get_link_by_bitrix_message.return_value = SimpleNamespace(
+            origin=MirrorOrigin.TELEGRAM,
+            telegram_message_id=777,
+        )
+        application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+
+        await self.service._sync_bitrix_messages(application, mapping)
+
+        application.bot.send_message.assert_not_awaited()
+        self.state_store.save_cursor.assert_awaited_with(
+            mapping.bitrix_dialog_id,
+            CursorState(last_seen_bitrix_message_id=10),
+        )
+        self.assertEqual(self.service._last_seen_bitrix_message_ids[mapping.bitrix_dialog_id], 10)
+
+    async def test_persist_cursor_does_not_move_backwards(self) -> None:
+        self.service._last_seen_bitrix_message_ids["chat42"] = 20
+
+        await self.service._persist_cursor("chat42", 10)
+
+        self.state_store.save_cursor.assert_awaited_once_with(
+            "chat42",
+            CursorState(last_seen_bitrix_message_id=20),
+        )
+        self.assertEqual(self.service._last_seen_bitrix_message_ids["chat42"], 20)
+
     async def test_bbcode_to_html_escapes_markup(self) -> None:
         converted = _bbcode_to_html("[b]Hi[/b] <script>")
         self.assertEqual(converted, "<b>Hi</b> &lt;script&gt;")
-

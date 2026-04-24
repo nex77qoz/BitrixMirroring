@@ -496,32 +496,32 @@ class MirrorService:
             last_seen,
             len(snapshot.messages),
         )
-        fresh_messages: list[BitrixMessage] = []
-        for message in snapshot.messages:
-            if await self._should_forward_bitrix_message(dialog_id, message):
-                # Supplement reply_id from webhook cache if API didn't provide it
-                if message.reply_id is None and message.message_id in self._webhook_reply_cache:
-                    cached_reply = self._webhook_reply_cache.pop(message.message_id)
-                    message = dataclasses.replace(message, reply_id=cached_reply)
-                    logger.info(
-                        "Supplemented reply_id from webhook cache: message %s -> reply_id %s",
-                        message.message_id, cached_reply,
-                    )
-                # Fallback: fetch reply_id via im.dialog.messages.search
-                if message.reply_id is None:
-                    search_reply_id = await self.bitrix.get_message_reply_id(
-                        dialog_id=dialog_id, message_id=message.message_id,
-                    )
-                    if search_reply_id is not None:
-                        message = dataclasses.replace(message, reply_id=search_reply_id)
-                        logger.info(
-                            "Fetched reply_id via search API: message %s -> reply_id %s",
-                            message.message_id, search_reply_id,
-                        )
-                fresh_messages.append(message)
-
         default_thread_id = None if self._is_multi_topic_mode(mapping) else mapping.default_topic_id
-        for bitrix_message in fresh_messages:
+        for bitrix_message in sorted(snapshot.messages, key=lambda item: item.message_id):
+            if not await self._should_forward_bitrix_message(dialog_id, bitrix_message):
+                await self._persist_cursor(dialog_id, bitrix_message.message_id)
+                continue
+
+            # Supplement reply_id from webhook cache if API didn't provide it
+            if bitrix_message.reply_id is None and bitrix_message.message_id in self._webhook_reply_cache:
+                cached_reply = self._webhook_reply_cache.pop(bitrix_message.message_id)
+                bitrix_message = dataclasses.replace(bitrix_message, reply_id=cached_reply)
+                logger.info(
+                    "Supplemented reply_id from webhook cache: message %s -> reply_id %s",
+                    bitrix_message.message_id, cached_reply,
+                )
+            # Fallback: fetch reply_id via im.dialog.messages.search
+            if bitrix_message.reply_id is None:
+                search_reply_id = await self.bitrix.get_message_reply_id(
+                    dialog_id=dialog_id, message_id=bitrix_message.message_id,
+                )
+                if search_reply_id is not None:
+                    bitrix_message = dataclasses.replace(bitrix_message, reply_id=search_reply_id)
+                    logger.info(
+                        "Fetched reply_id via search API: message %s -> reply_id %s",
+                        bitrix_message.message_id, search_reply_id,
+                    )
+
             sender_name = self._resolve_bitrix_sender_name(snapshot, bitrix_message)
             reply_tg_id: Optional[int] = None
             message_thread_id = default_thread_id
@@ -789,6 +789,11 @@ class MirrorService:
 
     async def _persist_cursor(self, dialog_id: str, message_id: Optional[int]) -> None:
         async with self._state_lock:
+            current_message_id = self._last_seen_bitrix_message_ids.get(dialog_id)
+            if current_message_id is not None and message_id is not None:
+                message_id = max(current_message_id, message_id)
+            elif current_message_id is not None and message_id is None:
+                message_id = current_message_id
             self._last_seen_bitrix_message_ids[dialog_id] = message_id
             await self.state_store.save_cursor(dialog_id, CursorState(last_seen_bitrix_message_id=message_id))
 

@@ -58,6 +58,7 @@ TELEGRAM_WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "/telegram/webhook").
 BITRIX_WEBHOOK_BRIDGE_ENABLED = os.getenv("BITRIX_WEBHOOK_BRIDGE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 MIRROR_INTERNAL_BASE_URL = os.getenv("MIRROR_INTERNAL_BASE_URL", "").strip().rstrip("/")
 MIRROR_INTERNAL_EVENT_PATH = os.getenv("MIRROR_INTERNAL_EVENT_PATH", "/internal/bitrix/event").strip() or "/internal/bitrix/event"
+MIRROR_INTERNAL_WEBHOOK_SECRET = os.getenv("MIRROR_INTERNAL_WEBHOOK_SECRET", "")
 MIRROR_HTTP_HOST = os.getenv("MIRROR_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1"
 MIRROR_HTTP_PORT = int(os.getenv("MIRROR_HTTP_PORT", "8090"))
 
@@ -148,6 +149,15 @@ def _ensure_chat_mappings_table() -> None:
         if "topic_ids" not in existing:
             conn.execute("ALTER TABLE chat_mappings ADD COLUMN topic_ids TEXT DEFAULT ''")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_mappings_bitrix_dialog_id ON chat_mappings(bitrix_dialog_id)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_settings (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at_unix INTEGER NOT NULL
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -382,6 +392,41 @@ def _get_bitrix_bridge_status() -> dict:
         return status
 
 
+def _get_persisted_forwarding_enabled() -> bool:
+    try:
+        conn = _db_connect()
+        try:
+            row = conn.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'forwarding_enabled'"
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return True
+        return str(row[0]).strip().lower() not in {"0", "false", "no", "off"}
+    except Exception:
+        return True
+
+
+def _get_forwarding_status() -> dict:
+    health_url = f"http://{MIRROR_HTTP_HOST}:{MIRROR_HTTP_PORT}/health"
+    status = {
+        "enabled": _get_persisted_forwarding_enabled(),
+        "reachable": False,
+        "health_url": health_url,
+    }
+    try:
+        response = httpx.get(health_url, timeout=5)
+        response.raise_for_status()
+        payload = response.json()
+        status["reachable"] = True
+        status["enabled"] = bool(payload.get("forwarding_enabled", status["enabled"]))
+        return status
+    except Exception as exc:
+        status["error"] = str(exc)
+        return status
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -410,6 +455,10 @@ class MappingCreate(BaseModel):
     )
     label: str = ""
     topic_ids: list[int] = []
+
+
+class ForwardingUpdate(BaseModel):
+    enabled: bool
 
 
 def _normalize_topic_ids(topic_ids: list[int]) -> list[int]:
@@ -472,8 +521,38 @@ def api_status(_: str = Depends(_check_auth)):
         "db": _get_db_stats(),
         "bitrix_bridge": _get_bitrix_bridge_status(),
         "telegram_webhook": _get_telegram_webhook_status(),
+        "forwarding": _get_forwarding_status(),
         "ts": int(time.time()),
     }
+
+
+@app.post("/monitor/api/forwarding")
+def api_set_forwarding(body: ForwardingUpdate, _: str = Depends(_check_auth)):
+    if not MIRROR_INTERNAL_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="MIRROR_INTERNAL_WEBHOOK_SECRET is not configured")
+    url = f"http://{MIRROR_HTTP_HOST}:{MIRROR_HTTP_PORT}/internal/forwarding"
+    try:
+        response = httpx.post(
+            url,
+            json={"enabled": body.enabled},
+            headers={"X-Internal-Webhook-Secret": MIRROR_INTERNAL_WEBHOOK_SECRET},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return {
+            "ok": True,
+            "forwarding_enabled": bool(payload.get("forwarding_enabled")),
+        }
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text
+        try:
+            detail = exc.response.json().get("detail", detail)
+        except Exception:
+            pass
+        raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/monitor/api/mappings")
@@ -668,6 +747,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </header>
 
   <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+
+    <section>
+      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Переадресация сообщений</h2>
+      <div id="forwardingCard" class="bg-white rounded-xl shadow p-5">
+        <div class="text-sm text-gray-400">Загрузка…</div>
+      </div>
+    </section>
 
     <!-- ── Services ─────────────────────────────────────────────────────── -->
     <section>
@@ -888,6 +974,7 @@ async function loadStatus() {
     const r = await apiFetch('/monitor/api/status');
     if (!r.ok) return;
     const data = await r.json();
+    renderForwarding(data.forwarding || {});
     renderServices(data.services || {});
     renderBitrixBridge(data.bitrix_bridge || {});
     renderTelegramWebhook(data.telegram_webhook || {});
@@ -895,6 +982,69 @@ async function loadStatus() {
     const t = new Date(data.ts * 1000).toLocaleTimeString();
     document.getElementById('lastUpdated').textContent = 'Обновлено: ' + t;
   } catch (_) { /* network hiccup – ignore */ }
+}
+
+function renderForwarding(info) {
+  const el = document.getElementById('forwardingCard');
+  const enabled = info.enabled !== false;
+  const reachable = !!info.reachable;
+  const badge = !reachable
+    ? 'bg-amber-100 text-amber-800'
+    : enabled
+      ? 'bg-green-100 text-green-800'
+      : 'bg-red-100 text-red-800';
+  const badgeLabel = !reachable ? 'Mirror недоступен' : enabled ? 'Переадресация включена' : 'Переадресация остановлена';
+  const buttonClass = enabled
+    ? 'bg-red-600 hover:bg-red-700'
+    : 'bg-green-600 hover:bg-green-700';
+  const buttonLabel = enabled ? 'Остановить переадресацию' : 'Запустить переадресацию';
+  const error = info.error || '';
+  el.innerHTML = `
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div>
+        <div class="flex items-center gap-2">
+          <p class="font-semibold text-gray-800">${enabled ? 'Сообщения переадресуются' : 'Переадресация сообщений остановлена'}</p>
+          <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${badge}">
+            ${escHtml(badgeLabel)}
+          </span>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">
+          Управляет пересылкой новых сообщений Telegram → Bitrix и Bitrix → Telegram.
+          ${error ? ' Последняя ошибка: ' + escHtml(error) : ''}
+        </p>
+      </div>
+      <button id="forwardingToggleBtn" onclick="toggleForwarding(${enabled ? 'false' : 'true'})"
+              class="px-4 py-2 ${buttonClass} text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50"
+              ${reachable ? '' : 'disabled'}>
+        ${escHtml(buttonLabel)}
+      </button>
+    </div>
+  `;
+}
+
+async function toggleForwarding(enabled) {
+  const btn = document.getElementById('forwardingToggleBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = enabled ? 'Запуск…' : 'Остановка…';
+  }
+  try {
+    const r = await apiFetch('/monitor/api/forwarding', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      alert('Ошибка: ' + (e.detail || r.status));
+      return;
+    }
+    await loadStatus();
+  } catch (err) {
+    alert('Ошибка: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function renderBitrixBridge(info) {

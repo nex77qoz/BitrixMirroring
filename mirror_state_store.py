@@ -91,6 +91,12 @@ class MirrorStateStore:
     async def load_topic_names(self) -> dict[tuple[int, int], str]:
         return await asyncio.to_thread(self._load_topic_names_sync)
 
+    async def get_forwarding_enabled(self) -> bool:
+        return await asyncio.to_thread(self._get_forwarding_enabled_sync)
+
+    async def set_forwarding_enabled(self, enabled: bool) -> None:
+        await asyncio.to_thread(self._set_forwarding_enabled_sync, enabled)
+
     async def cleanup_old_links(self, max_age_seconds: int = 7 * 24 * 3600) -> int:
         """Delete message_links older than max_age_seconds. Returns count of deleted rows."""
         return await asyncio.to_thread(self._cleanup_old_links_sync, max_age_seconds)
@@ -280,6 +286,16 @@ class MirrorStateStore:
                     topic_id   INTEGER NOT NULL,
                     name       TEXT NOT NULL,
                     PRIMARY KEY (tg_chat_id, topic_id)
+                )
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runtime_settings (
+                    key        TEXT PRIMARY KEY,
+                    value      TEXT NOT NULL,
+                    updated_at_unix INTEGER NOT NULL
                 )
                 """
             )
@@ -512,6 +528,30 @@ class MirrorStateStore:
         with self._connect() as connection:
             rows = connection.execute("SELECT tg_chat_id, topic_id, name FROM topic_names").fetchall()
         return {(int(row[0]), int(row[1])): str(row[2]) for row in rows}
+
+    def _get_forwarding_enabled_sync(self) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'forwarding_enabled'"
+            ).fetchone()
+        if row is None:
+            return True
+        return str(row[0]).strip().lower() not in {"0", "false", "no", "off"}
+
+    def _set_forwarding_enabled_sync(self, enabled: bool) -> None:
+        now = int(time.time())
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO runtime_settings(key, value, updated_at_unix)
+                VALUES('forwarding_enabled', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at_unix = excluded.updated_at_unix
+                """,
+                ("1" if enabled else "0", now),
+            )
+            connection.commit()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

@@ -87,18 +87,39 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
             "ok": True,
             "telegram_webhook_enabled": settings.telegram_webhook_enabled,
             "bitrix_webhook_bridge_enabled": settings.bitrix_webhook_bridge_enabled,
+            "forwarding_enabled": mirror.is_forwarding_enabled(),
             "telegram_webhook_status": webhook_status,
         }
+
+    def _verify_internal_secret(request: Request) -> None:
+        expected_secret = settings.mirror_internal_webhook_secret or ""
+        if not expected_secret:
+            raise HTTPException(status_code=503, detail="Internal webhook secret is not configured")
+        provided_secret = request.headers.get("X-Internal-Webhook-Secret", "")
+        if expected_secret != provided_secret:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    @app.get("/internal/forwarding")
+    async def forwarding_status(request: Request) -> dict[str, object]:
+        _verify_internal_secret(request)
+        return {"ok": True, "forwarding_enabled": mirror.is_forwarding_enabled()}
+
+    @app.post("/internal/forwarding")
+    async def set_forwarding(request: Request) -> dict[str, object]:
+        _verify_internal_secret(request)
+        payload = await request.json()
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail="enabled must be a boolean")
+        current = await mirror.set_forwarding_enabled(enabled)
+        return {"ok": True, "forwarding_enabled": current}
 
     @app.post(settings.mirror_internal_event_path)
     async def bitrix_event_bridge(request: Request) -> dict[str, object]:
         if not settings.bitrix_webhook_bridge_enabled:
             raise HTTPException(status_code=404, detail="Bitrix webhook bridge is disabled")
 
-        expected_secret = settings.mirror_internal_webhook_secret or ""
-        provided_secret = request.headers.get("X-Internal-Webhook-Secret", "")
-        if expected_secret != provided_secret:
-            raise HTTPException(status_code=403, detail="Forbidden")
+        _verify_internal_secret(request)
 
         payload = await request.json()
         dialog_id = str(payload.get("dialog_id") or "").strip()

@@ -53,6 +53,38 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(self.service._bitrix_on_demand_tasks, {})
 
+    async def test_forwarding_disabled_rejects_new_work(self) -> None:
+        await self.service.set_forwarding_enabled(False)
+        self.service._application = SimpleNamespace()
+
+        message = make_message()
+        await self.service.enqueue_telegram_message(message)
+        accepted = await self.service.schedule_bitrix_dialog_sync("chat42", trigger="webhook")
+        await self.service.sync_telegram_edit(message)
+        await self.service.sync_telegram_reaction(message.chat_id, message.message_id, True)
+
+        self.assertFalse(accepted)
+        self.assertEqual(self.service._send_queue.qsize(), 0)
+        self.bitrix.update_message.assert_not_awaited()
+        self.bitrix.set_message_like.assert_not_awaited()
+        self.state_store.set_forwarding_enabled.assert_awaited_once_with(False)
+
+    async def test_disabled_bitrix_sync_advances_cursor_without_forwarding(self) -> None:
+        mapping = self.service.settings.chat_mappings[0]
+        await self.service.set_forwarding_enabled(False)
+        self.bitrix.get_latest_message_id.return_value = 42
+        application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+
+        await self.service._sync_bitrix_messages(application, mapping)
+
+        application.bot.send_message.assert_not_awaited()
+        self.bitrix.get_recent_messages.assert_not_awaited()
+        self.bitrix.get_messages_after.assert_not_awaited()
+        self.state_store.save_cursor.assert_awaited_with(
+            mapping.bitrix_dialog_id,
+            CursorState(last_seen_bitrix_message_id=42),
+        )
+
     async def test_sync_telegram_edit_uses_saved_link(self) -> None:
         self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(bitrix_message_id=99)
         message = make_message(text="edited text")

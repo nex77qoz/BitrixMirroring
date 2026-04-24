@@ -28,6 +28,15 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         state = await self.store.load_cursor("chat42")
         self.assertEqual(state.last_seen_bitrix_message_id, 99)
 
+    async def test_forwarding_enabled_roundtrip(self) -> None:
+        self.assertTrue(await self.store.get_forwarding_enabled())
+
+        await self.store.set_forwarding_enabled(False)
+        self.assertFalse(await self.store.get_forwarding_enabled())
+
+        await self.store.set_forwarding_enabled(True)
+        self.assertTrue(await self.store.get_forwarding_enabled())
+
     async def test_upsert_replace_and_reaction_state(self) -> None:
         await self.store.upsert_link(
             telegram_chat_id=1,

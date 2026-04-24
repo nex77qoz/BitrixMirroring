@@ -77,6 +77,7 @@ class MirrorService:
         self._bitrix_on_demand_tasks: dict[str, asyncio.Task[None]] = {}
         self._webhook_reply_cache: dict[int, int] = {}
         self._topic_names: dict[tuple[int, int], str] = {}
+        self._forwarding_enabled = True
 
     def get_mapping_for_telegram_chat(self, tg_chat_id: int) -> Optional[ChatMapping]:
         mappings = self._tg_to_mappings.get(tg_chat_id)
@@ -159,6 +160,15 @@ class MirrorService:
         """
         return self.resolve_mapping_for_telegram_message(message) is not None
 
+    def is_forwarding_enabled(self) -> bool:
+        return self._forwarding_enabled
+
+    async def set_forwarding_enabled(self, enabled: bool) -> bool:
+        self._forwarding_enabled = enabled
+        await self.state_store.set_forwarding_enabled(enabled)
+        logger.warning("Message forwarding %s via runtime control", "enabled" if enabled else "disabled")
+        return self._forwarding_enabled
+
     def render_telegram_message(self, message: Message) -> str:
         lines: list[str] = []
 
@@ -189,6 +199,8 @@ class MirrorService:
         self._application = application
         self._stop_event.clear()
         await self.state_store.initialize()
+        self._forwarding_enabled = await self.state_store.get_forwarding_enabled()
+        logger.info("Message forwarding is %s", "enabled" if self._forwarding_enabled else "disabled")
         self._topic_names = await self.state_store.load_topic_names()
         if not self.settings.chat_mappings:
             logger.warning(
@@ -234,6 +246,13 @@ class MirrorService:
         self._application = None
 
     async def enqueue_telegram_message(self, message: Message) -> None:
+        if not self._forwarding_enabled:
+            logger.info(
+                "Dropping Telegram message %s from chat %s because forwarding is disabled",
+                message.message_id,
+                message.chat_id,
+            )
+            return
         await self._send_queue.put(message)
 
     async def schedule_bitrix_dialog_sync(
@@ -245,6 +264,11 @@ class MirrorService:
         reply_id: Optional[int] = None,
     ) -> bool:
         if not self.settings.sync_bitrix_to_telegram:
+            return False
+        if not self._forwarding_enabled:
+            logger.info("Dropping Bitrix webhook for dialog %s because forwarding is disabled", dialog_id)
+            if message_id is not None:
+                await self._persist_cursor(dialog_id, message_id)
             return False
         if self._application is None:
             logger.warning("Dropping Bitrix webhook for dialog %s because application is not ready", dialog_id)
@@ -289,6 +313,13 @@ class MirrorService:
         return True
 
     async def sync_telegram_edit(self, message: Message) -> None:
+        if not self._forwarding_enabled:
+            logger.info(
+                "Skipping Telegram edit %s from chat %s because forwarding is disabled",
+                message.message_id,
+                message.chat_id,
+            )
+            return
         link = await self.state_store.get_link_by_telegram_message(
             telegram_chat_id=message.chat_id,
             telegram_message_id=message.message_id,
@@ -308,6 +339,13 @@ class MirrorService:
         )
 
     async def sync_telegram_reaction(self, chat_id: int, message_id: int, has_reactions: bool) -> None:
+        if not self._forwarding_enabled:
+            logger.info(
+                "Skipping Telegram reaction for message %s in chat %s because forwarding is disabled",
+                message_id,
+                chat_id,
+            )
+            return
         link = await self.state_store.get_link_by_telegram_message(
             telegram_chat_id=chat_id,
             telegram_message_id=message_id,
@@ -376,6 +414,13 @@ class MirrorService:
                 raise
 
             try:
+                if not self._forwarding_enabled:
+                    logger.info(
+                        "Dropping queued Telegram message %s from chat %s because forwarding is disabled",
+                        message.message_id,
+                        message.chat_id,
+                    )
+                    continue
                 mapping = self.resolve_mapping_for_telegram_message(message)
                 if mapping is None:
                     logger.warning(
@@ -481,6 +526,16 @@ class MirrorService:
         dialog_id = mapping.bitrix_dialog_id
         tg_chat_id = mapping.tg_chat_id
         last_seen = self._last_seen_bitrix_message_ids.get(dialog_id)
+
+        if not self._forwarding_enabled:
+            latest_message_id = await self.bitrix.get_latest_message_id(dialog_id=dialog_id)
+            await self._persist_cursor(dialog_id, latest_message_id)
+            logger.info(
+                "Skipped Bitrix sync for dialog %s because forwarding is disabled; cursor=%s",
+                dialog_id,
+                latest_message_id,
+            )
+            return
 
         recent_snapshot = await self.bitrix.get_recent_messages(
             dialog_id=dialog_id,

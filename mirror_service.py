@@ -190,8 +190,10 @@ class MirrorService:
         if bitrix_dialog_id in self._bitrix_to_mapping:
             raise ValueError(f"Bitrix dialog {bitrix_dialog_id} уже привязан к другому маппингу")
         topic_ids = [topic_id] if topic_id is not None else []
-        await self.state_store.add_chat_mapping(tg_chat_id, bitrix_dialog_id, topic_ids, label)
-        await self.reload_mappings()
+        try:
+            await self.state_store.add_chat_mapping(tg_chat_id, bitrix_dialog_id, topic_ids, label)
+        finally:
+            await self.reload_mappings()
 
     async def disconnect_mapping(self, tg_chat_id: int, topic_id: Optional[int]) -> bool:
         mapping = self.resolve_mapping_for_chat_and_thread(tg_chat_id, topic_id)

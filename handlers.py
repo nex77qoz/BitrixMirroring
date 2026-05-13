@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from telegram import Update
 from telegram.constants import ChatType
@@ -186,4 +187,76 @@ async def on_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # Telegram Bot API does not provide a universal deleted-message update for ordinary bot polling,
 # so Telegram -> Bitrix delete cannot be implemented reliably here.
+
+_BITRIX_ID_RE = re.compile(r"^(chat\d+|sg\d+|\d+)$")
+
+
+async def _check_admin(update: Update, mirror: "MirrorService") -> bool:
+    user = update.effective_user
+    if not user:
+        return False
+    return await mirror.is_admin(user.id)
+
+
+async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return
+
+    mirror: MirrorService = context.application.bot_data["mirror_service"]
+    if not await _check_admin(update, mirror):
+        return
+
+    args = context.args or []
+    if len(args) != 1:
+        await msg.reply_text(
+            "Использование: /connect <BitrixChatId>\n"
+            "Примеры: /connect chat2941  /connect sg123  /connect 456"
+        )
+        return
+
+    bitrix_dialog_id = args[0].strip()
+    if not _BITRIX_ID_RE.match(bitrix_dialog_id):
+        await msg.reply_text(
+            "Неверный формат Bitrix Chat ID.\n"
+            "Допустимые форматы: chat123, sg123, или числовой ID."
+        )
+        return
+
+    topic_id = msg.message_thread_id
+    try:
+        await mirror.connect_mapping(chat.id, bitrix_dialog_id, topic_id, "")
+    except ValueError as exc:
+        await msg.reply_text(f"⚠️ {exc}")
+        return
+
+    thread_info = f" (ветка #{topic_id})" if topic_id else ""
+    await msg.reply_text(
+        f"✅ Связка установлена: {bitrix_dialog_id} ↔ этот чат{thread_info}\n"
+        "Зеркалирование активно немедленно."
+    )
+
+
+async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return
+
+    mirror: MirrorService = context.application.bot_data["mirror_service"]
+    if not await _check_admin(update, mirror):
+        return
+
+    topic_id = msg.message_thread_id
+    removed = await mirror.disconnect_mapping(chat.id, topic_id)
+    if removed:
+        thread_info = f" (ветка #{topic_id})" if topic_id else ""
+        await msg.reply_text(f"✅ Связка удалена для этого чата{thread_info}.")
+    else:
+        await msg.reply_text("⚠️ Связка для этого чата/ветки не найдена.")
 

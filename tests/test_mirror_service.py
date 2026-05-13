@@ -24,6 +24,11 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         assert mapping is not None
         self.assertEqual(mapping.bitrix_dialog_id, "chat42")
 
+    async def test_get_chat_mappings_returns_current_mappings(self) -> None:
+        mappings = self.service.get_chat_mappings()
+        self.assertEqual(len(mappings), 1)
+        self.assertEqual(mappings[0].bitrix_dialog_id, "chat42")
+
     async def test_render_telegram_message_includes_topic_and_sender(self) -> None:
         self.service._topic_names[(-1001234567890, 100)] = "Deploy"
         message = make_message(message_thread_id=100, text="hello")

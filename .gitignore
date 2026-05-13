@@ -16,3 +16,4 @@ bitrix.log
 .venv/
 .roo/
 .claude/
+docs/

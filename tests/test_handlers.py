@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from handlers import on_edited_message, on_message, on_message_reaction
+from handlers import cmd_start, on_admin_callback, on_edited_message, on_message, on_message_reaction, on_private_admin_message
 from tests.helpers import make_message
 
 
@@ -16,8 +16,16 @@ class HandlersTestCase(unittest.IsolatedAsyncioTestCase):
         self.mirror.is_allowed_topic = Mock(return_value=True)
         self.mirror.get_mapping_for_telegram_chat = Mock(return_value=object())
         self.mirror.is_admin = AsyncMock(return_value=True)
+        self.mirror.is_forwarding_enabled = Mock(return_value=True)
+        self.mirror.get_chat_mappings = Mock(return_value=())
+        def close_created_coroutine(coro):
+            coro.close()
+            return object()
         self.context = SimpleNamespace(
-            application=SimpleNamespace(bot_data={"mirror_service": self.mirror}),
+            application=SimpleNamespace(
+                bot_data={"mirror_service": self.mirror},
+                create_task=Mock(side_effect=close_created_coroutine),
+            ),
             args=[],
         )
 
@@ -30,6 +38,114 @@ class HandlersTestCase(unittest.IsolatedAsyncioTestCase):
         update = SimpleNamespace(effective_message=make_message(chat=SimpleNamespace(id=1, type="private", title=None)))
         await on_message(update, self.context)
         self.mirror.enqueue_telegram_message.assert_not_called()
+
+    async def test_cmd_start_shows_admin_panel_in_private_chat(self) -> None:
+        msg = make_message(chat=SimpleNamespace(id=1, type="private", title=None))
+        msg.reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=msg,
+            effective_chat=msg.chat,
+            effective_user=SimpleNamespace(id=777),
+        )
+
+        await cmd_start(update, self.context)
+
+        msg.reply_text.assert_awaited_once()
+        kwargs = msg.reply_text.call_args.kwargs
+        self.assertIsNotNone(kwargs.get("reply_markup"))
+        button_texts = [
+            button.text
+            for row in kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("Проверить маппинги", button_texts)
+        self.assertIn("Остановить пересылку", button_texts)
+        self.assertIn("Перезагрузить службы", button_texts)
+
+    async def test_private_admin_message_shows_panel(self) -> None:
+        msg = make_message(chat=SimpleNamespace(id=1, type="private", title=None))
+        msg.reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=msg,
+            effective_chat=msg.chat,
+            effective_user=SimpleNamespace(id=777),
+        )
+
+        await on_private_admin_message(update, self.context)
+
+        msg.reply_text.assert_awaited_once()
+        self.assertIsNotNone(msg.reply_text.call_args.kwargs.get("reply_markup"))
+
+    async def test_private_non_admin_message_replies_denied(self) -> None:
+        self.mirror.is_admin = AsyncMock(return_value=False)
+        msg = make_message(chat=SimpleNamespace(id=1, type="private", title=None))
+        msg.reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=msg,
+            effective_chat=msg.chat,
+            effective_user=SimpleNamespace(id=999),
+        )
+
+        await on_private_admin_message(update, self.context)
+
+        msg.reply_text.assert_awaited_once()
+        self.assertIn("Нет доступа", msg.reply_text.call_args.args[0])
+
+    async def test_admin_callback_lists_mappings(self) -> None:
+        mapping = SimpleNamespace(
+            mapping_id=1,
+            tg_chat_id=-100123,
+            bitrix_dialog_id="chat42",
+            topic_ids=frozenset({55, 66}),
+            label="",
+        )
+        self.mirror.get_chat_mappings = Mock(return_value=(mapping,))
+        query = SimpleNamespace(
+            data="admin:mappings",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+            from_user=SimpleNamespace(id=777),
+        )
+        update = SimpleNamespace(callback_query=query, effective_user=query.from_user)
+
+        await on_admin_callback(update, self.context)
+
+        self.mirror.reload_mappings.assert_awaited_once()
+        query.answer.assert_awaited_once()
+        query.edit_message_text.assert_awaited_once()
+        text = query.edit_message_text.call_args.args[0]
+        self.assertIn("chat42", text)
+        self.assertIn("-100123", text)
+        self.assertIn("55, 66", text)
+
+    async def test_admin_callback_stops_forwarding(self) -> None:
+        query = SimpleNamespace(
+            data="admin:forwarding:off",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+            from_user=SimpleNamespace(id=777),
+        )
+        update = SimpleNamespace(callback_query=query, effective_user=query.from_user)
+
+        await on_admin_callback(update, self.context)
+
+        self.mirror.set_forwarding_enabled.assert_awaited_once_with(False)
+        query.edit_message_text.assert_awaited_once()
+        self.assertIn("остановлена", query.edit_message_text.call_args.args[0])
+
+    async def test_admin_callback_schedules_service_restart(self) -> None:
+        query = SimpleNamespace(
+            data="admin:restart",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+            from_user=SimpleNamespace(id=777),
+        )
+        update = SimpleNamespace(callback_query=query, effective_user=query.from_user)
+
+        await on_admin_callback(update, self.context)
+
+        query.edit_message_text.assert_awaited_once()
+        self.context.application.create_task.assert_called_once()
 
     async def test_on_edited_message_syncs_allowed_message(self) -> None:
         update = SimpleNamespace(effective_message=make_message())

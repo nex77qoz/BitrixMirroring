@@ -89,6 +89,9 @@ class MirrorService:
     def get_mapping_for_bitrix_dialog(self, dialog_id: str) -> Optional[ChatMapping]:
         return self._bitrix_to_mapping.get(dialog_id)
 
+    def get_chat_mappings(self) -> tuple[ChatMapping, ...]:
+        return tuple(mapping for mappings in self._tg_to_mappings.values() for mapping in mappings)
+
     def resolve_mapping_for_telegram_message(self, message: Message) -> Optional[ChatMapping]:
         return self.resolve_mapping_for_chat_and_thread(message.chat_id, message.message_thread_id)
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType
 from telegram.ext import ContextTypes
 
@@ -11,14 +12,146 @@ from mirror_service import MirrorService
 
 logger = logging.getLogger("tg-bitrix-mirror")
 
+_ADMIN_CALLBACK_PREFIX = "admin:"
+_SERVICE_NAMES = ("bitrix-bot", "bitrix-monitor", "bitrix-telegram-mirror")
+
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
+        return
+    if update.effective_chat and update.effective_chat.type == ChatType.PRIVATE:
+        mirror: MirrorService = context.application.bot_data["mirror_service"]
+        if await _check_admin(update, mirror):
+            await _reply_admin_panel(update.effective_message, mirror)
+            return
+        await update.effective_message.reply_text("Нет доступа.")
         return
     await update.effective_message.reply_text(
         "Бот запущен.\n"
         "Команда /whereami покажет chat_id текущего чата и thread_id темы."
     )
+
+
+async def on_private_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat or chat.type != ChatType.PRIVATE:
+        return
+
+    mirror: MirrorService = context.application.bot_data["mirror_service"]
+    if not await _check_admin(update, mirror):
+        await msg.reply_text("Нет доступа.")
+        return
+    await _reply_admin_panel(msg, mirror)
+
+
+async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or not query.data or not query.data.startswith(_ADMIN_CALLBACK_PREFIX):
+        return
+
+    mirror: MirrorService = context.application.bot_data["mirror_service"]
+    if not await _check_admin(update, mirror):
+        await query.answer("Нет доступа", show_alert=True)
+        return
+
+    await query.answer()
+    action = query.data.removeprefix(_ADMIN_CALLBACK_PREFIX)
+
+    if action == "mappings":
+        await mirror.reload_mappings()
+        await query.edit_message_text(
+            _render_mappings(mirror),
+            reply_markup=_admin_panel_markup(mirror),
+        )
+        return
+
+    if action == "forwarding:off":
+        await mirror.set_forwarding_enabled(False)
+        await query.edit_message_text(
+            "Пересылка остановлена.",
+            reply_markup=_admin_panel_markup(mirror),
+        )
+        return
+
+    if action == "forwarding:on":
+        await mirror.set_forwarding_enabled(True)
+        await query.edit_message_text(
+            "Пересылка включена.",
+            reply_markup=_admin_panel_markup(mirror),
+        )
+        return
+
+    if action == "restart":
+        await query.edit_message_text("Перезагрузка служб запущена.")
+        _schedule_service_restart(context)
+
+
+async def _reply_admin_panel(message, mirror: MirrorService) -> None:
+    status = "включена" if mirror.is_forwarding_enabled() else "остановлена"
+    await message.reply_text(
+        f"Админ-панель. Пересылка: {status}.",
+        reply_markup=_admin_panel_markup(mirror),
+    )
+
+
+def _admin_panel_markup(mirror: MirrorService) -> InlineKeyboardMarkup:
+    forwarding_enabled = mirror.is_forwarding_enabled()
+    forwarding_text = "Остановить пересылку" if forwarding_enabled else "Включить пересылку"
+    forwarding_action = "admin:forwarding:off" if forwarding_enabled else "admin:forwarding:on"
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Проверить маппинги", callback_data="admin:mappings")],
+            [InlineKeyboardButton(forwarding_text, callback_data=forwarding_action)],
+            [InlineKeyboardButton("Перезагрузить службы", callback_data="admin:restart")],
+        ]
+    )
+
+
+def _render_mappings(mirror: MirrorService) -> str:
+    mappings = mirror.get_chat_mappings()
+    if not mappings:
+        return "Маппинги не настроены."
+
+    lines = ["Текущие маппинги:"]
+    for mapping in mappings:
+        topics = ", ".join(str(topic_id) for topic_id in sorted(mapping.topic_ids)) or "все"
+        label = f" ({mapping.label})" if mapping.label else ""
+        lines.append(
+            f"#{mapping.mapping_id}{label}: TG {mapping.tg_chat_id} topics {topics} -> Bitrix {mapping.bitrix_dialog_id}"
+        )
+    return "\n".join(lines)
+
+
+def _schedule_service_restart(context: ContextTypes.DEFAULT_TYPE) -> None:
+    task = _delayed_restart_bot_services()
+    create_task = getattr(context.application, "create_task", None)
+    if callable(create_task):
+        create_task(task)
+    else:
+        asyncio.create_task(task, name="restart-bot-services")
+
+
+async def _delayed_restart_bot_services() -> None:
+    await asyncio.sleep(1)
+    await _restart_bot_services()
+
+
+async def _restart_bot_services() -> None:
+    for service_name in _SERVICE_NAMES:
+        process = await asyncio.create_subprocess_exec(
+            "sudo",
+            "-n",
+            "systemctl",
+            "restart",
+            service_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            details = (stderr or stdout).decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"Failed to restart {service_name}: {details}")
 
 
 async def cmd_whereami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -8,7 +8,7 @@ from tests.helpers import make_settings
 
 try:
     from fastapi.testclient import TestClient
-    from main import _build_http_app
+    from main import _allowed_updates, _build_http_app
     IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - environment-specific import failure
     TestClient = None
@@ -81,6 +81,9 @@ class MainHttpTestCase(unittest.TestCase):
     def test_telegram_webhook_rejects_missing_secret(self) -> None:
         response = self.client.post(self.settings.telegram_webhook_path, json={"update_id": 1})
         self.assertEqual(response.status_code, 403)
+
+    def test_allowed_updates_include_callback_query(self) -> None:
+        self.assertIn("callback_query", _allowed_updates())
 
     def test_telegram_webhook_processes_update(self) -> None:
         fake_update = object()

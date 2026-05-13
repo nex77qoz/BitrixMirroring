@@ -332,6 +332,9 @@ class MirrorService:
                 for k in oldest_keys:
                     self._webhook_reply_cache.pop(k, None)
 
+        if message_id is not None:
+            await self._prime_bitrix_cursor_from_webhook(dialog_id, message_id)
+
         existing = self._bitrix_on_demand_tasks.get(dialog_id)
         if existing is not None and not existing.done():
             logger.debug("Bitrix sync already scheduled for dialog %s; coalescing trigger=%s", dialog_id, trigger)
@@ -356,6 +359,30 @@ class MirrorService:
 
         task.add_done_callback(_clear_task)
         return True
+
+    async def _prime_bitrix_cursor_from_webhook(self, dialog_id: str, message_id: int) -> None:
+        if self._last_seen_bitrix_message_ids.get(dialog_id) is not None:
+            return
+
+        persisted_state = await self.state_store.load_cursor(dialog_id)
+        if (
+            isinstance(persisted_state, CursorState)
+            and persisted_state.last_seen_bitrix_message_id is not None
+        ):
+            self._last_seen_bitrix_message_ids[dialog_id] = persisted_state.last_seen_bitrix_message_id
+            logger.info(
+                "Loaded Bitrix cursor from state store for dialog %s before webhook sync: %s",
+                dialog_id,
+                persisted_state.last_seen_bitrix_message_id,
+            )
+            return
+
+        await self._persist_cursor(dialog_id, max(0, message_id - 1))
+        logger.info(
+            "Primed Bitrix cursor for dialog %s from webhook message_id=%s",
+            dialog_id,
+            message_id,
+        )
 
     async def sync_telegram_edit(self, message: Message) -> None:
         if not self._forwarding_enabled:

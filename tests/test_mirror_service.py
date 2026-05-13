@@ -53,6 +53,52 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(self.service._bitrix_on_demand_tasks, {})
 
+    async def test_webhook_primes_missing_cursor_from_message_id(self) -> None:
+        seen_cursor: list[int | None] = []
+
+        async def fake_sync(application, mapping, *, trigger: str) -> None:
+            seen_cursor.append(self.service._last_seen_bitrix_message_ids.get(mapping.bitrix_dialog_id))
+
+        self.service._application = SimpleNamespace()
+        self.service._sync_bitrix_dialog = fake_sync  # type: ignore[method-assign]
+
+        accepted = await self.service.schedule_bitrix_dialog_sync(
+            "chat42",
+            trigger="webhook",
+            message_id=50,
+        )
+
+        self.assertTrue(accepted)
+        await asyncio.gather(*self.service._bitrix_on_demand_tasks.values())
+        await asyncio.sleep(0)
+        self.assertEqual(seen_cursor, [49])
+        self.state_store.save_cursor.assert_awaited_with(
+            "chat42",
+            CursorState(last_seen_bitrix_message_id=49),
+        )
+
+    async def test_webhook_uses_persisted_cursor_when_memory_empty(self) -> None:
+        seen_cursor: list[int | None] = []
+
+        async def fake_sync(application, mapping, *, trigger: str) -> None:
+            seen_cursor.append(self.service._last_seen_bitrix_message_ids.get(mapping.bitrix_dialog_id))
+
+        self.state_store.load_cursor.return_value = CursorState(last_seen_bitrix_message_id=80)
+        self.service._application = SimpleNamespace()
+        self.service._sync_bitrix_dialog = fake_sync  # type: ignore[method-assign]
+
+        accepted = await self.service.schedule_bitrix_dialog_sync(
+            "chat42",
+            trigger="webhook",
+            message_id=50,
+        )
+
+        self.assertTrue(accepted)
+        await asyncio.gather(*self.service._bitrix_on_demand_tasks.values())
+        await asyncio.sleep(0)
+        self.assertEqual(seen_cursor, [80])
+        self.state_store.save_cursor.assert_not_awaited()
+
     async def test_forwarding_disabled_rejects_new_work(self) -> None:
         await self.service.set_forwarding_enabled(False)
         self.service._application = SimpleNamespace()

@@ -96,3 +96,15 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         await self.store.save_topic_name(100, 200, "Topic A")
         topics = await self.store.load_topic_names()
         self.assertEqual(topics[(100, 200)], "Topic A")
+
+    async def test_is_admin_returns_false_when_empty(self) -> None:
+        result = await self.store.is_admin(999)
+        self.assertFalse(result)
+
+    async def test_is_admin_true_after_insert(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO telegram_admins (tg_user_id, added_at_unix) VALUES (42, 1000)")
+        conn.commit()
+        conn.close()
+        self.assertTrue(await self.store.is_admin(42))
+        self.assertFalse(await self.store.is_admin(99))

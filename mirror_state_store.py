@@ -300,6 +300,15 @@ class MirrorStateStore:
                 """
             )
 
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_admins (
+                    tg_user_id   INTEGER PRIMARY KEY,
+                    added_at_unix INTEGER NOT NULL
+                )
+                """
+            )
+
             connection.commit()
 
     def _load_cursor_sync(self, bitrix_dialog_id: str) -> CursorState:
@@ -552,6 +561,17 @@ class MirrorStateStore:
                 ("1" if enabled else "0", now),
             )
             connection.commit()
+
+    async def is_admin(self, tg_user_id: int) -> bool:
+        return await asyncio.to_thread(self._is_admin_sync, tg_user_id)
+
+    def _is_admin_sync(self, tg_user_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM telegram_admins WHERE tg_user_id = ?",
+                (tg_user_id,),
+            ).fetchone()
+        return row is not None
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

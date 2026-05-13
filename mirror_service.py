@@ -187,8 +187,9 @@ class MirrorService:
         topic_id: Optional[int],
         label: str,
     ) -> None:
-        if bitrix_dialog_id in self._bitrix_to_mapping:
-            raise ValueError(f"Bitrix dialog {bitrix_dialog_id} уже привязан к другому маппингу")
+        existing = self._bitrix_to_mapping.get(bitrix_dialog_id)
+        if existing is not None and existing.tg_chat_id != tg_chat_id:
+            raise ValueError(f"Bitrix dialog {bitrix_dialog_id} уже привязан к другому чату Telegram")
         topic_ids = [topic_id] if topic_id is not None else []
         try:
             await self.state_store.add_chat_mapping(tg_chat_id, bitrix_dialog_id, topic_ids, label)

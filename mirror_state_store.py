@@ -276,7 +276,7 @@ class MirrorStateStore:
             if "topic_ids" not in chat_mapping_columns:
                 connection.execute("ALTER TABLE chat_mappings ADD COLUMN topic_ids TEXT DEFAULT ''")
             connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_mappings_bitrix_dialog_id ON chat_mappings(bitrix_dialog_id)"
+                "DROP INDEX IF EXISTS idx_chat_mappings_bitrix_dialog_id"
             )
 
             # topic_names table — cache for Telegram forum topic names
@@ -618,19 +618,14 @@ class MirrorStateStore:
         topic_ids_str = ",".join(str(t) for t in topic_ids)
         now = int(time.time())
         with self._connect() as connection:
-            try:
-                cursor = connection.execute(
-                    "INSERT INTO chat_mappings "
-                    "(tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) "
-                    "VALUES (?,?,?,?,?)",
-                    (tg_chat_id, bitrix_dialog_id, label, now, topic_ids_str),
-                )
-                connection.commit()
-                return cursor.lastrowid  # type: ignore[return-value]
-            except sqlite3.IntegrityError as exc:
-                raise ValueError(
-                    f"Bitrix dialog {bitrix_dialog_id} уже привязан к другому маппингу"
-                ) from exc
+            cursor = connection.execute(
+                "INSERT INTO chat_mappings "
+                "(tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) "
+                "VALUES (?,?,?,?,?)",
+                (tg_chat_id, bitrix_dialog_id, label, now, topic_ids_str),
+            )
+            connection.commit()
+            return cursor.lastrowid  # type: ignore[return-value]
 
     async def remove_chat_mapping(self, mapping_id: int) -> bool:
         return await asyncio.to_thread(self._remove_chat_mapping_sync, mapping_id)

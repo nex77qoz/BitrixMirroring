@@ -176,9 +176,18 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.state_store.add_chat_mapping.assert_awaited_once_with(-5555, "chatNEW", [], "")
         self.assertIsNotNone(self.service.get_mapping_for_bitrix_dialog("chatNEW"))
 
-    async def test_connect_mapping_raises_on_existing_dialog(self) -> None:
+    async def test_connect_mapping_raises_on_existing_dialog_different_chat(self) -> None:
         with self.assertRaises(ValueError):
             await self.service.connect_mapping(-9999, "chat42", None, "")
+
+    async def test_connect_mapping_same_chat_different_topic_allowed(self) -> None:
+        from tests.helpers import make_mapping
+        existing = make_mapping(mapping_id=1, tg_chat_id=-1001234567890, bitrix_dialog_id="chat42")
+        new_mapping = make_mapping(mapping_id=2, tg_chat_id=-1001234567890, bitrix_dialog_id="chat42", topic_ids=(55,))
+        self.state_store.add_chat_mapping = AsyncMock(return_value=2)
+        self.state_store.load_all_chat_mappings = AsyncMock(return_value=(existing, new_mapping))
+        await self.service.connect_mapping(-1001234567890, "chat42", 55, "")
+        self.state_store.add_chat_mapping.assert_awaited_once_with(-1001234567890, "chat42", [55], "")
 
     async def test_disconnect_mapping_removes_and_reloads(self) -> None:
         from tests.helpers import make_mapping

@@ -234,10 +234,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     thread_info = f" (ветка #{topic_id})" if topic_id else ""
-    await msg.reply_text(
-        f"✅ Связка установлена: {bitrix_dialog_id} ↔ этот чат{thread_info}\n"
-        "Зеркалирование активно немедленно."
-    )
+    await msg.reply_text(f"✅ Связка установлена: {bitrix_dialog_id} ↔ этот чат{thread_info}")
 
 
 async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

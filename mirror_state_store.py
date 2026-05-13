@@ -627,6 +627,18 @@ class MirrorStateStore:
             connection.commit()
             return cursor.lastrowid  # type: ignore[return-value]
 
+    async def update_chat_mapping_topic_ids(self, mapping_id: int, topic_ids: list[int]) -> None:
+        await asyncio.to_thread(self._update_chat_mapping_topic_ids_sync, mapping_id, topic_ids)
+
+    def _update_chat_mapping_topic_ids_sync(self, mapping_id: int, topic_ids: list[int]) -> None:
+        topic_ids_str = ",".join(str(t) for t in topic_ids)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE chat_mappings SET topic_ids = ? WHERE id = ?",
+                (topic_ids_str, mapping_id),
+            )
+            connection.commit()
+
     async def remove_chat_mapping(self, mapping_id: int) -> bool:
         return await asyncio.to_thread(self._remove_chat_mapping_sync, mapping_id)
 

@@ -169,6 +169,38 @@ class MirrorService:
         logger.warning("Message forwarding %s via runtime control", "enabled" if enabled else "disabled")
         return self._forwarding_enabled
 
+    async def is_admin(self, tg_user_id: int) -> bool:
+        return await self.state_store.is_admin(tg_user_id)
+
+    async def reload_mappings(self) -> None:
+        mappings = await self.state_store.load_all_chat_mappings()
+        new_tg: dict[int, list[ChatMapping]] = {}
+        for m in mappings:
+            new_tg.setdefault(m.tg_chat_id, []).append(m)
+        self._tg_to_mappings = new_tg
+        self._bitrix_to_mapping = {m.bitrix_dialog_id: m for m in mappings}
+
+    async def connect_mapping(
+        self,
+        tg_chat_id: int,
+        bitrix_dialog_id: str,
+        topic_id: Optional[int],
+        label: str,
+    ) -> None:
+        if bitrix_dialog_id in self._bitrix_to_mapping:
+            raise ValueError(f"Bitrix dialog {bitrix_dialog_id} уже привязан к другому маппингу")
+        topic_ids = [topic_id] if topic_id is not None else []
+        await self.state_store.add_chat_mapping(tg_chat_id, bitrix_dialog_id, topic_ids, label)
+        await self.reload_mappings()
+
+    async def disconnect_mapping(self, tg_chat_id: int, topic_id: Optional[int]) -> bool:
+        mapping = self.resolve_mapping_for_chat_and_thread(tg_chat_id, topic_id)
+        if mapping is None:
+            return False
+        await self.state_store.remove_chat_mapping(mapping.mapping_id)
+        await self.reload_mappings()
+        return True
+
     def render_telegram_message(self, message: Message) -> str:
         lines: list[str] = []
 

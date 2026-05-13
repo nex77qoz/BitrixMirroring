@@ -152,3 +152,42 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_bbcode_to_html_escapes_markup(self) -> None:
         converted = _bbcode_to_html("[b]Hi[/b] <script>")
         self.assertEqual(converted, "<b>Hi</b> &lt;script&gt;")
+
+    async def test_is_admin_delegates_to_state_store(self) -> None:
+        self.state_store.is_admin = AsyncMock(return_value=True)
+        result = await self.service.is_admin(42)
+        self.assertTrue(result)
+        self.state_store.is_admin.assert_awaited_once_with(42)
+
+    async def test_reload_mappings_updates_lookup_tables(self) -> None:
+        from tests.helpers import make_mapping
+        new_mapping = make_mapping(mapping_id=99, tg_chat_id=-9999, bitrix_dialog_id="chat77")
+        self.state_store.load_all_chat_mappings = AsyncMock(return_value=(new_mapping,))
+        await self.service.reload_mappings()
+        self.assertIsNotNone(self.service.get_mapping_for_bitrix_dialog("chat77"))
+        self.assertIsNone(self.service.get_mapping_for_bitrix_dialog("chat42"))
+
+    async def test_connect_mapping_adds_and_reloads(self) -> None:
+        from tests.helpers import make_mapping
+        new_mapping = make_mapping(mapping_id=10, tg_chat_id=-5555, bitrix_dialog_id="chatNEW")
+        self.state_store.add_chat_mapping = AsyncMock(return_value=10)
+        self.state_store.load_all_chat_mappings = AsyncMock(return_value=(new_mapping,))
+        await self.service.connect_mapping(-5555, "chatNEW", None, "")
+        self.state_store.add_chat_mapping.assert_awaited_once_with(-5555, "chatNEW", [], "")
+        self.assertIsNotNone(self.service.get_mapping_for_bitrix_dialog("chatNEW"))
+
+    async def test_connect_mapping_raises_on_existing_dialog(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.service.connect_mapping(-9999, "chat42", None, "")
+
+    async def test_disconnect_mapping_removes_and_reloads(self) -> None:
+        from tests.helpers import make_mapping
+        self.state_store.remove_chat_mapping = AsyncMock(return_value=True)
+        self.state_store.load_all_chat_mappings = AsyncMock(return_value=())
+        removed = await self.service.disconnect_mapping(-1001234567890, None)
+        self.assertTrue(removed)
+        self.state_store.remove_chat_mapping.assert_awaited_once_with(1)
+
+    async def test_disconnect_mapping_returns_false_when_not_found(self) -> None:
+        removed = await self.service.disconnect_mapping(-9999999, None)
+        self.assertFalse(removed)

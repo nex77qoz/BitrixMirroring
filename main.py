@@ -13,7 +13,7 @@ from telegram.request import HTTPXRequest
 import uvicorn
 
 from bitrix_client import BitrixClient
-from handlers import cmd_start, cmd_whereami, on_edited_message, on_message, on_message_reaction
+from handlers import cmd_connect, cmd_disconnect, cmd_start, cmd_whereami, on_edited_message, on_message, on_message_reaction
 from mirror_service import MirrorService
 from mirror_state_store import MirrorStateStore
 from settings import Settings
@@ -71,6 +71,8 @@ def _build_application(settings: Settings, bitrix: BitrixClient, mirror: MirrorS
 
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("whereami", cmd_whereami))
+    application.add_handler(CommandHandler("connect", cmd_connect))
+    application.add_handler(CommandHandler("disconnect", cmd_disconnect))
     application.add_handler(MessageHandler(filters.ALL & ~filters.UpdateType.EDITED_MESSAGE & ~filters.COMMAND, on_message))
     application.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & ~filters.COMMAND, on_edited_message))
     application.add_handler(MessageReactionHandler(on_message_reaction))

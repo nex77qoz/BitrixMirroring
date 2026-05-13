@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from models import CursorState, MessageMirrorLink, MirrorOrigin
+from settings import ChatMapping, _parse_topic_ids
 
 logger = logging.getLogger("tg-bitrix-mirror")
 
@@ -572,6 +573,75 @@ class MirrorStateStore:
                 (tg_user_id,),
             ).fetchone()
         return row is not None
+
+    async def load_all_chat_mappings(self) -> tuple[ChatMapping, ...]:
+        return await asyncio.to_thread(self._load_all_chat_mappings_sync)
+
+    def _load_all_chat_mappings_sync(self) -> tuple[ChatMapping, ...]:
+        with self._connect() as connection:
+            try:
+                rows = connection.execute(
+                    "SELECT id, tg_chat_id, bitrix_dialog_id, topic_ids, label "
+                    "FROM chat_mappings ORDER BY created_at_unix, id"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return ()
+        return tuple(
+            ChatMapping(
+                mapping_id=int(row[0]),
+                tg_chat_id=int(row[1]),
+                bitrix_dialog_id=str(row[2]),
+                topic_ids=_parse_topic_ids(str(row[3]) if row[3] else ""),
+                label=str(row[4]) if row[4] is not None else "",
+            )
+            for row in rows
+        )
+
+    async def add_chat_mapping(
+        self,
+        tg_chat_id: int,
+        bitrix_dialog_id: str,
+        topic_ids: list[int],
+        label: str,
+    ) -> int:
+        return await asyncio.to_thread(
+            self._add_chat_mapping_sync, tg_chat_id, bitrix_dialog_id, topic_ids, label
+        )
+
+    def _add_chat_mapping_sync(
+        self,
+        tg_chat_id: int,
+        bitrix_dialog_id: str,
+        topic_ids: list[int],
+        label: str,
+    ) -> int:
+        topic_ids_str = ",".join(str(t) for t in topic_ids)
+        now = int(time.time())
+        with self._connect() as connection:
+            try:
+                cursor = connection.execute(
+                    "INSERT INTO chat_mappings "
+                    "(tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) "
+                    "VALUES (?,?,?,?,?)",
+                    (tg_chat_id, bitrix_dialog_id, label, now, topic_ids_str),
+                )
+                connection.commit()
+                return cursor.lastrowid  # type: ignore[return-value]
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    f"Bitrix dialog {bitrix_dialog_id} уже привязан к другому маппингу"
+                ) from exc
+
+    async def remove_chat_mapping(self, mapping_id: int) -> bool:
+        return await asyncio.to_thread(self._remove_chat_mapping_sync, mapping_id)
+
+    def _remove_chat_mapping_sync(self, mapping_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM chat_mappings WHERE id = ?", (mapping_id,)
+            )
+            connection.commit()
+        return cursor.rowcount > 0
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

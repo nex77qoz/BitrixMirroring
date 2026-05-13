@@ -108,3 +108,38 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         conn.close()
         self.assertTrue(await self.store.is_admin(42))
         self.assertFalse(await self.store.is_admin(99))
+
+    async def test_load_all_chat_mappings_empty(self) -> None:
+        mappings = await self.store.load_all_chat_mappings()
+        self.assertEqual(mappings, ())
+
+    async def test_add_and_load_chat_mapping(self) -> None:
+        mapping_id = await self.store.add_chat_mapping(
+            tg_chat_id=-100123,
+            bitrix_dialog_id="chat999",
+            topic_ids=[7, 8],
+            label="test label",
+        )
+        self.assertIsInstance(mapping_id, int)
+        mappings = await self.store.load_all_chat_mappings()
+        self.assertEqual(len(mappings), 1)
+        m = mappings[0]
+        self.assertEqual(m.tg_chat_id, -100123)
+        self.assertEqual(m.bitrix_dialog_id, "chat999")
+        self.assertEqual(m.topic_ids, (7, 8))
+        self.assertEqual(m.label, "test label")
+
+    async def test_add_chat_mapping_duplicate_bitrix_id_raises(self) -> None:
+        await self.store.add_chat_mapping(-100123, "chat999", [], "first")
+        with self.assertRaises(ValueError):
+            await self.store.add_chat_mapping(-100456, "chat999", [], "second")
+
+    async def test_remove_chat_mapping(self) -> None:
+        mapping_id = await self.store.add_chat_mapping(-100123, "chat999", [], "")
+        removed = await self.store.remove_chat_mapping(mapping_id)
+        self.assertTrue(removed)
+        self.assertEqual(await self.store.load_all_chat_mappings(), ())
+
+    async def test_remove_nonexistent_mapping_returns_false(self) -> None:
+        removed = await self.store.remove_chat_mapping(9999)
+        self.assertFalse(removed)

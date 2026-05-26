@@ -12,6 +12,8 @@ from mirror_service import MirrorService
 
 logger = logging.getLogger("tg-bitrix-mirror")
 
+_bot_reply_ids: dict[int, list[int]] = {}
+
 _ADMIN_CALLBACK_PREFIX = "admin:"
 _SERVICE_NAMES = ("bitrix-bot", "bitrix-monitor", "bitrix-telegram-mirror")
 
@@ -26,10 +28,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         await update.effective_message.reply_text("Нет доступа.")
         return
-    await update.effective_message.reply_text(
+    sent = await update.effective_message.reply_text(
         "Бот запущен.\n"
         "Команда /whereami покажет chat_id текущего чата и thread_id темы."
     )
+    _bot_reply_ids.setdefault(update.effective_chat.id, []).append(sent.message_id)
 
 
 async def on_private_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -159,7 +162,7 @@ async def cmd_whereami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     msg = update.effective_message
     chat = update.effective_chat
-    await msg.reply_text(
+    sent = await msg.reply_text(
         "\n".join(
             [
                 f"chat_id: {chat.id}",
@@ -169,6 +172,7 @@ async def cmd_whereami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             ]
         )
     )
+    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -345,29 +349,33 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     args = context.args or []
     if len(args) != 1:
-        await msg.reply_text(
+        sent = await msg.reply_text(
             "Использование: /connect <BitrixChatId>\n"
             "Примеры: /connect chat2941  /connect sg123  /connect 456"
         )
+        _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
         return
 
     bitrix_dialog_id = args[0].strip()
     if not _BITRIX_ID_RE.match(bitrix_dialog_id):
-        await msg.reply_text(
+        sent = await msg.reply_text(
             "Неверный формат Bitrix Chat ID.\n"
             "Допустимые форматы: chat123, sg123, или числовой ID."
         )
+        _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
         return
 
     topic_id = msg.message_thread_id
     try:
         await mirror.connect_mapping(chat.id, bitrix_dialog_id, topic_id, "")
     except ValueError as exc:
-        await msg.reply_text(f"⚠️ {exc}")
+        sent = await msg.reply_text(f"⚠️ {exc}")
+        _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
         return
 
     thread_info = f" (ветка #{topic_id})" if topic_id else ""
-    await msg.reply_text(f"✅ Связка установлена: {bitrix_dialog_id} ↔ этот чат{thread_info}")
+    sent = await msg.reply_text(f"✅ Связка установлена: {bitrix_dialog_id} ↔ этот чат{thread_info}")
+    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
 
 
 async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -386,7 +394,31 @@ async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     removed = await mirror.disconnect_mapping(chat.id, topic_id)
     if removed:
         thread_info = f" (ветка #{topic_id})" if topic_id else ""
-        await msg.reply_text(f"✅ Связка удалена для этого чата{thread_info}.")
+        sent = await msg.reply_text(f"✅ Связка удалена для этого чата{thread_info}.")
     else:
-        await msg.reply_text("⚠️ Связка для этого чата/ветки не найдена.")
+        sent = await msg.reply_text("⚠️ Связка для этого чата/ветки не найдена.")
+    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
 
+
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return
+
+    mirror: MirrorService = context.application.bot_data["mirror_service"]
+    if not await _check_admin(update, mirror):
+        return
+
+    ids = _bot_reply_ids.pop(chat.id, [])
+    for mid in ids:
+        try:
+            await context.bot.delete_message(chat_id=chat.id, message_id=mid)
+        except Exception:
+            pass
+    try:
+        await msg.delete()
+    except Exception:
+        pass

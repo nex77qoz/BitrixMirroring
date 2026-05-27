@@ -93,7 +93,9 @@ class MirrorService:
         return tuple(mapping for mappings in self._tg_to_mappings.values() for mapping in mappings)
 
     def resolve_mapping_for_telegram_message(self, message: Message) -> Optional[ChatMapping]:
-        return self.resolve_mapping_for_chat_and_thread(message.chat_id, message.message_thread_id)
+        is_forum = getattr(message.chat, "is_forum", False)
+        thread_id = message.message_thread_id if is_forum else None
+        return self.resolve_mapping_for_chat_and_thread(message.chat_id, thread_id)
 
     def resolve_mapping_for_chat_and_thread(
         self,
@@ -221,7 +223,8 @@ class MirrorService:
         lines: list[str] = []
 
         mapping = self.resolve_mapping_for_telegram_message(message)
-        if mapping is not None and self._is_multi_topic_mode(mapping) and message.message_thread_id:
+        is_forum = getattr(message.chat, "is_forum", False)
+        if mapping is not None and self._is_multi_topic_mode(mapping) and is_forum and message.message_thread_id:
             topic_name = self._topic_names.get((message.chat_id, message.message_thread_id)) or f"#{message.message_thread_id}"
             lines.append(f"Ветка: [B]{topic_name}[/B]")
 

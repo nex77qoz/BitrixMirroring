@@ -340,4 +340,62 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(chat_id, self.service._channel_workers)
         self.assertNotIn(chat_id, self.service._channel_queues)
 
+    async def test_poll_scheduler_concurrency(self) -> None:
+        from tests.helpers import make_mapping, make_settings
+        # Create 10 mappings
+        mappings = [
+            make_mapping(mapping_id=i, tg_chat_id=-100123456000 - i, bitrix_dialog_id=f"chat{i}")
+            for i in range(10)
+        ]
+        settings = make_settings(chat_mappings=tuple(mappings))
+        import dataclasses
+        settings = dataclasses.replace(settings, sync_bitrix_to_telegram=True)
+        
+        # Instantiate service
+        service = MirrorService(settings, self.bitrix, self.state_store)
+        
+        # Track concurrency
+        active_concurrency = 0
+        max_concurrency = 0
+        completed_polls = 0
+        concurrency_lock = asyncio.Lock()
+        done_event = asyncio.Event()
+
+        async def fake_sync_dialog(application, mapping, *, trigger):
+            nonlocal active_concurrency, max_concurrency, completed_polls
+            async with concurrency_lock:
+                active_concurrency += 1
+                if active_concurrency > max_concurrency:
+                    max_concurrency = active_concurrency
+            
+            # Sleep a bit to force concurrent execution
+            await asyncio.sleep(0.01)
+
+            async with concurrency_lock:
+                active_concurrency -= 1
+                completed_polls += 1
+                if completed_polls == 10:
+                    done_event.set()
+
+        async def fake_initialize_cursor(mapping):
+            service._last_seen_bitrix_message_ids[mapping.bitrix_dialog_id] = 1
+
+        service._sync_bitrix_dialog = fake_sync_dialog  # type: ignore[method-assign]
+        service._initialize_bitrix_cursor = fake_initialize_cursor  # type: ignore[method-assign]
+
+        # Start polling
+        app = SimpleNamespace()
+        await service.start_bitrix_polling(app)  # type: ignore[arg-type]
+
+        # Wait for all 10 to finish
+        try:
+            await asyncio.wait_for(done_event.wait(), timeout=2.0)
+        finally:
+            await service.stop()
+
+        # Verify no more than 5 ran concurrently
+        self.assertEqual(completed_polls, 10)
+        self.assertEqual(max_concurrency, 5)
+
+
 

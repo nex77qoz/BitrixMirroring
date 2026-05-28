@@ -78,6 +78,8 @@ class MirrorService:
         self._webhook_reply_cache: dict[int, int] = {}
         self._topic_names: dict[tuple[int, int], str] = {}
         self._forwarding_enabled = True
+        self._scheduler_task: Optional[asyncio.Task] = None
+        self._poll_semaphore: Optional[asyncio.Semaphore] = None
 
     def get_mapping_for_telegram_chat(self, tg_chat_id: int) -> Optional[ChatMapping]:
         mappings = self._tg_to_mappings.get(tg_chat_id)
@@ -179,6 +181,7 @@ class MirrorService:
 
     async def reload_mappings(self) -> None:
         mappings = await self.state_store.load_all_chat_mappings()
+        self.settings = dataclasses.replace(self.settings, chat_mappings=mappings)
         new_tg: dict[int, list[ChatMapping]] = {}
         for m in mappings:
             new_tg.setdefault(m.tg_chat_id, []).append(m)
@@ -278,9 +281,13 @@ class MirrorService:
             except asyncio.CancelledError:
                 pass
             self._cleanup_task = None
-        for task in self._bitrix_poll_tasks:
-            await task
-        self._bitrix_poll_tasks.clear()
+        if self._scheduler_task is not None:
+            self._scheduler_task.cancel()
+            try:
+                await self._scheduler_task
+            except asyncio.CancelledError:
+                pass
+            self._scheduler_task = None
         for task in self._bitrix_on_demand_tasks.values():
             task.cancel()
         for task in self._bitrix_on_demand_tasks.values():
@@ -498,14 +505,44 @@ class MirrorService:
         if not self.settings.chat_mappings:
             logger.warning("Bitrix → Telegram sync is disabled because no chat mappings are configured")
             return
-        for index, mapping in enumerate(self.settings.chat_mappings):
-            # Stagger poll starts to avoid hitting Bitrix rate limits
-            stagger_delay = index * 0.7
-            task = asyncio.create_task(
-                self._bitrix_poll_loop(application, mapping, stagger_delay),
-                name=f"bitrix-poll-{mapping.bitrix_dialog_id}",
-            )
-            self._bitrix_poll_tasks.append(task)
+            
+        self._poll_semaphore = asyncio.Semaphore(5)
+        self._scheduler_task = asyncio.create_task(
+            self._poll_scheduler_loop(application),
+            name="bitrix-poll-scheduler"
+        )
+
+    async def _poll_scheduler_loop(self, application: Application) -> None:
+        logger.info("Starting Bitrix central poll scheduler")
+        while not self._stop_event.is_set():
+            try:
+                mappings = list(self.settings.chat_mappings)
+                tasks = []
+                for mapping in mappings:
+                    task = asyncio.create_task(self._throttled_poll(application, mapping))
+                    tasks.append(task)
+                
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Error in central poll scheduler")
+                
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self.settings.bitrix_poll_interval_seconds)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+    async def _throttled_poll(self, application: Application, mapping: ChatMapping) -> None:
+        async with self._poll_semaphore:
+            try:
+                if mapping.bitrix_dialog_id not in self._last_seen_bitrix_message_ids:
+                    await self._initialize_bitrix_cursor(mapping)
+                await self._sync_bitrix_dialog(application, mapping, trigger="poll")
+            except Exception:
+                logger.exception("Throttled poll failed for mapping %s", mapping.bitrix_dialog_id)
 
     async def _per_channel_worker(self, chat_id: int) -> None:
         queue = self._channel_queues[chat_id]
@@ -567,38 +604,7 @@ class MirrorService:
             finally:
                 queue.task_done()
 
-    async def _bitrix_poll_loop(self, application: Application, mapping: ChatMapping, stagger_delay: float = 0) -> None:
-        if stagger_delay > 0:
-            await asyncio.sleep(stagger_delay)
-        dialog_id = mapping.bitrix_dialog_id
-        logger.info(
-            "Starting Bitrix polling every %s seconds for dialog %s -> tg_chat %s",
-            self.settings.bitrix_poll_interval_seconds,
-            dialog_id,
-            mapping.tg_chat_id,
-        )
-        backoff = self.settings.bitrix_poll_error_backoff_seconds
-        try:
-            await self._initialize_bitrix_cursor(mapping)
-            while not self._stop_event.is_set():
-                try:
-                    await self._sync_bitrix_dialog(application, mapping, trigger="poll")
-                    backoff = self.settings.bitrix_poll_error_backoff_seconds
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=self.settings.bitrix_poll_interval_seconds)
-                except asyncio.TimeoutError:
-                    continue
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception("Bitrix polling iteration failed for dialog %s, retrying in %.1fs", dialog_id, backoff)
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=backoff)
-                    backoff = min(backoff * 2, self.settings.bitrix_poll_max_backoff_seconds)
-        except asyncio.TimeoutError:
-            pass
-        except asyncio.CancelledError:
-            raise
-        finally:
-            logger.info("Bitrix polling loop stopped for dialog %s", dialog_id)
+
 
     async def _sync_bitrix_dialog(self, application: Application, mapping: ChatMapping, *, trigger: str) -> None:
         dialog_id = mapping.bitrix_dialog_id

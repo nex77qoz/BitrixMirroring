@@ -484,7 +484,7 @@ class MirrorService:
             await self.bitrix.set_message_like(link.bitrix_message_id, liked=has_reactions)
             await self.state_store.update_reaction_state(
                 bitrix_message_id=link.bitrix_message_id,
-                bitrix_liked_by_bot=True,
+                bitrix_liked_by_bot=has_reactions,
                 last_seen_bitrix_likes=link.last_seen_bitrix_likes,
             )
             if has_reactions:

@@ -152,6 +152,20 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.bitrix.set_message_like.assert_awaited_once_with(99, liked=True)
         self.state_store.update_reaction_state.assert_awaited_once()
 
+    async def test_sync_telegram_reaction_removal_updates_state_correctly(self) -> None:
+        self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(
+            bitrix_message_id=99,
+            bitrix_liked_by_bot=True,
+            last_seen_bitrix_likes="123",
+        )
+        await self.service.sync_telegram_reaction(-1001234567890, 100, False)
+        self.bitrix.set_message_like.assert_awaited_once_with(99, liked=False)
+        self.state_store.update_reaction_state.assert_awaited_once_with(
+            bitrix_message_id=99,
+            bitrix_liked_by_bot=False,
+            last_seen_bitrix_likes="123",
+        )
+
     async def test_suppressed_telegram_origin_bitrix_message_advances_cursor(self) -> None:
         mapping = self.service.settings.chat_mappings[0]
         self.service._last_seen_bitrix_message_ids[mapping.bitrix_dialog_id] = 5

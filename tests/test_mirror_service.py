@@ -476,11 +476,11 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         message = make_message(text="test queue size")
         await self.service.enqueue_telegram_message(message)
         
-        # Получаем созданную очередь для чата
+        # Get the created queue for the chat
         queue = self.service._channel_queues[message.chat_id]
         self.assertEqual(queue.maxsize, 555)
         
-        # Очищаем воркера для предотвращения утечки задач в тестах
+        # Cancel the worker task to prevent background task leaks in tests
         if message.chat_id in self.service._channel_workers:
             self.service._channel_workers[message.chat_id].cancel()
 

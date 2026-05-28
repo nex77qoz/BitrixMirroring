@@ -333,7 +333,7 @@ class MirrorService:
 
         chat_id = message.chat_id
         if chat_id not in self._channel_queues:
-            self._channel_queues[chat_id] = asyncio.Queue(maxsize=100)
+            self._channel_queues[chat_id] = asyncio.Queue(maxsize=self.settings.bitrix_send_queue_maxsize)
             self._channel_workers[chat_id] = asyncio.create_task(
                 self._per_channel_worker(chat_id),
                 name=f"channel-worker-{chat_id}"

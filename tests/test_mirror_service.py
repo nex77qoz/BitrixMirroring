@@ -314,19 +314,20 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
                 self.assertAlmostEqual(throttling_sleeps[0], 0.2)
                 self.assertAlmostEqual(throttling_sleeps[1], 0.2)
 
-            # 2. Test overflow: overflowing 100 messages drops subsequent messages
+            # 2. Test overflow: overflowing configured maxsize messages drops subsequent messages
             # Patch asyncio.create_task to avoid running background workers for these overflow tests
             with patch("asyncio.create_task") as mock_create_task, \
                  patch.object(self.service, "resolve_mapping_for_telegram_message", return_value=make_mapping()):
                 mock_create_task.return_value = AsyncMock()
                 
                 chat_id_overflow = 9999
-                for i in range(105):
+                max_size = self.service.settings.bitrix_send_queue_maxsize
+                for i in range(max_size + 5):
                     msg = make_message(chat_id=chat_id_overflow, message_id=100 + i)
                     await self.service.enqueue_telegram_message(msg)
                 
-                # Channel 1 queue has max size 100, and is full. Next 5 messages are dropped.
-                self.assertEqual(self.service._channel_queues[chat_id_overflow].qsize(), 100)
+                # Channel 1 queue has max size, and is full. Next 5 messages are dropped.
+                self.assertEqual(self.service._channel_queues[chat_id_overflow].qsize(), max_size)
                 
                 # Other channel is unaffected
                 chat_id_other = 8888
@@ -467,6 +468,21 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         )
         should_forward = await self.service._should_forward_bitrix_message("chat42", msg_from_bot)
         self.assertFalse(should_forward)
+
+    async def test_enqueue_telegram_message_uses_configured_queue_maxsize(self) -> None:
+        self.service.settings = dataclasses.replace(self.service.settings, bitrix_send_queue_maxsize=555)
+        self.service._forwarding_enabled = True
+        
+        message = make_message(text="test queue size")
+        await self.service.enqueue_telegram_message(message)
+        
+        # Получаем созданную очередь для чата
+        queue = self.service._channel_queues[message.chat_id]
+        self.assertEqual(queue.maxsize, 555)
+        
+        # Очищаем воркера для предотвращения утечки задач в тестах
+        if message.chat_id in self.service._channel_workers:
+            self.service._channel_workers[message.chat_id].cancel()
 
 
 

@@ -235,6 +235,54 @@ class HandlersTestCase(unittest.IsolatedAsyncioTestCase):
         await cmd_connect(update, self.context)
         self.mirror.connect_mapping.assert_awaited_once_with(-100123, "sg99", 55, "")
 
+    async def test_cmd_connect_token_success_bypasses_admin(self) -> None:
+        from handlers import cmd_connect
+        self.mirror.is_admin = AsyncMock(return_value=False)
+        self.mirror.state_store.verify_and_consume_token = AsyncMock(return_value=True)
+        msg = SimpleNamespace(
+            chat_id=-100123,
+            message_thread_id=None,
+            reply_text=AsyncMock(),
+            chat=SimpleNamespace(id=-100123, type="supergroup"),
+        )
+        update = SimpleNamespace(
+            effective_message=msg,
+            effective_chat=SimpleNamespace(id=-100123, type="supergroup"),
+            effective_user=SimpleNamespace(id=999),
+        )
+        self.context.args = ["chat42", "valid_token_123"]
+        await cmd_connect(update, self.context)
+        
+        self.mirror.state_store.verify_and_consume_token.assert_awaited_once_with("chat42", "valid_token_123")
+        self.mirror.connect_mapping.assert_awaited_once_with(-100123, "chat42", None, "")
+        msg.reply_text.assert_awaited_once()
+        self.mirror.is_admin.assert_not_called()
+
+    async def test_cmd_connect_token_invalid_fails(self) -> None:
+        from handlers import cmd_connect
+        self.mirror.is_admin = AsyncMock(return_value=False)
+        self.mirror.state_store.verify_and_consume_token = AsyncMock(return_value=False)
+        msg = SimpleNamespace(
+            chat_id=-100123,
+            message_thread_id=None,
+            reply_text=AsyncMock(),
+            chat=SimpleNamespace(id=-100123, type="supergroup"),
+        )
+        update = SimpleNamespace(
+            effective_message=msg,
+            effective_chat=SimpleNamespace(id=-100123, type="supergroup"),
+            effective_user=SimpleNamespace(id=999),
+        )
+        self.context.args = ["chat42", "invalid_token"]
+        await cmd_connect(update, self.context)
+        
+        self.mirror.state_store.verify_and_consume_token.assert_awaited_once_with("chat42", "invalid_token")
+        self.mirror.connect_mapping.assert_not_called()
+        msg.reply_text.assert_awaited_once()
+        reply_arg = msg.reply_text.call_args[0][0]
+        self.assertIn("токен подключения", reply_arg)
+        self.mirror.is_admin.assert_not_called()
+
     async def test_cmd_disconnect_removes_mapping(self) -> None:
         from handlers import cmd_disconnect
         self.mirror.disconnect_mapping = AsyncMock(return_value=True)

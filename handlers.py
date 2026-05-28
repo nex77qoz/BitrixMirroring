@@ -344,23 +344,38 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     mirror: MirrorService = context.application.bot_data["mirror_service"]
-    if not await _check_admin(update, mirror):
-        return
-
     args = context.args or []
-    if len(args) != 1:
-        sent = await msg.reply_text(
-            "Использование: /connect <BitrixChatId>\n"
-            "Примеры: /connect chat2941  /connect sg123  /connect 456"
-        )
-        _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
-        return
+    
+    if len(args) == 2:
+        # Token-based flow for self-service connection (no admin check required!)
+        bitrix_dialog_id = args[0].strip()
+        token = args[1].strip()
+        
+        if not _BITRIX_ID_RE.match(bitrix_dialog_id):
+            sent = await msg.reply_text("Неверный формат Bitrix Chat ID.")
+            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            return
 
-    bitrix_dialog_id = args[0].strip()
-    if not _BITRIX_ID_RE.match(bitrix_dialog_id):
+        is_valid = await mirror.state_store.verify_and_consume_token(bitrix_dialog_id, token)
+        if not is_valid:
+            sent = await msg.reply_text("⚠️ Неверный, использованный или просроченный токен подключения.")
+            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            return
+            
+    elif len(args) == 1:
+        # Traditional admin-only connection flow
+        if not await _check_admin(update, mirror):
+            return
+        bitrix_dialog_id = args[0].strip()
+        if not _BITRIX_ID_RE.match(bitrix_dialog_id):
+            sent = await msg.reply_text("Неверный формат Bitrix Chat ID.")
+            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            return
+    else:
         sent = await msg.reply_text(
-            "Неверный формат Bitrix Chat ID.\n"
-            "Допустимые форматы: chat123, sg123, или числовой ID."
+            "Использование:\n"
+            "Самостоятельно: `/connect <BitrixChatId> <Token>`\n"
+            "Для администраторов: `/connect <BitrixChatId>`"
         )
         _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
         return

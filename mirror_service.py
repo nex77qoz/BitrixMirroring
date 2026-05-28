@@ -185,6 +185,13 @@ class MirrorService:
         self._tg_to_mappings = new_tg
         self._bitrix_to_mapping = {m.bitrix_dialog_id: m for m in mappings}
 
+        active_chat_ids = {m.tg_chat_id for m in mappings}
+        for chat_id in list(self._channel_workers.keys()):
+            if chat_id not in active_chat_ids:
+                task = self._channel_workers.pop(chat_id)
+                task.cancel()
+                self._channel_queues.pop(chat_id, None)
+
     async def connect_mapping(
         self,
         tg_chat_id: int,
@@ -296,6 +303,15 @@ class MirrorService:
     async def enqueue_telegram_message(self, message: Message) -> None:
         if not self._forwarding_enabled:
             logger.info("Dropping Telegram message %s because forwarding is disabled", message.message_id)
+            return
+
+        mapping = self.resolve_mapping_for_telegram_message(message)
+        if mapping is None:
+            logger.warning(
+                "No mapping found for telegram chat_id=%s thread_id=%s, dropping message",
+                message.chat_id,
+                message.message_thread_id,
+            )
             return
 
         chat_id = message.chat_id

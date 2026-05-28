@@ -301,7 +301,8 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
 
             # 2. Test overflow: overflowing 100 messages drops subsequent messages
             # Patch asyncio.create_task to avoid running background workers for these overflow tests
-            with patch("asyncio.create_task") as mock_create_task:
+            with patch("asyncio.create_task") as mock_create_task, \
+                 patch.object(self.service, "resolve_mapping_for_telegram_message", return_value=make_mapping()):
                 mock_create_task.return_value = AsyncMock()
                 
                 chat_id_overflow = 9999
@@ -319,6 +320,24 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.service._channel_queues[chat_id_other].qsize(), 1)
         finally:
             loop.time = original_time
-            self.service._channel_workers.clear()
+            self.service._channel_workers.pop(9999, None)
+            self.service._channel_workers.pop(8888, None)
             await self.service.stop()
+
+    async def test_reload_mappings_cancels_obsolete_workers(self) -> None:
+        from tests.helpers import make_mapping
+        chat_id = -1001234567890
+        dummy_task = AsyncMock(spec=asyncio.Task)
+        self.service._channel_workers[chat_id] = dummy_task
+        self.service._channel_queues[chat_id] = asyncio.Queue()
+
+        new_mapping = make_mapping(mapping_id=99, tg_chat_id=-9999, bitrix_dialog_id="chat77")
+        self.state_store.load_all_chat_mappings = AsyncMock(return_value=(new_mapping,))
+        
+        await self.service.reload_mappings()
+        
+        dummy_task.cancel.assert_called_once()
+        self.assertNotIn(chat_id, self.service._channel_workers)
+        self.assertNotIn(chat_id, self.service._channel_queues)
+
 

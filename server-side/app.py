@@ -6,6 +6,9 @@ import json
 import logging
 import os
 import re
+import secrets
+import sqlite3
+import time
 
 app = FastAPI()
 LOG_FILE = Path(os.getenv("BITRIX_LOG_PATH", "/opt/bitrix-bot/bitrix.log"))
@@ -266,8 +269,14 @@ async def bitrix_bot(request: Request):
         },
     )
 
+    is_local_command = False
+    if event == "ONIMBOTMESSAGEADD" and message_text:
+        text_lower = message_text.lower().strip()
+        if text_lower in {"/start", "start", "/ping", "ping"} or text_lower.startswith("/tg_connect"):
+            is_local_command = True
+
     try:
-        if event in FORWARDED_EVENTS and dialog_id and _bridge_is_configured():
+        if event in FORWARDED_EVENTS and dialog_id and _bridge_is_configured() and not is_local_command:
             await forward_event_to_mirror(event=event, dialog_id=dialog_id, message_id=message_id, reply_id=reply_id)
         elif event == "ONIMBOTJOINCHAT" and dialog_id:
             await send_bot_message(
@@ -277,13 +286,37 @@ async def bitrix_bot(request: Request):
             )
 
         elif event == "ONIMBOTMESSAGEADD" and dialog_id:
-            text_lower = message_text.lower()
+            text_lower = message_text.lower().strip()
             reply = None
 
             if text_lower in {"/start", "start"}:
                 reply = "Привет. Я получил сообщение и могу отвечать в этот чат."
             elif text_lower in {"/ping", "ping"}:
                 reply = "pong"
+            elif text_lower.startswith("/tg_connect"):
+                # 1. Generate secure token
+                token = secrets.token_hex(4)  # 8 alphanumeric chars
+                expires_at = int(time.time()) + 600  # 10 mins
+                db_raw = os.getenv("MIRROR_STATE_DB_PATH", "mirror_state.sqlite3")
+                db_path = Path(db_raw) if Path(db_raw).is_absolute() else Path.cwd() / db_raw
+
+                # 2. Write to SQLite
+                try:
+                    conn = sqlite3.connect(db_path, timeout=10)
+                    with conn:
+                        conn.execute("DELETE FROM pending_connections WHERE expires_at_unix < ?", (int(time.time()),))
+                        conn.execute(
+                            "INSERT INTO pending_connections (bitrix_dialog_id, token, expires_at_unix, created_at_unix) VALUES (?, ?, ?, ?)",
+                            (dialog_id, token, expires_at, int(time.time())),
+                        )
+                    reply = (
+                        f"🔑 Одноразовый токен сгенерирован.\n"
+                        f"Отправьте следующую команду в вашей Telegram-группе в течение 10 минут:\n\n"
+                        f"`/connect {dialog_id} {token}`"
+                    )
+                except Exception as e:
+                    write_log("DB_ERROR", repr(e))
+                    reply = "⚠️ Не удалось создать токен подключения. Попробуйте позже."
 
             if reply is not None:
                 await send_bot_message(

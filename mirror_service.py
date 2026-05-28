@@ -222,8 +222,8 @@ class MirrorService:
 
         mapping = self.resolve_mapping_for_telegram_message(message)
         if mapping is not None and self._is_multi_topic_mode(mapping) and message.message_thread_id:
-            topic_name = self._topic_names.get((message.chat_id, message.message_thread_id)) or f"#{message.message_thread_id}"
-            lines.append(f"Ветка: [B]{topic_name}[/B]")
+            topic_name = self._topic_names.get((message.chat_id, message.message_thread_id)) or str(message.message_thread_id)
+            lines.append(f"Ветка: [B]#{topic_name}[/B]")
 
         if self.settings.prefix_with_sender:
             sender = self._sender_name(message)

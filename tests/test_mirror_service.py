@@ -33,7 +33,7 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.service._topic_names[(-1001234567890, 100)] = "Deploy"
         message = make_message(message_thread_id=100, text="hello")
         rendered = self.service.render_telegram_message(message)
-        self.assertIn("Deploy", rendered)
+        self.assertIn("#Deploy", rendered)
         self.assertIn("Alice Example", rendered)
         self.assertIn("hello", rendered)
 

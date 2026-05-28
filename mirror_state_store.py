@@ -310,6 +310,18 @@ class MirrorStateStore:
                 """
             )
 
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS pending_connections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bitrix_dialog_id TEXT NOT NULL,
+                    token TEXT NOT NULL UNIQUE,
+                    expires_at_unix INTEGER NOT NULL,
+                    created_at_unix INTEGER NOT NULL
+                )
+            """)
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_pending_connections_token ON pending_connections(token)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_pending_connections_expires ON pending_connections(expires_at_unix)")
+
             connection.commit()
 
     def _load_cursor_sync(self, bitrix_dialog_id: str) -> CursorState:
@@ -573,6 +585,38 @@ class MirrorStateStore:
                 (tg_user_id,),
             ).fetchone()
         return row is not None
+
+    async def save_pending_connection(self, bitrix_dialog_id: str, token: str, expires_at_unix: int) -> None:
+        await asyncio.to_thread(self._save_pending_connection_sync, bitrix_dialog_id, token, expires_at_unix)
+
+    def _save_pending_connection_sync(self, bitrix_dialog_id: str, token: str, expires_at_unix: int) -> None:
+        now = int(time.time())
+        with self._connect() as connection:
+            connection.execute("DELETE FROM pending_connections WHERE expires_at_unix < ?", (now,))
+            connection.execute(
+                "INSERT INTO pending_connections (bitrix_dialog_id, token, expires_at_unix, created_at_unix) VALUES (?, ?, ?, ?)",
+                (bitrix_dialog_id, token, expires_at_unix, now),
+            )
+            connection.commit()
+
+    async def verify_and_consume_token(self, bitrix_dialog_id: str, token: str) -> bool:
+        return await asyncio.to_thread(self._verify_and_consume_token_sync, bitrix_dialog_id, token)
+
+    def _verify_and_consume_token_sync(self, bitrix_dialog_id: str, token: str) -> bool:
+        now = int(time.time())
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, bitrix_dialog_id FROM pending_connections WHERE token = ? AND expires_at_unix >= ?",
+                (token, now),
+            ).fetchone()
+            if row is None:
+                return False
+            db_dialog_id = row[1]
+            if db_dialog_id != bitrix_dialog_id:
+                return False
+            connection.execute("DELETE FROM pending_connections WHERE token = ?", (token,))
+            connection.commit()
+            return True
 
     async def load_all_chat_mappings(self) -> tuple[ChatMapping, ...]:
         return await asyncio.to_thread(self._load_all_chat_mappings_sync)

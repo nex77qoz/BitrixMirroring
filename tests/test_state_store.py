@@ -144,3 +144,24 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_remove_nonexistent_mapping_returns_false(self) -> None:
         removed = await self.store.remove_chat_mapping(9999)
         self.assertFalse(removed)
+
+    async def test_pending_connections_flow(self):
+        # 1. Generate token
+        token = "testtoken123"
+        expires_at = int(time.time()) + 600
+        await self.store.save_pending_connection("chat123", token, expires_at)
+        
+        # 2. Verify valid token
+        is_valid = await self.store.verify_and_consume_token("chat123", token)
+        self.assertTrue(is_valid)
+        
+        # 3. Double consumption must fail
+        is_valid_again = await self.store.verify_and_consume_token("chat123", token)
+        self.assertFalse(is_valid_again)
+        
+        # 4. Expired token must fail
+        expired_token = "expired456"
+        await self.store.save_pending_connection("chat123", expired_token, int(time.time()) - 10)
+        is_expired_valid = await self.store.verify_and_consume_token("chat123", expired_token)
+        self.assertFalse(is_expired_valid)
+

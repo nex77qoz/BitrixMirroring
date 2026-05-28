@@ -696,9 +696,11 @@ class MirrorStateStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self._path)
+        connection = sqlite3.connect(self._path, timeout=30.0)
         connection.row_factory = sqlite3.Row
         try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
             yield connection
         finally:
             connection.close()

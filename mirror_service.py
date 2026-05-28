@@ -63,10 +63,10 @@ class MirrorService:
         self.state_store = state_store
         self._last_seen_bitrix_message_ids: dict[str, Optional[int]] = {}
         self._bitrix_poll_tasks: list[asyncio.Task[None]] = []
-        self._telegram_to_bitrix_workers: list[asyncio.Task[None]] = []
         self._stop_event = asyncio.Event()
         self._state_lock = asyncio.Lock()
-        self._send_queue: asyncio.Queue[Message] = asyncio.Queue(maxsize=settings.bitrix_send_queue_maxsize)
+        self._channel_queues: dict[int, asyncio.Queue[Message]] = {}
+        self._channel_workers: dict[int, asyncio.Task] = {}
         self._tg_to_mappings: dict[int, list[ChatMapping]] = {}
         for mapping in settings.chat_mappings:
             self._tg_to_mappings.setdefault(mapping.tg_chat_id, []).append(mapping)
@@ -259,10 +259,6 @@ class MirrorService:
                 "Add mappings via the monitoring web dashboard (/monitor) and restart the service."
             )
         await self._cleanup_stale_chat_links()
-        self._telegram_to_bitrix_workers = [
-            asyncio.create_task(self._telegram_to_bitrix_worker(), name=f"bitrix-send-worker-{index}")
-            for index in range(self.settings.bitrix_send_workers)
-        ]
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop(), name="periodic-cleanup")
         await self.start_bitrix_polling(application)
 
@@ -286,25 +282,36 @@ class MirrorService:
             except asyncio.CancelledError:
                 pass
         self._bitrix_on_demand_tasks.clear()
-        for worker in self._telegram_to_bitrix_workers:
+        for worker in self._channel_workers.values():
             worker.cancel()
-        for worker in self._telegram_to_bitrix_workers:
+        for worker in self._channel_workers.values():
             try:
                 await worker
             except asyncio.CancelledError:
                 pass
-        self._telegram_to_bitrix_workers.clear()
+        self._channel_workers.clear()
+        self._channel_queues.clear()
         self._application = None
 
     async def enqueue_telegram_message(self, message: Message) -> None:
         if not self._forwarding_enabled:
-            logger.info(
-                "Dropping Telegram message %s from chat %s because forwarding is disabled",
-                message.message_id,
-                message.chat_id,
-            )
+            logger.info("Dropping Telegram message %s because forwarding is disabled", message.message_id)
             return
-        await self._send_queue.put(message)
+
+        chat_id = message.chat_id
+        if chat_id not in self._channel_queues:
+            self._channel_queues[chat_id] = asyncio.Queue(maxsize=100)
+            self._channel_workers[chat_id] = asyncio.create_task(
+                self._per_channel_worker(chat_id),
+                name=f"channel-worker-{chat_id}"
+            )
+
+        queue = self._channel_queues[chat_id]
+        if queue.full():
+            logger.warning("Queue full for chat_id=%s, dropping message=%s", chat_id, message.message_id)
+            return
+            
+        queue.put_nowait(message)
 
     async def schedule_bitrix_dialog_sync(
         self,
@@ -484,29 +491,29 @@ class MirrorService:
             )
             self._bitrix_poll_tasks.append(task)
 
-    async def _telegram_to_bitrix_worker(self) -> None:
+    async def _per_channel_worker(self, chat_id: int) -> None:
+        queue = self._channel_queues[chat_id]
+        min_interval = 0.2 # 5 messages per second
+        last_send_time = 0.0
+
         while not self._stop_event.is_set():
             try:
-                message = await self._send_queue.get()
+                message = await queue.get()
             except asyncio.CancelledError:
-                raise
+                break
 
             try:
-                if not self._forwarding_enabled:
-                    logger.info(
-                        "Dropping queued Telegram message %s from chat %s because forwarding is disabled",
-                        message.message_id,
-                        message.chat_id,
-                    )
-                    continue
+                now = asyncio.get_event_loop().time()
+                elapsed = now - last_send_time
+                if elapsed < min_interval:
+                    await asyncio.sleep(min_interval - elapsed)
+                    now = asyncio.get_event_loop().time()
+                last_send_time = now
+
                 mapping = self.resolve_mapping_for_telegram_message(message)
                 if mapping is None:
-                    logger.warning(
-                        "No mapping found for telegram chat_id=%s thread_id=%s, dropping message",
-                        message.chat_id,
-                        message.message_thread_id,
-                    )
                     continue
+
                 dialog_id = mapping.bitrix_dialog_id
                 reply_bitrix_id: Optional[int] = None
                 if message.reply_to_message:
@@ -521,12 +528,14 @@ class MirrorService:
                         )
                         if reply_link is not None:
                             reply_bitrix_id = reply_link.bitrix_message_id
+
                 if self._has_uploadable_file(message):
                     bitrix_message_id = await self._forward_telegram_file_to_bitrix(message, dialog_id=dialog_id, reply_id=reply_bitrix_id)
                 else:
                     bitrix_message_id = await self.bitrix.send_message(
                         self.render_telegram_message(message), dialog_id=dialog_id, reply_id=reply_bitrix_id,
                     )
+
                 await self.state_store.upsert_link(
                     telegram_chat_id=message.chat_id,
                     telegram_message_id=message.message_id,
@@ -537,17 +546,10 @@ class MirrorService:
                     last_seen_bitrix_revision="telegram-origin",
                     telegram_message_thread_id=message.message_thread_id,
                 )
-                logger.info(
-                    "Mirrored Telegram message %s from chat %s to Bitrix dialog %s as message %s",
-                    message.message_id,
-                    message.chat_id,
-                    dialog_id,
-                    bitrix_message_id,
-                )
             except Exception:
-                logger.exception("Failed to mirror Telegram message %s from chat %s", message.message_id, message.chat_id)
+                logger.exception("Failed to mirror Telegram message in chat %s", chat_id)
             finally:
-                self._send_queue.task_done()
+                queue.task_done()
 
     async def _bitrix_poll_loop(self, application: Application, mapping: ChatMapping, stagger_delay: float = 0) -> None:
         if stagger_delay > 0:

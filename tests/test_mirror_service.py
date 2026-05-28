@@ -115,7 +115,7 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         await self.service.sync_telegram_reaction(message.chat_id, message.message_id, True)
 
         self.assertFalse(accepted)
-        self.assertEqual(self.service._send_queue.qsize(), 0)
+        self.assertEqual(len(self.service._channel_queues), 0)
         self.bitrix.update_message.assert_not_awaited()
         self.bitrix.set_message_like.assert_not_awaited()
         self.state_store.set_forwarding_enabled.assert_awaited_once_with(False)
@@ -251,3 +251,74 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_disconnect_mapping_returns_false_when_not_found(self) -> None:
         removed = await self.service.disconnect_mapping(-9999999, None)
         self.assertFalse(removed)
+
+    async def test_per_channel_queue_throttling_and_overflow(self) -> None:
+        from unittest.mock import patch
+        
+        loop = asyncio.get_event_loop()
+        original_time = loop.time
+        original_sleep = asyncio.sleep
+        
+        loop_time = 10.0
+        def get_time():
+            return loop_time
+        
+        loop.time = get_time
+        
+        sleep_calls = []
+        async def fake_sleep(delay):
+            nonlocal loop_time
+            sleep_calls.append(delay)
+            loop_time += delay
+            await original_sleep(0)
+
+        self.service._forwarding_enabled = True
+        self.service._stop_event.clear()
+
+        try:
+            with patch("asyncio.sleep", side_effect=fake_sleep):
+                # 1. Test throttling on a single channel
+                msg1 = make_message(chat_id=-1001234567890, message_id=1)
+                msg2 = make_message(chat_id=-1001234567890, message_id=2)
+                msg3 = make_message(chat_id=-1001234567890, message_id=3)
+                
+                await self.service.enqueue_telegram_message(msg1)
+                await self.service.enqueue_telegram_message(msg2)
+                await self.service.enqueue_telegram_message(msg3)
+
+                queue = self.service._channel_queues[-1001234567890]
+                
+                # Let loop process
+                for _ in range(20):
+                    if queue.empty():
+                        break
+                    await asyncio.sleep(0)
+                
+                throttling_sleeps = [d for d in sleep_calls if d > 0]
+                self.assertEqual(len(throttling_sleeps), 2)
+                self.assertAlmostEqual(throttling_sleeps[0], 0.2)
+                self.assertAlmostEqual(throttling_sleeps[1], 0.2)
+
+            # 2. Test overflow: overflowing 100 messages drops subsequent messages
+            # Patch asyncio.create_task to avoid running background workers for these overflow tests
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_create_task.return_value = AsyncMock()
+                
+                chat_id_overflow = 9999
+                for i in range(105):
+                    msg = make_message(chat_id=chat_id_overflow, message_id=100 + i)
+                    await self.service.enqueue_telegram_message(msg)
+                
+                # Channel 1 queue has max size 100, and is full. Next 5 messages are dropped.
+                self.assertEqual(self.service._channel_queues[chat_id_overflow].qsize(), 100)
+                
+                # Other channel is unaffected
+                chat_id_other = 8888
+                msg_other = make_message(chat_id=chat_id_other, message_id=9999)
+                await self.service.enqueue_telegram_message(msg_other)
+                self.assertEqual(self.service._channel_queues[chat_id_other].qsize(), 1)
+        finally:
+            loop.time = original_time
+            self.service._channel_workers.clear()
+            await self.service.stop()
+

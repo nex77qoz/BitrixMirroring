@@ -305,7 +305,9 @@ async def bitrix_bot(request: Request):
                 # 2. Write to SQLite
                 conn = None
                 try:
-                    conn = sqlite3.connect(db_path, timeout=10)
+                    conn = sqlite3.connect(db_path, timeout=30.0)
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute("PRAGMA synchronous=NORMAL")
                     with conn:
                         conn.execute("DELETE FROM pending_connections WHERE expires_at_unix < ?", (int(time.time()),))
                         conn.execute(

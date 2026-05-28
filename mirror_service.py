@@ -730,6 +730,13 @@ class MirrorService:
             await self._persist_cursor(dialog_id, bitrix_message.message_id)
 
     async def _should_forward_bitrix_message(self, dialog_id: str, bitrix_message: BitrixMessage) -> bool:
+        if self.settings.bitrix_bot_id and bitrix_message.author_id == self.settings.bitrix_bot_id:
+            logger.debug(
+                "Ignoring Bitrix message %s from our own bot (author_id=%s)",
+                bitrix_message.message_id,
+                bitrix_message.author_id,
+            )
+            return False
         last_seen = self._last_seen_bitrix_message_ids.get(dialog_id)
         if last_seen is not None and bitrix_message.message_id <= last_seen:
             return False

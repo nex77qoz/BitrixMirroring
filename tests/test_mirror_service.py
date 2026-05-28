@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -449,6 +450,23 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         
         # Cleanup
         await service.stop()
+
+    async def test_should_forward_bitrix_message_ignores_own_bot(self) -> None:
+        self.service.settings = dataclasses.replace(self.service.settings, bitrix_bot_id=999)
+        msg_from_bot = BitrixMessage(
+            message_id=15,
+            author_id=999,
+            text="hello from bot",
+            file_ids=(),
+            update_time_unix=None,
+            like_user_ids=(),
+            reply_id=None,
+            is_sticker=False,
+            is_meeting=False,
+            is_task=False,
+        )
+        should_forward = await self.service._should_forward_bitrix_message("chat42", msg_from_bot)
+        self.assertFalse(should_forward)
 
 
 

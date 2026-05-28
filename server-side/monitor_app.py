@@ -100,8 +100,13 @@ def _check_auth(credentials: HTTPBasicCredentials = Depends(security)) -> str:
 
 
 def _db_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 

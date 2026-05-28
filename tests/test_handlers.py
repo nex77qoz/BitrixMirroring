@@ -224,11 +224,11 @@ class HandlersTestCase(unittest.IsolatedAsyncioTestCase):
             chat_id=-100123,
             message_thread_id=55,
             reply_text=AsyncMock(),
-            chat=SimpleNamespace(id=-100123, type="supergroup"),
+            chat=SimpleNamespace(id=-100123, type="supergroup", is_forum=True),
         )
         update = SimpleNamespace(
             effective_message=msg,
-            effective_chat=SimpleNamespace(id=-100123, type="supergroup"),
+            effective_chat=SimpleNamespace(id=-100123, type="supergroup", is_forum=True),
             effective_user=SimpleNamespace(id=777),
         )
         self.context.args = ["sg99"]

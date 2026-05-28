@@ -365,7 +365,8 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
         return
 
-    topic_id = msg.message_thread_id
+    is_forum = getattr(chat, "is_forum", False)
+    topic_id = msg.message_thread_id if is_forum else None
     try:
         await mirror.connect_mapping(chat.id, bitrix_dialog_id, topic_id, "")
     except ValueError as exc:
@@ -390,7 +391,8 @@ async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not await _check_admin(update, mirror):
         return
 
-    topic_id = msg.message_thread_id
+    is_forum = getattr(chat, "is_forum", False)
+    topic_id = msg.message_thread_id if is_forum else None
     removed = await mirror.disconnect_mapping(chat.id, topic_id)
     if removed:
         thread_info = f" (ветка #{topic_id})" if topic_id else ""

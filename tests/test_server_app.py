@@ -124,3 +124,43 @@ class TestServerApp(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200)
             mock_forward.assert_called_once()
             mock_send_bot_message.assert_not_called()
+
+    @patch("app.send_bot_message", new_callable=AsyncMock)
+    async def test_tg_connect_prefix_matching(self, mock_send_bot_message: AsyncMock) -> None:
+        # A message starting with /tg_connect but not strictly matching should not trigger tg_connect
+        with patch("app._bridge_is_configured", return_value=True), \
+             patch("app.forward_event_to_mirror", new_callable=AsyncMock) as mock_forward:
+            response = self.client.post(
+                "/bitrix/bot",
+                data={
+                    "event": "ONIMBOTMESSAGEADD",
+                    "data[PARAMS][DIALOG_ID]": "chat_test_999",
+                    "data[PARAMS][MESSAGE]": "/tg_connector",
+                    "data[PARAMS][BOT_ID]": "7",
+                }
+            )
+            self.assertEqual(response.status_code, 200)
+            mock_forward.assert_called_once()
+            mock_send_bot_message.assert_not_called()
+
+    @patch("app.send_bot_message", new_callable=AsyncMock)
+    async def test_tg_connect_with_trailing(self, mock_send_bot_message: AsyncMock) -> None:
+        # A message with trailing text like `/tg_connect argument` should be parsed as tg_connect
+        response = self.client.post(
+            "/bitrix/bot",
+            data={
+                "event": "ONIMBOTMESSAGEADD",
+                "data[PARAMS][DIALOG_ID]": "chat_test_111",
+                "data[PARAMS][MESSAGE]": "/tg_connect argument",
+                "data[PARAMS][BOT_ID]": "7",
+            }
+        )
+        self.assertEqual(response.status_code, 200)
+        # Check DB
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT token FROM pending_connections")
+        rows = cursor.fetchall()
+        conn.close()
+        self.assertEqual(len(rows), 1)
+        mock_send_bot_message.assert_called_once()

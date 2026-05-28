@@ -272,7 +272,8 @@ async def bitrix_bot(request: Request):
     is_local_command = False
     if event == "ONIMBOTMESSAGEADD" and message_text:
         text_lower = message_text.lower().strip()
-        if text_lower in {"/start", "start", "/ping", "ping"} or text_lower.startswith("/tg_connect"):
+        is_tg_connect = (text_lower == "/tg_connect" or text_lower.startswith("/tg_connect "))
+        if text_lower in {"/start", "start", "/ping", "ping"} or is_tg_connect:
             is_local_command = True
 
     try:
@@ -288,19 +289,21 @@ async def bitrix_bot(request: Request):
         elif event == "ONIMBOTMESSAGEADD" and dialog_id:
             text_lower = message_text.lower().strip()
             reply = None
+            is_tg_connect = (text_lower == "/tg_connect" or text_lower.startswith("/tg_connect "))
 
             if text_lower in {"/start", "start"}:
                 reply = "Привет. Я получил сообщение и могу отвечать в этот чат."
             elif text_lower in {"/ping", "ping"}:
                 reply = "pong"
-            elif text_lower.startswith("/tg_connect"):
+            elif is_tg_connect:
                 # 1. Generate secure token
                 token = secrets.token_hex(4)  # 8 alphanumeric chars
                 expires_at = int(time.time()) + 600  # 10 mins
                 db_raw = os.getenv("MIRROR_STATE_DB_PATH", "mirror_state.sqlite3")
-                db_path = Path(db_raw) if Path(db_raw).is_absolute() else Path.cwd() / db_raw
+                db_path = Path(db_raw) if Path(db_raw).is_absolute() else Path(__file__).parent.parent / db_raw
 
                 # 2. Write to SQLite
+                conn = None
                 try:
                     conn = sqlite3.connect(db_path, timeout=10)
                     with conn:
@@ -317,6 +320,9 @@ async def bitrix_bot(request: Request):
                 except Exception as e:
                     write_log("DB_ERROR", repr(e))
                     reply = "⚠️ Не удалось создать токен подключения. Попробуйте позже."
+                finally:
+                    if conn is not None:
+                        conn.close()
 
             if reply is not None:
                 await send_bot_message(

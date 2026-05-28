@@ -397,5 +397,45 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed_polls, 10)
         self.assertEqual(max_concurrency, 5)
 
+    async def test_reload_mappings_starts_and_stops_scheduler_dynamically(self) -> None:
+        from tests.helpers import make_mapping, make_settings
+        # 1. Start with zero mappings
+        settings = make_settings(chat_mappings=())
+        import dataclasses
+        settings = dataclasses.replace(settings, sync_bitrix_to_telegram=True)
+        
+        service = MirrorService(settings, self.bitrix, self.state_store)
+        app = SimpleNamespace()
+        
+        # Start service
+        await service.start(app)  # type: ignore[arg-type]
+        
+        # Verify scheduler task is None because mappings was empty
+        self.assertIsNone(service._scheduler_task)
+        
+        # Mock load_all_chat_mappings to return a mapping
+        new_mapping = make_mapping(mapping_id=1, tg_chat_id=-1001234567890, bitrix_dialog_id="chat42")
+        self.state_store.load_all_chat_mappings = AsyncMock(return_value=(new_mapping,))
+        
+        # Reload mappings (simulates /connect)
+        await service.reload_mappings()
+        
+        # Verify scheduler task has been started dynamically!
+        self.assertIsNotNone(service._scheduler_task)
+        self.assertFalse(service._scheduler_task.done())
+        
+        # Now change load_all_chat_mappings to return empty tuple (simulates disconnecting all mappings)
+        self.state_store.load_all_chat_mappings = AsyncMock(return_value=())
+        
+        # Reload mappings again
+        await service.reload_mappings()
+        
+        # Verify scheduler task has been cancelled and cleaned up to None!
+        self.assertIsNone(service._scheduler_task)
+        
+        # Cleanup
+        await service.stop()
+
+
 
 

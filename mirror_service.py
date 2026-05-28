@@ -195,6 +195,16 @@ class MirrorService:
                 task.cancel()
                 self._channel_queues.pop(chat_id, None)
 
+        if self._scheduler_task is None and mappings and self._application is not None:
+            await self.start_bitrix_polling(self._application)
+        elif not mappings and self._scheduler_task is not None:
+            self._scheduler_task.cancel()
+            try:
+                await self._scheduler_task
+            except asyncio.CancelledError:
+                pass
+            self._scheduler_task = None
+
     async def connect_mapping(
         self,
         tg_chat_id: int,

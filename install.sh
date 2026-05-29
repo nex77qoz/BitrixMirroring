@@ -77,6 +77,11 @@ print_info()   { echo -e "  ${CYAN}ℹ $*${RESET}"; log "INFO: $*"; }
 ask_input() {
     # ask_input VAR "Prompt text" [default]
     local var="$1" prompt="$2" default="${3-}"
+    eval "local existing=\${$var-}"
+    if [[ -n "$existing" ]]; then
+        print_ok "Параметр $var задан: $existing"
+        return 0
+    fi
     local value=""
     while [[ -z "$value" ]]; do
         if [[ -n "$default" ]]; then
@@ -96,6 +101,11 @@ ask_input() {
 
 ask_optional() {
     local var="$1" prompt="$2"
+    eval "local existing=\${$var-}"
+    if [[ -n "$existing" ]]; then
+        print_ok "Параметр $var задан: $existing"
+        return 0
+    fi
     echo -en "  ${YELLOW}${prompt} (Enter чтобы пропустить): ${RESET}"
     read -r value
     printf -v "$var" '%s' "$value"
@@ -125,6 +135,11 @@ read_asterisks() {
 
 ask_password() {
     local var="$1" prompt="$2"
+    eval "local existing=\${$var-}"
+    if [[ -n "$existing" ]]; then
+        print_ok "Параметр $var задан из файла конфигурации"
+        return 0
+    fi
     local pw="" pw2=""
     while true; do
         read_asterisks pw "$prompt"
@@ -143,6 +158,11 @@ ask_password() {
 ask_secret() {
     # Single secret input (no confirmation)
     local var="$1" prompt="$2"
+    eval "local existing=\${$var-}"
+    if [[ -n "$existing" ]]; then
+        print_ok "Параметр $var задан из файла конфигурации"
+        return 0
+    fi
     local value=""
     while [[ -z "$value" ]]; do
         read_asterisks value "$prompt"

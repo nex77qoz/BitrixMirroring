@@ -1082,12 +1082,12 @@ step_setup_telegram_webhook() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STEP 9 — Chat mapping setup
+# STEP 9 — Database initialization
 # ──────────────────────────────────────────────────────────────────────────────
-step_chat_mapping() {
-    print_step "Настройка маппинга чатов Telegram ↔ Bitrix"
+step_init_db() {
+    print_step "Инициализация базы данных SQLite"
 
-    # Create DB and chat_mappings table (idempotent)
+    # Create DB and tables (idempotent)
     sqlite3 "$DB_FILE" << 'SQL'
 CREATE TABLE IF NOT EXISTS cursor_state (
     bitrix_dialog_id TEXT PRIMARY KEY,
@@ -1113,58 +1113,16 @@ CREATE TABLE IF NOT EXISTS chat_mappings (
     label TEXT DEFAULT '',
     created_at_unix INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS telegram_admins (
+    tg_user_id INTEGER PRIMARY KEY,
+    added_at_unix INTEGER NOT NULL
+);
 SQL
 
-    local counter=1
-    while true; do
-        echo ""
-        echo -en "  ${YELLOW}Добавить маппинг чата? (y/N): ${RESET}"
-        read -r answer
-        [[ "${answer,,}" != "y" && "${answer,,}" != "д" ]] && break
-
-        # Telegram chat ID
-        local tg_id=""
-        while true; do
-            ask_input tg_id "ID чата Telegram (например: -1001234567890)"
-            if [[ "$tg_id" =~ ^-?[0-9]+$ ]]; then
-                break
-            fi
-            print_error "ID должен быть числом (может быть отрицательным)"
-        done
-
-        # Bitrix dialog ID
-        local bx_id=""
-        ask_input bx_id "ID диалога Bitrix (например: chat2941 или sg123)"
-
-        # Label
-        local label=""
-        ask_optional label "Метка для этого маппинга"
-
-        # Insert into DB
-        sqlite3 "$DB_FILE" \
-            "INSERT OR REPLACE INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix) \
-             VALUES ($tg_id, '$(echo "$bx_id" | sed "s/'/''/g")', '$(echo "$label" | sed "s/'/''/g")', $(date +%s));"
-
-        print_ok "Маппинг #${counter} добавлен: Telegram ${tg_id} → Bitrix ${bx_id}"
-        (( counter++ ))
-    done
-
-    if [[ $counter -eq 1 ]]; then
-        print_warn "Маппинги не добавлены. Добавьте их позднее через дашборд мониторинга: https://${DOMAIN}/monitor"
-    fi
-
-    # Restart services to pick up new env/db
-    if [[ $counter -gt 1 ]]; then
-        print_info "Перезапускаем сервисы для применения маппингов..."
-        for svc in "${SERVICES[@]}"; do
-            systemctl restart "$svc" >> "$LOG_FILE" 2>&1 || true
-        done
-        sleep 2
-    fi
-}
-
-step_init_db() {
-    step_chat_mapping
+    # Ensure permissions for service user
+    chown "$SVC_USER:$SVC_GROUP" "$DB_FILE" 2>/dev/null || true
+    chmod 660 "$DB_FILE" 2>/dev/null || true
+    print_ok "База данных SQLite успешно инициализирована"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────

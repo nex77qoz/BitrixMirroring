@@ -1119,6 +1119,10 @@ SQL
     fi
 }
 
+step_init_db() {
+    step_chat_mapping
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # STEP — Seed Telegram admins into DB
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1580,6 +1584,39 @@ do_uninstall() {
     print_ok "Удаление завершено"
 }
 
+load_config_file() {
+    if [[ -n "${CONFIG_FILE_PATH:-}" ]]; then
+        if [[ ! -f "$CONFIG_FILE_PATH" ]]; then
+            print_error "Файл конфигурации не найден: $CONFIG_FILE_PATH"
+            exit 1
+        fi
+        print_step "Загрузка параметров из файла: $CONFIG_FILE_PATH"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Пропускаем комментарии и пустые строки
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line//[[:space:]]/}" ]] && continue
+
+            # Загружаем ключи вида KEY=VALUE
+            if [[ "$line" =~ ^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)$ ]]; then
+                local key="${BASH_REMATCH[1]}"
+                local val="${BASH_REMATCH[2]}"
+                # Удаляем окружающие кавычки
+                val="${val%\"}"
+                val="${val#\"}"
+                val="${val%\'}"
+                val="${val#\'}"
+                export "$key"="$val"
+                # Скрываем вывод для секретных переменных
+                if [[ "$key" =~ TOKEN|SECRET|PASSWORD|WEBHOOK ]]; then
+                    print_ok "Загружено: $key=********"
+                  else
+                      print_ok "Загружено: $key=$val"
+                  fi
+              fi
+          done < "$CONFIG_FILE_PATH"
+      fi
+  }
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1589,16 +1626,47 @@ main() {
     [[ -f "$LOG_FILE" ]] && mv -f "$LOG_FILE" "${LOG_FILE}.old"
     touch "$LOG_FILE"
 
-    case "${1-}" in
-        --update)
+    CONFIG_FILE_PATH=""
+    local action="install"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --update)
+                action="update"
+                shift
+                ;;
+            --uninstall)
+                action="uninstall"
+                shift
+                ;;
+            -c|--config|--config-file)
+                if [[ -n "${2-}" ]]; then
+                    CONFIG_FILE_PATH="$2"
+                    shift 2
+                else
+                    echo -e "${RED}Ошибка: Ожидается путь к файлу после $1${RESET}"
+                    exit 1
+                fi
+                ;;
+            *)
+                echo "Использование: $0 [--update | --uninstall | -c <путь_к_конфигу>]"
+                exit 1
+                ;;
+        esac
+    done
+
+    case "$action" in
+        update)
             do_update
             ;;
-        --uninstall)
+        uninstall)
             do_uninstall
             ;;
-        "")
+        install)
             banner
             check_root
+
+            load_config_file
 
             step_update_system
             step_install_packages
@@ -1616,14 +1684,10 @@ main() {
             step_setup_firewall
             step_setup_logrotate
             step_create_file_cache
-            step_chat_mapping
+            step_init_db
             step_setup_admins
             step_health_checks
             print_summary
-            ;;
-        *)
-            echo "Использование: $0 [--update | --uninstall]"
-            exit 1
             ;;
     esac
 }

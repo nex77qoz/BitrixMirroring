@@ -336,63 +336,77 @@ EOF
 step_configure_ssh() {
     print_step "Настройка SSH-авторизации"
 
-    echo -e "\n${BOLD}  Выберите режим авторизации SSH:${RESET}"
-    echo -e "  ${CYAN}1${RESET} — Только SSH-ключ (рекомендуется, пароль отключён)"
-    echo -e "  ${CYAN}2${RESET} — SSH-ключ + пароль (оба метода)"
-    echo -e "  ${CYAN}3${RESET} — Пропустить (оставить текущие настройки)"
-    echo ""
-    echo -en "  ${YELLOW}Выберите вариант [1/2/3]: ${RESET}"
-    read -r ssh_choice
+    local choice=""
+    if [[ -n "${SSH_AUTH_MODE:-}" ]]; then
+        case "${SSH_AUTH_MODE}" in
+            key) choice="1" ;;
+            both) choice="2" ;;
+            skip) choice="3" ;;
+            *) print_error "Некорректный SSH_AUTH_MODE: $SSH_AUTH_MODE" && exit 1 ;;
+        esac
+        print_ok "SSH-режим из конфигурации: $SSH_AUTH_MODE"
+    else
+        echo -e "\n${BOLD}  Выберите режим авторизации SSH:${RESET}"
+        echo -e "  ${CYAN}1${RESET} — Только SSH-ключ (рекомендуется, пароль отключён)"
+        echo -e "  ${CYAN}2${RESET} — SSH-ключ + пароль (оба метода)"
+        echo -e "  ${CYAN}3${RESET} — Пропустить (оставить текущие настройки)"
+        echo ""
+        echo -en "  ${YELLOW}Выберите вариант [1/2/3]: ${RESET}"
+        read -r ssh_choice
+        choice="${ssh_choice}"
+    fi
 
-    case "${ssh_choice}" in
+    case "${choice}" in
         1)
             SSH_AUTH_MODE="key"
             print_info "Режим: только SSH-ключ"
             echo ""
-            print_warn "Убедитесь, что ваш SSH-ключ уже добавлен в ~/.ssh/authorized_keys!"
-            echo -en "  ${YELLOW}Ваш публичный SSH-ключ уже добавлен на сервер? (y/N/paste): ${RESET}"
-            read -r key_ready
-            if [[ "${key_ready,,}" == "paste" || "${key_ready,,}" == "p" || "${key_ready,,}" == "вставить" || "${key_ready,,}" == "в" ]]; then
-                # Let user paste their public key directly
-                echo ""
-                echo -e "  ${CYAN}Вставьте ваш публичный SSH-ключ (ssh-rsa ... или ssh-ed25519 ...):${RESET}"
-                echo -en "  > "
-                read -r ssh_pub_key
-                if [[ -z "$ssh_pub_key" ]]; then
-                    print_error "Ключ не введён. Отмена."
+            
+            local pub_key=""
+            if [[ -n "${SSH_PUBLIC_KEY:-}" ]]; then
+                pub_key="${SSH_PUBLIC_KEY}"
+                print_ok "SSH-ключ загружен из конфигурации"
+            else
+                print_warn "Убедитесь, что ваш SSH-ключ уже добавлен в ~/.ssh/authorized_keys!"
+                echo -en "  ${YELLOW}Ваш публичный SSH-ключ уже добавлен на сервер? (y/N/paste): ${RESET}"
+                read -r key_ready
+                if [[ "${key_ready,,}" == "paste" || "${key_ready,,}" == "p" || "${key_ready,,}" == "вставить" || "${key_ready,,}" == "в" ]]; then
+                    echo ""
+                    echo -e "  ${CYAN}Вставьте ваш публичный SSH-ключ (ssh-rsa ... или ssh-ed25519 ...):${RESET}"
+                    echo -en "  > "
+                    read -r ssh_pub_key
+                    pub_key="$ssh_pub_key"
+                elif [[ "${key_ready,,}" != "y" ]]; then
+                    print_error "Добавьте SSH-ключ перед продолжением: ssh-copy-id user@server"
+                    print_info "Или повторите установку и выберите 'paste' для вставки ключа."
                     exit 1
                 fi
-                # Validate key format
-                if ! echo "$ssh_pub_key" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp[0-9]+|ssh-dss) '; then
+            fi
+
+            if [[ -n "$pub_key" ]]; then
+                if ! echo "$pub_key" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp[0-9]+|ssh-dss) '; then
                     print_error "Неверный формат ключа. Ожидается: ssh-rsa AAAA... или ssh-ed25519 AAAA..."
                     exit 1
                 fi
-                # Determine target user for the key (current sudo user or root)
                 local target_user="${SUDO_USER:-root}"
                 local target_home
                 target_home=$(eval echo "~$target_user")
                 local auth_keys="${target_home}/.ssh/authorized_keys"
                 mkdir -p "${target_home}/.ssh"
                 chmod 700 "${target_home}/.ssh"
-                # Add key if not already present
-                if grep -qF "$ssh_pub_key" "$auth_keys" 2>/dev/null; then
+                if grep -qF "$pub_key" "$auth_keys" 2>/dev/null; then
                     print_info "Этот ключ уже присутствует в $auth_keys"
                 else
-                    echo "$ssh_pub_key" >> "$auth_keys"
+                    echo "$pub_key" >> "$auth_keys"
                     chmod 600 "$auth_keys"
                     chown -R "${target_user}:${target_user}" "${target_home}/.ssh"
                     print_ok "SSH-ключ добавлен в $auth_keys для пользователя $target_user"
                 fi
-            elif [[ "${key_ready,,}" != "y" ]]; then
-                print_error "Добавьте SSH-ключ перед продолжением: ssh-copy-id user@server"
-                print_info "Или повторите установку и выберите 'paste' для вставки ключа."
-                exit 1
             fi
 
             local sshd_config="/etc/ssh/sshd_config"
             local sshd_custom="/etc/ssh/sshd_config.d/99-bitrix-bot-hardening.conf"
 
-            # Write hardening config to drop-in directory if available
             if [[ -d "/etc/ssh/sshd_config.d" ]]; then
                 cat > "$sshd_custom" << 'SSHEOF'
 # Bitrix Bot SSH hardening — SSH key only, password disabled
@@ -403,7 +417,6 @@ PermitRootLogin prohibit-password
 SSHEOF
                 print_ok "SSH-конфигурация записана в $sshd_custom"
             else
-                # Fallback: modify main config
                 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$sshd_config"
                 sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' "$sshd_config"
                 sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' "$sshd_config"
@@ -411,42 +424,23 @@ SSHEOF
                 print_ok "SSH-конфигурация обновлена в $sshd_config"
             fi
 
-            # Validate and restart (Ubuntu=ssh, RHEL=sshd)
             local ssh_svc="ssh"
             systemctl list-unit-files sshd.service &>/dev/null && ssh_svc="sshd"
             if sshd -t >> "$LOG_FILE" 2>&1; then
                 run_cmd systemctl restart "$ssh_svc"
                 print_ok "$ssh_svc перезапущен с новой конфигурацией"
             else
-                print_error "Ошибка в конфигурации sshd! Откатите вручную."
-                [[ -f "$sshd_custom" ]] && rm -f "$sshd_custom"
+                print_error "Ошибка проверки sshd_config! Изменения не применены."
+                exit 1
             fi
             ;;
         2)
             SSH_AUTH_MODE="both"
-            print_info "Режим: SSH-ключ + пароль (без изменений)"
-
-            # Still harden root login
-            local sshd_custom="/etc/ssh/sshd_config.d/99-bitrix-bot-hardening.conf"
-            if [[ -d "/etc/ssh/sshd_config.d" ]]; then
-                cat > "$sshd_custom" << 'SSHEOF'
-# Bitrix Bot SSH hardening — key + password, root restricted
-PubkeyAuthentication yes
-PermitRootLogin prohibit-password
-SSHEOF
-                local ssh_svc="ssh"
-                systemctl list-unit-files sshd.service &>/dev/null && ssh_svc="sshd"
-                if sshd -t >> "$LOG_FILE" 2>&1; then
-                    run_cmd systemctl restart "$ssh_svc"
-                    print_ok "Вход по root ограничен (только ключ)"
-                fi
-            fi
+            print_info "Режим: SSH-ключ + пароль"
             ;;
-        3|"")
-            print_info "SSH-настройки не изменены"
-            ;;
-        *)
-            print_warn "Неизвестный вариант, SSH-настройки не изменены"
+        3)
+            SSH_AUTH_MODE="skip"
+            print_info "Настройка SSH пропущена"
             ;;
     esac
 }
@@ -490,15 +484,33 @@ step_collect_config() {
 
     TELEGRAM_WEBHOOK_ENABLED="true"
 
-    echo ""
-    echo -en "  ${YELLOW}Вебхук для Telegram-бота уже настроен? (y/N): ${RESET}"
-    read -r webhook_already_set
-    if [[ "${webhook_already_set,,}" == "y" || "${webhook_already_set,,}" == "д" ]]; then
-        TELEGRAM_WEBHOOK_ALREADY_SET=true
-        print_info "Вебхук уже настроен — будет запрошен только секрет"
+    if [[ -n "${TELEGRAM_WEBHOOK_ALREADY_SET:-}" ]]; then
+        print_ok "Состояние Telegram Webhook задано из конфигурации: TELEGRAM_WEBHOOK_ALREADY_SET=$TELEGRAM_WEBHOOK_ALREADY_SET"
     else
-        TELEGRAM_WEBHOOK_ALREADY_SET=false
-        print_info "Вебхук будет зарегистрирован автоматически после запуска сервисов"
+        local expected_webhook_url="https://${DOMAIN}${TELEGRAM_WEBHOOK_PATH:-/telegram/webhook}"
+        print_info "Проверка статуса Telegram Webhook через API..."
+        local webhook_info
+        webhook_info=$(curl -s --max-time 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" || echo "")
+
+        if [[ -n "$webhook_info" ]] && echo "$webhook_info" | grep -q '"ok":true'; then
+            local current_url
+            current_url=$(echo "$webhook_info" | grep -oP '"url":"[^"]+"' | head -n1 | cut -d'"' -f4 || echo "")
+            if [[ "$current_url" == "$expected_webhook_url" ]]; then
+                print_ok "Telegram Webhook уже настроен на корректный URL: $current_url"
+                TELEGRAM_WEBHOOK_ALREADY_SET=true
+            else
+                if [[ -n "$current_url" ]]; then
+                    print_info "Текущий вебхук указывает на другой адрес: $current_url"
+                else
+                    print_info "Telegram Webhook в данный момент не настроен."
+                fi
+                print_info "Вебхук будет автоматически зарегистрирован на: $expected_webhook_url"
+                TELEGRAM_WEBHOOK_ALREADY_SET=false
+            fi
+        else
+            print_warn "Не удалось связаться с Telegram API (проверьте подключение или токен)."
+            TELEGRAM_WEBHOOK_ALREADY_SET=false
+        fi
     fi
 
     ask_secret TELEGRAM_WEBHOOK_SECRET "Секретный токен для Telegram-вебхука"
@@ -630,9 +642,21 @@ step_setup_ssl() {
         print_info "Telegram webhook mode требует публичный HTTPS endpoint. Пропуск SSL недоступен."
     fi
 
-    echo -en "  ${YELLOW}Выпустить SSL-сертификат? (Y/n): ${RESET}"
-    read -r ssl_answer
-    if [[ "${ssl_answer,,}" == "n" || "${ssl_answer,,}" == "н" ]]; then
+    local ssl_choice=""
+    if [[ -n "${SKIP_SSL:-}" ]]; then
+        if [[ "$SKIP_SSL" == "true" ]]; then
+            ssl_choice="n"
+        else
+            ssl_choice="y"
+        fi
+        print_ok "Пропуск SSL из конфигурации: $SKIP_SSL"
+    else
+        echo -en "  ${YELLOW}Выпустить SSL-сертификат? (Y/n): ${RESET}"
+        read -r ssl_answer
+        ssl_choice="${ssl_answer}"
+    fi
+
+    if [[ "${ssl_choice,,}" == "n" || "${ssl_choice,,}" == "н" ]]; then
         if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
             print_error "Нельзя включить Telegram webhook mode без HTTPS. Повторите установку с выпуском SSL-сертификата."
             exit 1

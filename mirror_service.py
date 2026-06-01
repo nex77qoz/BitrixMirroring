@@ -546,6 +546,9 @@ class MirrorService:
                 break
 
     async def _throttled_poll(self, application: Application, mapping: ChatMapping) -> None:
+        assert self._poll_semaphore is not None, (
+            "_poll_semaphore is None — call start_bitrix_polling() before scheduling polls"
+        )
         async with self._poll_semaphore:
             try:
                 if mapping.bitrix_dialog_id not in self._last_seen_bitrix_message_ids:
@@ -556,7 +559,7 @@ class MirrorService:
 
     async def _per_channel_worker(self, chat_id: int) -> None:
         queue = self._channel_queues[chat_id]
-        min_interval = 0.2 # 5 messages per second
+        min_interval = 0.2  # 5 messages per second
         last_send_time = 0.0
 
         while not self._stop_event.is_set():
@@ -566,11 +569,19 @@ class MirrorService:
                 break
 
             try:
-                now = asyncio.get_event_loop().time()
+                if not self._forwarding_enabled:
+                    logger.info(
+                        "Dropping queued message %s from chat %s because forwarding is disabled",
+                        message.message_id,
+                        chat_id,
+                    )
+                    continue
+
+                now = asyncio.get_running_loop().time()
                 elapsed = now - last_send_time
                 if elapsed < min_interval:
                     await asyncio.sleep(min_interval - elapsed)
-                    now = asyncio.get_event_loop().time()
+                    now = asyncio.get_running_loop().time()
                 last_send_time = now
 
                 mapping = self.resolve_mapping_for_telegram_message(message)
@@ -742,6 +753,10 @@ class MirrorService:
             return False
         if bitrix_message.author_id == 0:
             logger.debug("Ignoring Bitrix service message %s from author_id=0", bitrix_message.message_id)
+            return False
+        text_lower = bitrix_message.text.lower().strip()
+        if text_lower == "/tg_connect" or text_lower.startswith("/tg_connect "):
+            logger.debug("Ignoring Bitrix /tg_connect command message %s", bitrix_message.message_id)
             return False
         if bitrix_message.is_sticker:
             logger.debug("Ignoring Bitrix sticker message %s", bitrix_message.message_id)

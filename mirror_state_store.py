@@ -275,8 +275,66 @@ class MirrorStateStore:
                 }
             if "topic_ids" not in chat_mapping_columns:
                 connection.execute("ALTER TABLE chat_mappings ADD COLUMN topic_ids TEXT DEFAULT ''")
+
+            # Deduplicate existing mappings before creating unique index
+            duplicates = connection.execute(
+                "SELECT bitrix_dialog_id FROM chat_mappings GROUP BY bitrix_dialog_id HAVING COUNT(*) > 1"
+            ).fetchall()
+            if duplicates:
+                for (dup_dialog_id,) in duplicates:
+                    rows = connection.execute(
+                        "SELECT id, tg_chat_id, topic_ids, label FROM chat_mappings WHERE bitrix_dialog_id = ? ORDER BY id",
+                        (dup_dialog_id,),
+                    ).fetchall()
+                    if not rows:
+                        continue
+                    first_row_id = rows[0][0]
+                    merged_tg_chat_id = rows[0][1]
+                    all_topics = []
+                    seen_topics = set()
+                    labels = []
+                    for row in rows:
+                        row_id, tg_chat_id, topic_str, label_str = row[0], row[1], row[2], row[3]
+                        if tg_chat_id == merged_tg_chat_id:
+                            topic_str = str(topic_str) if topic_str else ""
+                            for t in topic_str.split(","):
+                                t_clean = t.strip()
+                                if t_clean.lstrip("-").isdigit():
+                                    t_val = int(t_clean)
+                                    if t_val not in seen_topics:
+                                        seen_topics.add(t_val)
+                                        all_topics.append(t_val)
+                            label_str = str(label_str).strip() if label_str else ""
+                            if label_str and label_str not in labels:
+                                labels.append(label_str)
+                        else:
+                            logger.warning(
+                                "Discarding duplicate mapping for bitrix_dialog_id %s in tg_chat_id %s (keeping tg_chat_id %s)",
+                                dup_dialog_id,
+                                tg_chat_id,
+                                merged_tg_chat_id,
+                            )
+                    merged_topics_str = ",".join(str(t) for t in all_topics)
+                    merged_label = ", ".join(labels)
+                    logger.warning(
+                        "Merging legacy duplicates for bitrix_dialog_id %s in tg_chat_id %s: topic_ids=%s, label=%s",
+                        dup_dialog_id,
+                        merged_tg_chat_id,
+                        merged_topics_str,
+                        merged_label,
+                    )
+                    connection.execute(
+                        "UPDATE chat_mappings SET topic_ids = ?, label = ? WHERE id = ?",
+                        (merged_topics_str, merged_label, first_row_id),
+                    )
+                    connection.execute(
+                        "DELETE FROM chat_mappings WHERE bitrix_dialog_id = ? AND id != ?",
+                        (dup_dialog_id, first_row_id),
+                    )
+                connection.commit()
+
             connection.execute(
-                "DROP INDEX IF EXISTS idx_chat_mappings_bitrix_dialog_id"
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_mappings_bitrix_dialog_id ON chat_mappings(bitrix_dialog_id)"
             )
 
             # topic_names table — cache for Telegram forum topic names
@@ -605,6 +663,7 @@ class MirrorStateStore:
     def _verify_and_consume_token_sync(self, bitrix_dialog_id: str, token: str) -> bool:
         now = int(time.time())
         with self._connect() as connection:
+            connection.execute("BEGIN EXCLUSIVE")
             row = connection.execute(
                 "SELECT id, bitrix_dialog_id FROM pending_connections WHERE token = ? AND expires_at_unix >= ?",
                 (token, now),
@@ -662,14 +721,19 @@ class MirrorStateStore:
         topic_ids_str = ",".join(str(t) for t in topic_ids)
         now = int(time.time())
         with self._connect() as connection:
-            cursor = connection.execute(
-                "INSERT INTO chat_mappings "
-                "(tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) "
-                "VALUES (?,?,?,?,?)",
-                (tg_chat_id, bitrix_dialog_id, label, now, topic_ids_str),
-            )
-            connection.commit()
-            return cursor.lastrowid  # type: ignore[return-value]
+            try:
+                cursor = connection.execute(
+                    "INSERT INTO chat_mappings "
+                    "(tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) "
+                    "VALUES (?,?,?,?,?)",
+                    (tg_chat_id, bitrix_dialog_id, label, now, topic_ids_str),
+                )
+                connection.commit()
+                return cursor.lastrowid  # type: ignore[return-value]
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    f"Bitrix dialog {bitrix_dialog_id} уже привязан к другому маппингу"
+                ) from exc
 
     async def update_chat_mapping_topic_ids(self, mapping_id: int, topic_ids: list[int]) -> None:
         await asyncio.to_thread(self._update_chat_mapping_topic_ids_sync, mapping_id, topic_ids)

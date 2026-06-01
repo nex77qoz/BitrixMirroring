@@ -16,6 +16,7 @@ Environment variables (shared with the main .env):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -68,6 +69,8 @@ SERVICES: dict[str, str] = {
     "webhook": "bitrix-bot",
 }
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
@@ -106,7 +109,7 @@ def _db_connect() -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
     except sqlite3.OperationalError:
-        pass
+        logger.warning("Failed to enable WAL mode on %s — concurrent writes may be unsafe", DB_PATH)
     return conn
 
 

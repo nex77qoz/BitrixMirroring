@@ -389,6 +389,11 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
         return
 
+    try:
+        await mirror.bitrix.send_message("Связка установлена", dialog_id=bitrix_dialog_id)
+    except Exception:
+        logger.exception("Failed to send connection confirmation to Bitrix chat %s", bitrix_dialog_id)
+
     thread_info = f" (ветка #{topic_id})" if topic_id else ""
     sent = await msg.reply_text(f"✅ Связка установлена: {bitrix_dialog_id} ↔ этот чат{thread_info}")
     _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)

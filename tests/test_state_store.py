@@ -129,11 +129,10 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(m.topic_ids, (7, 8))
         self.assertEqual(m.label, "test label")
 
-    async def test_add_chat_mapping_same_bitrix_id_different_topics_allowed(self) -> None:
-        await self.store.add_chat_mapping(-100123, "chat999", [1], "first")
-        await self.store.add_chat_mapping(-100123, "chat999", [2], "second")
-        mappings = await self.store.load_all_chat_mappings()
-        self.assertEqual(len(mappings), 2)
+    async def test_add_chat_mapping_duplicate_bitrix_id_raises(self) -> None:
+        await self.store.add_chat_mapping(-100123, "chat999", [], "first")
+        with self.assertRaises(ValueError):
+            await self.store.add_chat_mapping(-100456, "chat999", [], "second")
 
     async def test_remove_chat_mapping(self) -> None:
         mapping_id = await self.store.add_chat_mapping(-100123, "chat999", [], "")
@@ -164,4 +163,64 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         await self.store.save_pending_connection("chat123", expired_token, int(time.time()) - 10)
         is_expired_valid = await self.store.verify_and_consume_token("chat123", expired_token)
         self.assertFalse(is_expired_valid)
+
+    async def test_concurrent_token_consumption_is_atomic(self) -> None:
+        """Two simultaneous calls must return exactly one True."""
+        token = "racetoken"
+        expires_at = int(time.time()) + 600
+        await self.store.save_pending_connection("chat42", token, expires_at)
+
+        results = await asyncio.gather(
+            self.store.verify_and_consume_token("chat42", token),
+            self.store.verify_and_consume_token("chat42", token),
+        )
+        self.assertEqual(sum(results), 1, "Exactly one concurrent call should consume the token")
+
+    async def test_initialize_deduplicates_existing_mappings(self) -> None:
+        db_path = os.path.join(self.tempdir.name, "state_migration.sqlite3")
+        # 1. Create a schema with duplicates (simulating legacy database before unique index was added)
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                """
+                CREATE TABLE chat_mappings (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tg_chat_id       INTEGER NOT NULL,
+                    bitrix_dialog_id TEXT NOT NULL,
+                    label            TEXT DEFAULT '',
+                    created_at_unix  INTEGER NOT NULL,
+                    topic_ids        TEXT DEFAULT ''
+                )
+                """
+            )
+            # Insert duplicate bitrix_dialog_id mappings (some with same tg_chat_id, one with different)
+            conn.execute(
+                "INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) VALUES (?, ?, ?, ?, ?)",
+                (-100123, "chat999", "first", 1000, "1"),
+            )
+            conn.execute(
+                "INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) VALUES (?, ?, ?, ?, ?)",
+                (-100123, "chat999", "second", 2000, "2"),
+            )
+            conn.execute(
+                "INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) VALUES (?, ?, ?, ?, ?)",
+                (-100456, "chat999", "different_chat", 3000, "3"),
+            )
+            conn.commit()
+
+        # 2. Run MirrorStateStore.initialize()
+        store = MirrorStateStore(db_path)
+        await store.initialize()
+
+        # 3. Verify they were merged correctly (same chat merged, different chat discarded)
+        mappings = await store.load_all_chat_mappings()
+        self.assertEqual(len(mappings), 1)
+        m = mappings[0]
+        self.assertEqual(m.tg_chat_id, -100123)
+        self.assertEqual(m.bitrix_dialog_id, "chat999")
+        self.assertEqual(m.topic_ids, (1, 2))
+        self.assertEqual(m.label, "first, second")
+
+        # 4. Verify unique constraint is active by attempting to insert a duplicate mapping
+        with self.assertRaises(ValueError):
+            await store.add_chat_mapping(-100456, "chat999", [], "third")
 

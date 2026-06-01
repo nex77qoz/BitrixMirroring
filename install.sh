@@ -32,14 +32,14 @@ SERVICES=("bitrix-telegram-mirror" "bitrix-bot" "bitrix-monitor")
 SVC_USER="bitrix-bot"
 SVC_GROUP="bitrix-bot"
 
-# Set to true by step_setup_ssl when user skips SSL
-SKIP_SSL=false
+# Set to true by step_setup_ssl when user skips SSL (empty by default, prompts if interactive)
+SKIP_SSL=""
 
-# Set to true when user says Telegram webhook is already configured
-TELEGRAM_WEBHOOK_ALREADY_SET=false
+# Set to true when user says Telegram webhook is already configured (empty by default, prompts if interactive)
+TELEGRAM_WEBHOOK_ALREADY_SET=""
 
-# SSH auth mode: "key" or "both"
-SSH_AUTH_MODE="both"
+# SSH auth mode: "key" or "both" (if unset, prompts user interactively)
+SSH_AUTH_MODE=""
 
 # Monitor allowed IPs (populated during config collection)
 MONITOR_ALLOWED_IPS=""
@@ -77,6 +77,11 @@ print_info()   { echo -e "  ${CYAN}ℹ $*${RESET}"; log "INFO: $*"; }
 ask_input() {
     # ask_input VAR "Prompt text" [default]
     local var="$1" prompt="$2" default="${3-}"
+    eval "local existing=\${$var-}"
+    if [[ -n "$existing" ]]; then
+        print_ok "Параметр $var задан: $existing"
+        return 0
+    fi
     local value=""
     while [[ -z "$value" ]]; do
         if [[ -n "$default" ]]; then
@@ -96,6 +101,11 @@ ask_input() {
 
 ask_optional() {
     local var="$1" prompt="$2"
+    eval "local existing=\${$var-}"
+    if [[ -n "$existing" ]]; then
+        print_ok "Параметр $var задан: $existing"
+        return 0
+    fi
     echo -en "  ${YELLOW}${prompt} (Enter чтобы пропустить): ${RESET}"
     read -r value
     printf -v "$var" '%s' "$value"
@@ -125,6 +135,11 @@ read_asterisks() {
 
 ask_password() {
     local var="$1" prompt="$2"
+    eval "local existing=\${$var-}"
+    if [[ -n "$existing" ]]; then
+        print_ok "Параметр $var задан из файла конфигурации"
+        return 0
+    fi
     local pw="" pw2=""
     while true; do
         read_asterisks pw "$prompt"
@@ -143,6 +158,11 @@ ask_password() {
 ask_secret() {
     # Single secret input (no confirmation)
     local var="$1" prompt="$2"
+    eval "local existing=\${$var-}"
+    if [[ -n "$existing" ]]; then
+        print_ok "Параметр $var задан из файла конфигурации"
+        return 0
+    fi
     local value=""
     while [[ -z "$value" ]]; do
         read_asterisks value "$prompt"
@@ -316,63 +336,77 @@ EOF
 step_configure_ssh() {
     print_step "Настройка SSH-авторизации"
 
-    echo -e "\n${BOLD}  Выберите режим авторизации SSH:${RESET}"
-    echo -e "  ${CYAN}1${RESET} — Только SSH-ключ (рекомендуется, пароль отключён)"
-    echo -e "  ${CYAN}2${RESET} — SSH-ключ + пароль (оба метода)"
-    echo -e "  ${CYAN}3${RESET} — Пропустить (оставить текущие настройки)"
-    echo ""
-    echo -en "  ${YELLOW}Выберите вариант [1/2/3]: ${RESET}"
-    read -r ssh_choice
+    local choice=""
+    if [[ -n "${SSH_AUTH_MODE:-}" ]]; then
+        case "${SSH_AUTH_MODE}" in
+            key) choice="1" ;;
+            both) choice="2" ;;
+            skip) choice="3" ;;
+            *) print_error "Некорректный SSH_AUTH_MODE: $SSH_AUTH_MODE" && exit 1 ;;
+        esac
+        print_ok "SSH-режим из конфигурации: $SSH_AUTH_MODE"
+    else
+        echo -e "\n${BOLD}  Выберите режим авторизации SSH:${RESET}"
+        echo -e "  ${CYAN}1${RESET} — Только SSH-ключ (рекомендуется, пароль отключён)"
+        echo -e "  ${CYAN}2${RESET} — SSH-ключ + пароль (оба метода)"
+        echo -e "  ${CYAN}3${RESET} — Пропустить (оставить текущие настройки)"
+        echo ""
+        echo -en "  ${YELLOW}Выберите вариант [1/2/3]: ${RESET}"
+        read -r ssh_choice
+        choice="${ssh_choice}"
+    fi
 
-    case "${ssh_choice}" in
+    case "${choice}" in
         1)
             SSH_AUTH_MODE="key"
             print_info "Режим: только SSH-ключ"
             echo ""
-            print_warn "Убедитесь, что ваш SSH-ключ уже добавлен в ~/.ssh/authorized_keys!"
-            echo -en "  ${YELLOW}Ваш публичный SSH-ключ уже добавлен на сервер? (y/N/paste): ${RESET}"
-            read -r key_ready
-            if [[ "${key_ready,,}" == "paste" || "${key_ready,,}" == "p" || "${key_ready,,}" == "вставить" || "${key_ready,,}" == "в" ]]; then
-                # Let user paste their public key directly
-                echo ""
-                echo -e "  ${CYAN}Вставьте ваш публичный SSH-ключ (ssh-rsa ... или ssh-ed25519 ...):${RESET}"
-                echo -en "  > "
-                read -r ssh_pub_key
-                if [[ -z "$ssh_pub_key" ]]; then
-                    print_error "Ключ не введён. Отмена."
+            
+            local pub_key=""
+            if [[ -n "${SSH_PUBLIC_KEY:-}" ]]; then
+                pub_key="${SSH_PUBLIC_KEY}"
+                print_ok "SSH-ключ загружен из конфигурации"
+            else
+                print_warn "Убедитесь, что ваш SSH-ключ уже добавлен в ~/.ssh/authorized_keys!"
+                echo -en "  ${YELLOW}Ваш публичный SSH-ключ уже добавлен на сервер? (y/N/paste): ${RESET}"
+                read -r key_ready
+                if [[ "${key_ready,,}" == "paste" || "${key_ready,,}" == "p" || "${key_ready,,}" == "вставить" || "${key_ready,,}" == "в" ]]; then
+                    echo ""
+                    echo -e "  ${CYAN}Вставьте ваш публичный SSH-ключ (ssh-rsa ... или ssh-ed25519 ...):${RESET}"
+                    echo -en "  > "
+                    read -r ssh_pub_key
+                    pub_key="$ssh_pub_key"
+                elif [[ "${key_ready,,}" != "y" ]]; then
+                    print_error "Добавьте SSH-ключ перед продолжением: ssh-copy-id user@server"
+                    print_info "Или повторите установку и выберите 'paste' для вставки ключа."
                     exit 1
                 fi
-                # Validate key format
-                if ! echo "$ssh_pub_key" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp[0-9]+|ssh-dss) '; then
+            fi
+
+            if [[ -n "$pub_key" ]]; then
+                if ! echo "$pub_key" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp[0-9]+|ssh-dss) '; then
                     print_error "Неверный формат ключа. Ожидается: ssh-rsa AAAA... или ssh-ed25519 AAAA..."
                     exit 1
                 fi
-                # Determine target user for the key (current sudo user or root)
                 local target_user="${SUDO_USER:-root}"
                 local target_home
                 target_home=$(eval echo "~$target_user")
                 local auth_keys="${target_home}/.ssh/authorized_keys"
                 mkdir -p "${target_home}/.ssh"
                 chmod 700 "${target_home}/.ssh"
-                # Add key if not already present
-                if grep -qF "$ssh_pub_key" "$auth_keys" 2>/dev/null; then
+                if grep -qF "$pub_key" "$auth_keys" 2>/dev/null; then
                     print_info "Этот ключ уже присутствует в $auth_keys"
                 else
-                    echo "$ssh_pub_key" >> "$auth_keys"
+                    echo "$pub_key" >> "$auth_keys"
                     chmod 600 "$auth_keys"
                     chown -R "${target_user}:${target_user}" "${target_home}/.ssh"
                     print_ok "SSH-ключ добавлен в $auth_keys для пользователя $target_user"
                 fi
-            elif [[ "${key_ready,,}" != "y" ]]; then
-                print_error "Добавьте SSH-ключ перед продолжением: ssh-copy-id user@server"
-                print_info "Или повторите установку и выберите 'paste' для вставки ключа."
-                exit 1
             fi
 
             local sshd_config="/etc/ssh/sshd_config"
             local sshd_custom="/etc/ssh/sshd_config.d/99-bitrix-bot-hardening.conf"
 
-            # Write hardening config to drop-in directory if available
             if [[ -d "/etc/ssh/sshd_config.d" ]]; then
                 cat > "$sshd_custom" << 'SSHEOF'
 # Bitrix Bot SSH hardening — SSH key only, password disabled
@@ -383,7 +417,6 @@ PermitRootLogin prohibit-password
 SSHEOF
                 print_ok "SSH-конфигурация записана в $sshd_custom"
             else
-                # Fallback: modify main config
                 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$sshd_config"
                 sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' "$sshd_config"
                 sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' "$sshd_config"
@@ -391,42 +424,24 @@ SSHEOF
                 print_ok "SSH-конфигурация обновлена в $sshd_config"
             fi
 
-            # Validate and restart (Ubuntu=ssh, RHEL=sshd)
             local ssh_svc="ssh"
             systemctl list-unit-files sshd.service &>/dev/null && ssh_svc="sshd"
             if sshd -t >> "$LOG_FILE" 2>&1; then
                 run_cmd systemctl restart "$ssh_svc"
                 print_ok "$ssh_svc перезапущен с новой конфигурацией"
             else
-                print_error "Ошибка в конфигурации sshd! Откатите вручную."
-                [[ -f "$sshd_custom" ]] && rm -f "$sshd_custom"
+                print_error "Ошибка проверки sshd_config! Изменения не применены."
+                [[ -f "$sshd_custom" ]] && rm -f "$sshd_custom" && print_info "Файл $sshd_custom удалён."
+                exit 1
             fi
             ;;
         2)
             SSH_AUTH_MODE="both"
-            print_info "Режим: SSH-ключ + пароль (без изменений)"
-
-            # Still harden root login
-            local sshd_custom="/etc/ssh/sshd_config.d/99-bitrix-bot-hardening.conf"
-            if [[ -d "/etc/ssh/sshd_config.d" ]]; then
-                cat > "$sshd_custom" << 'SSHEOF'
-# Bitrix Bot SSH hardening — key + password, root restricted
-PubkeyAuthentication yes
-PermitRootLogin prohibit-password
-SSHEOF
-                local ssh_svc="ssh"
-                systemctl list-unit-files sshd.service &>/dev/null && ssh_svc="sshd"
-                if sshd -t >> "$LOG_FILE" 2>&1; then
-                    run_cmd systemctl restart "$ssh_svc"
-                    print_ok "Вход по root ограничен (только ключ)"
-                fi
-            fi
+            print_info "Режим: SSH-ключ + пароль"
             ;;
-        3|"")
-            print_info "SSH-настройки не изменены"
-            ;;
-        *)
-            print_warn "Неизвестный вариант, SSH-настройки не изменены"
+        3)
+            SSH_AUTH_MODE="skip"
+            print_info "Настройка SSH пропущена"
             ;;
     esac
 }
@@ -446,6 +461,11 @@ step_collect_config() {
             break
         fi
         print_error "URL должен начинаться с https://"
+        if [[ -n "${CONFIG_FILE_PATH:-}" ]]; then
+            print_error "Недопустимое значение BITRIX_WEBHOOK_BASE в конфигурационном файле."
+            exit 1
+        fi
+        BITRIX_WEBHOOK_BASE=""
     done
 
     # Domain
@@ -470,15 +490,33 @@ step_collect_config() {
 
     TELEGRAM_WEBHOOK_ENABLED="true"
 
-    echo ""
-    echo -en "  ${YELLOW}Вебхук для Telegram-бота уже настроен? (y/N): ${RESET}"
-    read -r webhook_already_set
-    if [[ "${webhook_already_set,,}" == "y" || "${webhook_already_set,,}" == "д" ]]; then
-        TELEGRAM_WEBHOOK_ALREADY_SET=true
-        print_info "Вебхук уже настроен — будет запрошен только секрет"
+    if [[ -n "${TELEGRAM_WEBHOOK_ALREADY_SET:-}" ]]; then
+        print_ok "Состояние Telegram Webhook задано из конфигурации: TELEGRAM_WEBHOOK_ALREADY_SET=$TELEGRAM_WEBHOOK_ALREADY_SET"
     else
-        TELEGRAM_WEBHOOK_ALREADY_SET=false
-        print_info "Вебхук будет зарегистрирован автоматически после запуска сервисов"
+        local expected_webhook_url="https://${DOMAIN}${TELEGRAM_WEBHOOK_PATH:-/telegram/webhook}"
+        print_info "Проверка статуса Telegram Webhook через API..."
+        local webhook_info
+        webhook_info=$(curl -s --max-time 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" || echo "")
+
+        if [[ -n "$webhook_info" ]] && echo "$webhook_info" | grep -q '"ok":true'; then
+            local current_url
+            current_url=$(echo "$webhook_info" | grep -oP '"url":"[^"]+"' | head -n1 | cut -d'"' -f4 || echo "")
+            if [[ "$current_url" == "$expected_webhook_url" ]]; then
+                print_ok "Telegram Webhook уже настроен на корректный URL: $current_url"
+                TELEGRAM_WEBHOOK_ALREADY_SET=true
+            else
+                if [[ -n "$current_url" ]]; then
+                    print_info "Текущий вебхук указывает на другой адрес: $current_url"
+                else
+                    print_info "Telegram Webhook в данный момент не настроен."
+                fi
+                print_info "Вебхук будет автоматически зарегистрирован на: $expected_webhook_url"
+                TELEGRAM_WEBHOOK_ALREADY_SET=false
+            fi
+        else
+            print_warn "Не удалось связаться с Telegram API (проверьте подключение или токен)."
+            TELEGRAM_WEBHOOK_ALREADY_SET=false
+        fi
     fi
 
     ask_secret TELEGRAM_WEBHOOK_SECRET "Секретный токен для Telegram-вебхука"
@@ -610,9 +648,21 @@ step_setup_ssl() {
         print_info "Telegram webhook mode требует публичный HTTPS endpoint. Пропуск SSL недоступен."
     fi
 
-    echo -en "  ${YELLOW}Выпустить SSL-сертификат? (Y/n): ${RESET}"
-    read -r ssl_answer
-    if [[ "${ssl_answer,,}" == "n" || "${ssl_answer,,}" == "н" ]]; then
+    local ssl_choice=""
+    if [[ -n "${SKIP_SSL:-}" ]]; then
+        if [[ "$SKIP_SSL" == "true" ]]; then
+            ssl_choice="n"
+        else
+            ssl_choice="y"
+        fi
+        print_ok "Пропуск SSL из конфигурации: $SKIP_SSL"
+    else
+        echo -en "  ${YELLOW}Выпустить SSL-сертификат? (Y/n): ${RESET}"
+        read -r ssl_answer
+        ssl_choice="${ssl_answer}"
+    fi
+
+    if [[ "${ssl_choice,,}" == "n" || "${ssl_choice,,}" == "н" ]]; then
         if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
             print_error "Нельзя включить Telegram webhook mode без HTTPS. Повторите установку с выпуском SSL-сертификата."
             exit 1
@@ -996,26 +1046,26 @@ step_setup_telegram_webhook() {
     local webhook_url="https://${DOMAIN}${TELEGRAM_WEBHOOK_PATH}"
 
     if [[ "$TELEGRAM_WEBHOOK_ALREADY_SET" == "true" ]]; then
-        print_info "Вебхук уже настроен пользователем — регистрация пропущена"
+        print_info "URL вебхука уже совпадает — обновляем секрет: ${BOLD}${webhook_url}${RESET}"
     else
         print_info "Регистрация webhook: ${BOLD}${webhook_url}${RESET}"
+    fi
 
-        local response
-        response=$(curl -s --max-time 15 -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
-            -H "Content-Type: application/json" \
-            -d "{\"url\": \"${webhook_url}\", \"secret_token\": \"${TELEGRAM_WEBHOOK_SECRET}\"}" \
-            2>/dev/null || echo '{"ok":false,"description":"curl error"}')
+    local response
+    response=$(curl -s --max-time 15 -X POST \
+        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+        -H "Content-Type: application/json" \
+        -d "{\"url\": \"${webhook_url}\", \"secret_token\": \"${TELEGRAM_WEBHOOK_SECRET}\"}" \
+        2>/dev/null || echo '{"ok":false,"description":"curl error"}')
 
-        if echo "$response" | grep -q '"ok":true'; then
-            print_ok "Telegram webhook успешно зарегистрирован"
-        else
-            print_error "Ошибка регистрации webhook: $response"
-            print_info "Для ручной регистрации выполните:"
-            echo -e "    ${CYAN}curl -X POST \"https://api.telegram.org/bot<TOKEN>/setWebhook\" \\"
-            echo -e "      -H \"Content-Type: application/json\" \\"
-            echo -e "      -d '{\"url\": \"${webhook_url}\", \"secret_token\": \"<SECRET>\"}'${RESET}"
-        fi
+    if echo "$response" | grep -q '"ok":true'; then
+        print_ok "Telegram webhook успешно зарегистрирован"
+    else
+        print_error "Ошибка регистрации webhook: $response"
+        print_info "Для ручной регистрации выполните:"
+        echo -e "    ${CYAN}curl -X POST \"https://api.telegram.org/bot<TOKEN>/setWebhook\" \\"
+        echo -e "      -H \"Content-Type: application/json\" \\"
+        echo -e "      -d '{\"url\": \"${webhook_url}\", \"secret_token\": \"<SECRET>\"}'${RESET}"
     fi
 
     # Verification: send a test request with the secret token
@@ -1038,12 +1088,12 @@ step_setup_telegram_webhook() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STEP 9 — Chat mapping setup
+# STEP 9 — Database initialization
 # ──────────────────────────────────────────────────────────────────────────────
-step_chat_mapping() {
-    print_step "Настройка маппинга чатов Telegram ↔ Bitrix"
+step_init_db() {
+    print_step "Инициализация базы данных SQLite"
 
-    # Create DB and chat_mappings table (idempotent)
+    # Create DB and tables (idempotent)
     sqlite3 "$DB_FILE" << 'SQL'
 CREATE TABLE IF NOT EXISTS cursor_state (
     bitrix_dialog_id TEXT PRIMARY KEY,
@@ -1061,62 +1111,28 @@ CREATE TABLE IF NOT EXISTS message_links (
     updated_at_unix INTEGER NOT NULL,
     bitrix_liked_by_bot INTEGER DEFAULT 0,
     last_seen_bitrix_likes TEXT DEFAULT '',
+    telegram_message_thread_id INTEGER,
     PRIMARY KEY (telegram_chat_id, telegram_message_id)
 );
 CREATE TABLE IF NOT EXISTS chat_mappings (
-    tg_chat_id INTEGER PRIMARY KEY,
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_chat_id       INTEGER NOT NULL,
     bitrix_dialog_id TEXT NOT NULL,
-    label TEXT DEFAULT '',
-    created_at_unix INTEGER NOT NULL
+    label            TEXT DEFAULT '',
+    created_at_unix  INTEGER NOT NULL,
+    topic_ids        TEXT DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_mappings_bitrix_dialog_id ON chat_mappings(bitrix_dialog_id);
+CREATE TABLE IF NOT EXISTS telegram_admins (
+    tg_user_id INTEGER PRIMARY KEY,
+    added_at_unix INTEGER NOT NULL
 );
 SQL
 
-    local counter=1
-    while true; do
-        echo ""
-        echo -en "  ${YELLOW}Добавить маппинг чата? (y/N): ${RESET}"
-        read -r answer
-        [[ "${answer,,}" != "y" && "${answer,,}" != "д" ]] && break
-
-        # Telegram chat ID
-        local tg_id=""
-        while true; do
-            ask_input tg_id "ID чата Telegram (например: -1001234567890)"
-            if [[ "$tg_id" =~ ^-?[0-9]+$ ]]; then
-                break
-            fi
-            print_error "ID должен быть числом (может быть отрицательным)"
-        done
-
-        # Bitrix dialog ID
-        local bx_id=""
-        ask_input bx_id "ID диалога Bitrix (например: chat2941 или sg123)"
-
-        # Label
-        local label=""
-        ask_optional label "Метка для этого маппинга"
-
-        # Insert into DB
-        sqlite3 "$DB_FILE" \
-            "INSERT OR REPLACE INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix) \
-             VALUES ($tg_id, '$(echo "$bx_id" | sed "s/'/''/g")', '$(echo "$label" | sed "s/'/''/g")', $(date +%s));"
-
-        print_ok "Маппинг #${counter} добавлен: Telegram ${tg_id} → Bitrix ${bx_id}"
-        (( counter++ ))
-    done
-
-    if [[ $counter -eq 1 ]]; then
-        print_warn "Маппинги не добавлены. Добавьте их позднее через дашборд мониторинга: https://${DOMAIN}/monitor"
-    fi
-
-    # Restart services to pick up new env/db
-    if [[ $counter -gt 1 ]]; then
-        print_info "Перезапускаем сервисы для применения маппингов..."
-        for svc in "${SERVICES[@]}"; do
-            systemctl restart "$svc" >> "$LOG_FILE" 2>&1 || true
-        done
-        sleep 2
-    fi
+    # Ensure permissions for service user
+    chown "$SVC_USER:$SVC_GROUP" "$DB_FILE" 2>/dev/null || true
+    chmod 660 "$DB_FILE" 2>/dev/null || true
+    print_ok "База данных SQLite успешно инициализирована"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1580,6 +1596,39 @@ do_uninstall() {
     print_ok "Удаление завершено"
 }
 
+load_config_file() {
+    if [[ -n "${CONFIG_FILE_PATH:-}" ]]; then
+        if [[ ! -f "$CONFIG_FILE_PATH" ]]; then
+            print_error "Файл конфигурации не найден: $CONFIG_FILE_PATH"
+            exit 1
+        fi
+        print_step "Загрузка параметров из файла: $CONFIG_FILE_PATH"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Пропускаем комментарии и пустые строки
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line//[[:space:]]/}" ]] && continue
+
+            # Загружаем ключи вида KEY=VALUE
+            if [[ "$line" =~ ^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)$ ]]; then
+                local key="${BASH_REMATCH[1]}"
+                local val="${BASH_REMATCH[2]}"
+                # Удаляем окружающие кавычки
+                val="${val%\"}"
+                val="${val#\"}"
+                val="${val%\'}"
+                val="${val#\'}"
+                export "$key"="$val"
+                # Скрываем вывод для секретных переменных
+                if [[ "$key" =~ TOKEN|SECRET|PASSWORD|WEBHOOK ]]; then
+                    print_ok "Загружено: $key=********"
+                  else
+                      print_ok "Загружено: $key=$val"
+                  fi
+              fi
+          done < "$CONFIG_FILE_PATH"
+      fi
+  }
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1589,16 +1638,47 @@ main() {
     [[ -f "$LOG_FILE" ]] && mv -f "$LOG_FILE" "${LOG_FILE}.old"
     touch "$LOG_FILE"
 
-    case "${1-}" in
-        --update)
+    CONFIG_FILE_PATH=""
+    local action="install"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --update)
+                action="update"
+                shift
+                ;;
+            --uninstall)
+                action="uninstall"
+                shift
+                ;;
+            -c|--config|--config-file)
+                if [[ -n "${2-}" ]]; then
+                    CONFIG_FILE_PATH="$2"
+                    shift 2
+                else
+                    echo -e "${RED}Ошибка: Ожидается путь к файлу после $1${RESET}"
+                    exit 1
+                fi
+                ;;
+            *)
+                echo "Использование: $0 [--update | --uninstall | -c <путь_к_конфигу>]"
+                exit 1
+                ;;
+        esac
+    done
+
+    case "$action" in
+        update)
             do_update
             ;;
-        --uninstall)
+        uninstall)
             do_uninstall
             ;;
-        "")
+        install)
             banner
             check_root
+
+            load_config_file
 
             step_update_system
             step_install_packages
@@ -1616,14 +1696,10 @@ main() {
             step_setup_firewall
             step_setup_logrotate
             step_create_file_cache
-            step_chat_mapping
+            step_init_db
             step_setup_admins
             step_health_checks
             print_summary
-            ;;
-        *)
-            echo "Использование: $0 [--update | --uninstall]"
-            exit 1
             ;;
     esac
 }

@@ -317,7 +317,7 @@ async def bitrix_bot(request: Request):
                     reply = (
                         f"🔑 Одноразовый токен сгенерирован.\n"
                         f"Отправьте следующую команду в вашей Telegram-группе в течение 10 минут:\n\n"
-                        f"`/connect {dialog_id} {token}`"
+                        f"/connect {dialog_id} {token}"
                     )
                 except Exception as e:
                     write_log("DB_ERROR", repr(e))

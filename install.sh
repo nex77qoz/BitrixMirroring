@@ -1110,14 +1110,18 @@ CREATE TABLE IF NOT EXISTS message_links (
     updated_at_unix INTEGER NOT NULL,
     bitrix_liked_by_bot INTEGER DEFAULT 0,
     last_seen_bitrix_likes TEXT DEFAULT '',
+    telegram_message_thread_id INTEGER,
     PRIMARY KEY (telegram_chat_id, telegram_message_id)
 );
 CREATE TABLE IF NOT EXISTS chat_mappings (
-    tg_chat_id INTEGER PRIMARY KEY,
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_chat_id       INTEGER NOT NULL,
     bitrix_dialog_id TEXT NOT NULL,
-    label TEXT DEFAULT '',
-    created_at_unix INTEGER NOT NULL
+    label            TEXT DEFAULT '',
+    created_at_unix  INTEGER NOT NULL,
+    topic_ids        TEXT DEFAULT ''
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_mappings_bitrix_dialog_id ON chat_mappings(bitrix_dialog_id);
 CREATE TABLE IF NOT EXISTS telegram_admins (
     tg_user_id INTEGER PRIMARY KEY,
     added_at_unix INTEGER NOT NULL

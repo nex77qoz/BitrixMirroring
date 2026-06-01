@@ -180,7 +180,7 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
                 )
                 """
             )
-            # Insert duplicate bitrix_dialog_id mappings
+            # Insert duplicate bitrix_dialog_id mappings (some with same tg_chat_id, one with different)
             conn.execute(
                 "INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) VALUES (?, ?, ?, ?, ?)",
                 (-100123, "chat999", "first", 1000, "1"),
@@ -189,13 +189,17 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
                 "INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) VALUES (?, ?, ?, ?, ?)",
                 (-100123, "chat999", "second", 2000, "2"),
             )
+            conn.execute(
+                "INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) VALUES (?, ?, ?, ?, ?)",
+                (-100456, "chat999", "different_chat", 3000, "3"),
+            )
             conn.commit()
 
         # 2. Run MirrorStateStore.initialize()
         store = MirrorStateStore(db_path)
         await store.initialize()
 
-        # 3. Verify they were merged correctly
+        # 3. Verify they were merged correctly (same chat merged, different chat discarded)
         mappings = await store.load_all_chat_mappings()
         self.assertEqual(len(mappings), 1)
         m = mappings[0]

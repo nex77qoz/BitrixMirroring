@@ -280,41 +280,58 @@ class MirrorStateStore:
             duplicates = connection.execute(
                 "SELECT bitrix_dialog_id FROM chat_mappings GROUP BY bitrix_dialog_id HAVING COUNT(*) > 1"
             ).fetchall()
-            for (dup_dialog_id,) in duplicates:
-                rows = connection.execute(
-                    "SELECT id, tg_chat_id, topic_ids, label FROM chat_mappings WHERE bitrix_dialog_id = ? ORDER BY id",
-                    (dup_dialog_id,),
-                ).fetchall()
-                if not rows:
-                    continue
-                first_row_id = rows[0][0]
-                all_topics = []
-                seen_topics = set()
-                labels = []
-                for row in rows:
-                    topic_str = str(row[2]) if row[2] else ""
-                    for t in topic_str.split(","):
-                        t_clean = t.strip()
-                        if t_clean.lstrip("-").isdigit():
-                            t_val = int(t_clean)
-                            if t_val not in seen_topics:
-                                seen_topics.add(t_val)
-                                all_topics.append(t_val)
-                    label_str = str(row[3]).strip() if row[3] else ""
-                    if label_str and label_str not in labels:
-                        labels.append(label_str)
-
-                merged_topics_str = ",".join(str(t) for t in all_topics)
-                merged_label = ", ".join(labels)
-
-                connection.execute(
-                    "UPDATE chat_mappings SET topic_ids = ?, label = ? WHERE id = ?",
-                    (merged_topics_str, merged_label, first_row_id),
-                )
-                connection.execute(
-                    "DELETE FROM chat_mappings WHERE bitrix_dialog_id = ? AND id != ?",
-                    (dup_dialog_id, first_row_id),
-                )
+            if duplicates:
+                for (dup_dialog_id,) in duplicates:
+                    rows = connection.execute(
+                        "SELECT id, tg_chat_id, topic_ids, label FROM chat_mappings WHERE bitrix_dialog_id = ? ORDER BY id",
+                        (dup_dialog_id,),
+                    ).fetchall()
+                    if not rows:
+                        continue
+                    first_row_id = rows[0][0]
+                    merged_tg_chat_id = rows[0][1]
+                    all_topics = []
+                    seen_topics = set()
+                    labels = []
+                    for row in rows:
+                        row_id, tg_chat_id, topic_str, label_str = row[0], row[1], row[2], row[3]
+                        if tg_chat_id == merged_tg_chat_id:
+                            topic_str = str(topic_str) if topic_str else ""
+                            for t in topic_str.split(","):
+                                t_clean = t.strip()
+                                if t_clean.lstrip("-").isdigit():
+                                    t_val = int(t_clean)
+                                    if t_val not in seen_topics:
+                                        seen_topics.add(t_val)
+                                        all_topics.append(t_val)
+                            label_str = str(label_str).strip() if label_str else ""
+                            if label_str and label_str not in labels:
+                                labels.append(label_str)
+                        else:
+                            logger.warning(
+                                "Discarding duplicate mapping for bitrix_dialog_id %s in tg_chat_id %s (keeping tg_chat_id %s)",
+                                dup_dialog_id,
+                                tg_chat_id,
+                                merged_tg_chat_id,
+                            )
+                    merged_topics_str = ",".join(str(t) for t in all_topics)
+                    merged_label = ", ".join(labels)
+                    logger.warning(
+                        "Merging legacy duplicates for bitrix_dialog_id %s in tg_chat_id %s: topic_ids=%s, label=%s",
+                        dup_dialog_id,
+                        merged_tg_chat_id,
+                        merged_topics_str,
+                        merged_label,
+                    )
+                    connection.execute(
+                        "UPDATE chat_mappings SET topic_ids = ?, label = ? WHERE id = ?",
+                        (merged_topics_str, merged_label, first_row_id),
+                    )
+                    connection.execute(
+                        "DELETE FROM chat_mappings WHERE bitrix_dialog_id = ? AND id != ?",
+                        (dup_dialog_id, first_row_id),
+                    )
+                connection.commit()
 
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_mappings_bitrix_dialog_id ON chat_mappings(bitrix_dialog_id)"

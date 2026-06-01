@@ -556,7 +556,7 @@ class MirrorService:
 
     async def _per_channel_worker(self, chat_id: int) -> None:
         queue = self._channel_queues[chat_id]
-        min_interval = 0.2 # 5 messages per second
+        min_interval = 0.2  # 5 messages per second
         last_send_time = 0.0
 
         while not self._stop_event.is_set():
@@ -566,11 +566,19 @@ class MirrorService:
                 break
 
             try:
-                now = asyncio.get_event_loop().time()
+                if not self._forwarding_enabled:
+                    logger.info(
+                        "Dropping queued message %s from chat %s because forwarding is disabled",
+                        message.message_id,
+                        chat_id,
+                    )
+                    continue
+
+                now = asyncio.get_running_loop().time()
                 elapsed = now - last_send_time
                 if elapsed < min_interval:
                     await asyncio.sleep(min_interval - elapsed)
-                    now = asyncio.get_event_loop().time()
+                    now = asyncio.get_running_loop().time()
                 last_send_time = now
 
                 mapping = self.resolve_mapping_for_telegram_message(message)

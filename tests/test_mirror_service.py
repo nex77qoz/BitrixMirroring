@@ -484,6 +484,24 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         if message.chat_id in self.service._channel_workers:
             self.service._channel_workers[message.chat_id].cancel()
 
+    async def test_per_channel_worker_drops_queued_messages_when_forwarding_disabled(self) -> None:
+        """Worker must not send messages that were queued before forwarding was disabled."""
+        mapping = self.service.settings.chat_mappings[0]
+        chat_id = mapping.tg_chat_id
 
+        # Create queue and register it directly (bypassing enqueue_telegram_message which already checks the flag)
+        queue: asyncio.Queue = asyncio.Queue()
+        self.service._channel_queues[chat_id] = queue
 
+        # Disable forwarding, then put message directly in queue
+        self.service._forwarding_enabled = False
+        message = make_message(chat_id=chat_id)
+        await queue.put(message)
 
+        # Run worker briefly
+        worker_task = asyncio.create_task(self.service._per_channel_worker(chat_id))
+        await asyncio.sleep(0.05)
+        worker_task.cancel()
+        await asyncio.gather(worker_task, return_exceptions=True)
+
+        self.bitrix.send_message.assert_not_awaited()

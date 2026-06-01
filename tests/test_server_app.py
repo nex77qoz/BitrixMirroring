@@ -80,6 +80,7 @@ class TestServerApp(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_kwargs["bot_id"], "7")
         self.assertIn("🔑 Одноразовый токен сгенерирован.", call_kwargs["message"])
         self.assertIn(f"/connect chat_test_123 {token}", call_kwargs["message"])
+        self.assertNotIn("`", call_kwargs["message"])
 
     @patch("app.send_bot_message", new_callable=AsyncMock)
     async def test_tg_connect_case_insensitive(self, mock_send_bot_message: AsyncMock) -> None:

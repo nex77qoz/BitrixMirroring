@@ -754,6 +754,10 @@ class MirrorService:
         if bitrix_message.author_id == 0:
             logger.debug("Ignoring Bitrix service message %s from author_id=0", bitrix_message.message_id)
             return False
+        text_lower = bitrix_message.text.lower().strip()
+        if text_lower == "/tg_connect" or text_lower.startswith("/tg_connect "):
+            logger.debug("Ignoring Bitrix /tg_connect command message %s", bitrix_message.message_id)
+            return False
         if bitrix_message.is_sticker:
             logger.debug("Ignoring Bitrix sticker message %s", bitrix_message.message_id)
             return False

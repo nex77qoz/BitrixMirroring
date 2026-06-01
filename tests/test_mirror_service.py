@@ -469,6 +469,38 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         should_forward = await self.service._should_forward_bitrix_message("chat42", msg_from_bot)
         self.assertFalse(should_forward)
 
+    async def test_should_forward_bitrix_message_ignores_tg_connect_command(self) -> None:
+        msg = BitrixMessage(
+            message_id=20,
+            author_id=123,
+            text="/tg_connect",
+            file_ids=(),
+            update_time_unix=None,
+            like_user_ids=(),
+            reply_id=None,
+            is_sticker=False,
+            is_meeting=False,
+            is_task=False,
+        )
+        should_forward = await self.service._should_forward_bitrix_message("chat42", msg)
+        self.assertFalse(should_forward)
+
+    async def test_should_forward_bitrix_message_ignores_tg_connect_with_args(self) -> None:
+        msg = BitrixMessage(
+            message_id=21,
+            author_id=123,
+            text="/tg_connect argument",
+            file_ids=(),
+            update_time_unix=None,
+            like_user_ids=(),
+            reply_id=None,
+            is_sticker=False,
+            is_meeting=False,
+            is_task=False,
+        )
+        should_forward = await self.service._should_forward_bitrix_message("chat42", msg)
+        self.assertFalse(should_forward)
+
     async def test_enqueue_telegram_message_uses_configured_queue_maxsize(self) -> None:
         self.service.settings = dataclasses.replace(self.service.settings, bitrix_send_queue_maxsize=555)
         self.service._forwarding_enabled = True

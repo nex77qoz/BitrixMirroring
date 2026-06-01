@@ -431,6 +431,7 @@ SSHEOF
                 print_ok "$ssh_svc перезапущен с новой конфигурацией"
             else
                 print_error "Ошибка проверки sshd_config! Изменения не применены."
+                [[ -f "$sshd_custom" ]] && rm -f "$sshd_custom" && print_info "Файл $sshd_custom удалён."
                 exit 1
             fi
             ;;

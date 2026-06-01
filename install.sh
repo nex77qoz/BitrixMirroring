@@ -460,6 +460,11 @@ step_collect_config() {
             break
         fi
         print_error "URL должен начинаться с https://"
+        if [[ -n "${CONFIG_FILE_PATH:-}" ]]; then
+            print_error "Недопустимое значение BITRIX_WEBHOOK_BASE в конфигурационном файле."
+            exit 1
+        fi
+        BITRIX_WEBHOOK_BASE=""
     done
 
     # Domain

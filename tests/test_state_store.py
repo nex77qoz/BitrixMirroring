@@ -129,11 +129,10 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(m.topic_ids, (7, 8))
         self.assertEqual(m.label, "test label")
 
-    async def test_add_chat_mapping_same_bitrix_id_different_topics_allowed(self) -> None:
-        await self.store.add_chat_mapping(-100123, "chat999", [1], "first")
-        await self.store.add_chat_mapping(-100123, "chat999", [2], "second")
-        mappings = await self.store.load_all_chat_mappings()
-        self.assertEqual(len(mappings), 2)
+    async def test_add_chat_mapping_duplicate_bitrix_id_raises(self) -> None:
+        await self.store.add_chat_mapping(-100123, "chat999", [], "first")
+        with self.assertRaises(ValueError):
+            await self.store.add_chat_mapping(-100456, "chat999", [], "second")
 
     async def test_remove_chat_mapping(self) -> None:
         mapping_id = await self.store.add_chat_mapping(-100123, "chat999", [], "")

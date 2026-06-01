@@ -1046,26 +1046,26 @@ step_setup_telegram_webhook() {
     local webhook_url="https://${DOMAIN}${TELEGRAM_WEBHOOK_PATH}"
 
     if [[ "$TELEGRAM_WEBHOOK_ALREADY_SET" == "true" ]]; then
-        print_info "Вебхук уже настроен пользователем — регистрация пропущена"
+        print_info "URL вебхука уже совпадает — обновляем секрет: ${BOLD}${webhook_url}${RESET}"
     else
         print_info "Регистрация webhook: ${BOLD}${webhook_url}${RESET}"
+    fi
 
-        local response
-        response=$(curl -s --max-time 15 -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
-            -H "Content-Type: application/json" \
-            -d "{\"url\": \"${webhook_url}\", \"secret_token\": \"${TELEGRAM_WEBHOOK_SECRET}\"}" \
-            2>/dev/null || echo '{"ok":false,"description":"curl error"}')
+    local response
+    response=$(curl -s --max-time 15 -X POST \
+        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+        -H "Content-Type: application/json" \
+        -d "{\"url\": \"${webhook_url}\", \"secret_token\": \"${TELEGRAM_WEBHOOK_SECRET}\"}" \
+        2>/dev/null || echo '{"ok":false,"description":"curl error"}')
 
-        if echo "$response" | grep -q '"ok":true'; then
-            print_ok "Telegram webhook успешно зарегистрирован"
-        else
-            print_error "Ошибка регистрации webhook: $response"
-            print_info "Для ручной регистрации выполните:"
-            echo -e "    ${CYAN}curl -X POST \"https://api.telegram.org/bot<TOKEN>/setWebhook\" \\"
-            echo -e "      -H \"Content-Type: application/json\" \\"
-            echo -e "      -d '{\"url\": \"${webhook_url}\", \"secret_token\": \"<SECRET>\"}'${RESET}"
-        fi
+    if echo "$response" | grep -q '"ok":true'; then
+        print_ok "Telegram webhook успешно зарегистрирован"
+    else
+        print_error "Ошибка регистрации webhook: $response"
+        print_info "Для ручной регистрации выполните:"
+        echo -e "    ${CYAN}curl -X POST \"https://api.telegram.org/bot<TOKEN>/setWebhook\" \\"
+        echo -e "      -H \"Content-Type: application/json\" \\"
+        echo -e "      -d '{\"url\": \"${webhook_url}\", \"secret_token\": \"<SECRET>\"}'${RESET}"
     fi
 
     # Verification: send a test request with the secret token

@@ -234,6 +234,7 @@ class HandlersTestCase(unittest.IsolatedAsyncioTestCase):
         self.context.args = ["sg99"]
         await cmd_connect(update, self.context)
         self.mirror.connect_mapping.assert_awaited_once_with(-100123, "sg99", 55, "")
+        self.mirror.bitrix.send_message.assert_awaited_once_with("Связка установлена", dialog_id="sg99")
 
     async def test_cmd_connect_token_success_bypasses_admin(self) -> None:
         from handlers import cmd_connect
@@ -255,6 +256,7 @@ class HandlersTestCase(unittest.IsolatedAsyncioTestCase):
         
         self.mirror.state_store.verify_and_consume_token.assert_awaited_once_with("chat42", "valid_token_123")
         self.mirror.connect_mapping.assert_awaited_once_with(-100123, "chat42", None, "")
+        self.mirror.bitrix.send_message.assert_awaited_once_with("Связка установлена", dialog_id="chat42")
         msg.reply_text.assert_awaited_once()
         self.mirror.is_admin.assert_not_called()
 

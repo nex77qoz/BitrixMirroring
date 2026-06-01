@@ -164,3 +164,23 @@ class TestServerApp(unittest.IsolatedAsyncioTestCase):
         conn.close()
         self.assertEqual(len(rows), 1)
         mock_send_bot_message.assert_called_once()
+
+
+class DbConnectWalLoggingTest(unittest.TestCase):
+    def test_db_connect_logs_warning_when_wal_pragma_fails(self) -> None:
+        _server_side = os.path.join(os.path.dirname(__file__), "..", "server-side")
+        if _server_side not in sys.path:
+            sys.path.insert(0, _server_side)
+
+        from unittest.mock import patch, MagicMock
+        import monitor_app
+
+        mock_conn = MagicMock(spec=sqlite3.Connection)
+        mock_conn.execute.side_effect = sqlite3.OperationalError("disk I/O error")
+
+        with patch("monitor_app.sqlite3.connect", return_value=mock_conn):
+            with self.assertLogs("monitor_app", level="WARNING") as log_ctx:
+                conn = monitor_app._db_connect()
+
+        self.assertIn("WAL", " ".join(log_ctx.output))
+        self.assertIs(conn, mock_conn)

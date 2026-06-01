@@ -663,6 +663,7 @@ class MirrorStateStore:
     def _verify_and_consume_token_sync(self, bitrix_dialog_id: str, token: str) -> bool:
         now = int(time.time())
         with self._connect() as connection:
+            connection.execute("BEGIN EXCLUSIVE")
             row = connection.execute(
                 "SELECT id, bitrix_dialog_id FROM pending_connections WHERE token = ? AND expires_at_unix >= ?",
                 (token, now),

@@ -164,6 +164,18 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         is_expired_valid = await self.store.verify_and_consume_token("chat123", expired_token)
         self.assertFalse(is_expired_valid)
 
+    async def test_concurrent_token_consumption_is_atomic(self) -> None:
+        """Two simultaneous calls must return exactly one True."""
+        token = "racetoken"
+        expires_at = int(time.time()) + 600
+        await self.store.save_pending_connection("chat42", token, expires_at)
+
+        results = await asyncio.gather(
+            self.store.verify_and_consume_token("chat42", token),
+            self.store.verify_and_consume_token("chat42", token),
+        )
+        self.assertEqual(sum(results), 1, "Exactly one concurrent call should consume the token")
+
     async def test_initialize_deduplicates_existing_mappings(self) -> None:
         db_path = os.path.join(self.tempdir.name, "state_migration.sqlite3")
         # 1. Create a schema with duplicates (simulating legacy database before unique index was added)

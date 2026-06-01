@@ -32,14 +32,14 @@ SERVICES=("bitrix-telegram-mirror" "bitrix-bot" "bitrix-monitor")
 SVC_USER="bitrix-bot"
 SVC_GROUP="bitrix-bot"
 
-# Set to true by step_setup_ssl when user skips SSL
-SKIP_SSL=false
+# Set to true by step_setup_ssl when user skips SSL (empty by default, prompts if interactive)
+SKIP_SSL=""
 
-# Set to true when user says Telegram webhook is already configured
-TELEGRAM_WEBHOOK_ALREADY_SET=false
+# Set to true when user says Telegram webhook is already configured (empty by default, prompts if interactive)
+TELEGRAM_WEBHOOK_ALREADY_SET=""
 
-# SSH auth mode: "key" or "both"
-SSH_AUTH_MODE="both"
+# SSH auth mode: "key" or "both" (if unset, prompts user interactively)
+SSH_AUTH_MODE=""
 
 # Monitor allowed IPs (populated during config collection)
 MONITOR_ALLOWED_IPS=""

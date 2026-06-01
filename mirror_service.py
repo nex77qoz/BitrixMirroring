@@ -546,6 +546,9 @@ class MirrorService:
                 break
 
     async def _throttled_poll(self, application: Application, mapping: ChatMapping) -> None:
+        assert self._poll_semaphore is not None, (
+            "_poll_semaphore is None — call start_bitrix_polling() before scheduling polls"
+        )
         async with self._poll_semaphore:
             try:
                 if mapping.bitrix_dialog_id not in self._last_seen_bitrix_message_ids:

@@ -100,8 +100,13 @@ def _check_auth(credentials: HTTPBasicCredentials = Depends(security)) -> str:
 
 
 def _db_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
@@ -155,6 +160,14 @@ def _ensure_chat_mappings_table() -> None:
                 key        TEXT PRIMARY KEY,
                 value      TEXT NOT NULL,
                 updated_at_unix INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_admins (
+                tg_user_id   INTEGER PRIMARY KEY,
+                added_at_unix INTEGER NOT NULL
             )
             """
         )
@@ -461,6 +474,10 @@ class ForwardingUpdate(BaseModel):
     enabled: bool
 
 
+class AdminCreate(BaseModel):
+    tg_user_id: int
+
+
 def _normalize_topic_ids(topic_ids: list[int]) -> list[int]:
     result: list[int] = []
     seen: set[int] = set()
@@ -626,6 +643,49 @@ def api_delete_mapping(mapping_id: int, _: str = Depends(_check_auth)):
         conn.close()
 
 
+@app.get("/monitor/api/admins")
+def api_get_admins(_: str = Depends(_check_auth)):
+    conn = _db_connect()
+    try:
+        rows = conn.execute(
+            "SELECT tg_user_id, added_at_unix FROM telegram_admins ORDER BY added_at_unix"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.post("/monitor/api/admins", status_code=201)
+def api_add_admin(body: AdminCreate, _: str = Depends(_check_auth)):
+    conn = _db_connect()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO telegram_admins (tg_user_id, added_at_unix) VALUES (?, ?)",
+            (body.tg_user_id, int(time.time())),
+        )
+        conn.commit()
+        return {"ok": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.delete("/monitor/api/admins/{tg_user_id}")
+def api_delete_admin(tg_user_id: int, _: str = Depends(_check_auth)):
+    conn = _db_connect()
+    try:
+        conn.execute("DELETE FROM telegram_admins WHERE tg_user_id = ?", (tg_user_id,))
+        conn.commit()
+        return {"ok": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
 @app.post("/monitor/api/services/{service_key}/restart")
 def api_restart(service_key: str, _: str = Depends(_check_auth)):
     if service_key not in SERVICES:
@@ -734,7 +794,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
       <div class="flex items-center gap-2">
-        <button onclick="loadStatus(); loadMappings()"
+        <button onclick="loadStatus(); loadMappings(); loadAdmins()"
                 class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg transition-colors">
           ↻ Обновить
         </button>
@@ -752,6 +812,45 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Переадресация сообщений</h2>
       <div id="forwardingCard" class="bg-white rounded-xl shadow p-5">
         <div class="text-sm text-gray-400">Загрузка…</div>
+      </div>
+    </section>
+
+    <!-- ── Telegram Admins ───────────────────────────────────────────────── -->
+    <section>
+      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Администраторы Telegram</h2>
+      <div class="bg-white rounded-xl shadow overflow-hidden">
+        <div class="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
+          <span class="font-medium text-gray-700 text-sm">Администраторы бота</span>
+          <span class="text-xs text-gray-500">(могут использовать /connect и /disconnect)</span>
+        </div>
+        <table class="min-w-full text-sm">
+          <thead class="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
+            <tr>
+              <th class="px-5 py-2.5 text-left font-medium">Telegram User ID</th>
+              <th class="px-5 py-2.5 text-left font-medium">Добавлен</th>
+              <th class="px-5 py-2.5"></th>
+            </tr>
+          </thead>
+          <tbody id="adminsBody" class="divide-y divide-gray-50">
+            <tr><td colspan="3" class="px-5 py-4 text-center text-gray-400">Загрузка…</td></tr>
+          </tbody>
+        </table>
+        <div class="px-5 py-4 bg-gray-50 border-t border-gray-100">
+          <p class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Добавить администратора</p>
+          <div class="flex gap-2 items-end">
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500">Telegram User ID</label>
+              <input id="newAdminId" type="number"
+                     class="w-48 px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="123456789">
+            </div>
+            <button id="addAdminBtn" onclick="addAdmin()"
+                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50">
+              Добавить
+            </button>
+          </div>
+          <p id="addAdminMsg" class="hidden mt-2 text-xs"></p>
+        </div>
       </div>
     </section>
 
@@ -932,6 +1031,7 @@ async function doLogin() {
       document.getElementById('app').classList.remove('hidden');
       startPolling();
       loadMappings();
+      loadAdmins();
     } else if (r.status === 401) {
       AUTH_HEADER = '';
       showLoginErr('Неверные учётные данные');
@@ -1454,6 +1554,93 @@ async function addMapping() {
 
 function showAddMsg(msg, type) {
   const el = document.getElementById('addMappingMsg');
+  el.textContent = msg;
+  el.className = 'mt-2 text-xs ' + (type === 'error' ? 'text-red-600' : 'text-green-700');
+}
+
+// ── Admins ───────────────────────────────────────────────────────────────────
+async function loadAdmins() {
+  try {
+    const r = await apiFetch('/monitor/api/admins');
+    if (!r.ok) return;
+    renderAdmins(await r.json());
+  } catch (_) {}
+}
+
+function renderAdmins(admins) {
+  const tbody = document.getElementById('adminsBody');
+  tbody.innerHTML = '';
+  if (!admins.length) {
+    tbody.innerHTML = '<tr><td colspan="3" class="px-5 py-4 text-sm text-gray-400 text-center">Нет администраторов. Добавьте через форму ниже.</td></tr>';
+    return;
+  }
+  for (const a of admins) {
+    const tr = document.createElement('tr');
+    tr.className = 'hover:bg-gray-50';
+    const addedDate = a.added_at_unix
+      ? new Date(a.added_at_unix * 1000).toLocaleString()
+      : '—';
+    tr.innerHTML = `
+      <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${escHtml(String(a.tg_user_id))}</td>
+      <td class="px-5 py-2.5 text-sm text-gray-500">${escHtml(addedDate)}</td>
+      <td class="px-5 py-2.5">
+        <button onclick="deleteAdmin(${a.tg_user_id})"
+                class="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-medium rounded-lg transition-colors">
+          Удалить
+        </button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+async function deleteAdmin(tgUserId) {
+  if (!confirm('Удалить администратора ' + tgUserId + '?')) return;
+  const r = await apiFetch('/monitor/api/admins/' + tgUserId, { method: 'DELETE' });
+  if (r.ok) {
+    loadAdmins();
+  } else {
+    const e = await r.json().catch(() => ({}));
+    alert('Ошибка: ' + (e.detail || r.status));
+  }
+}
+
+async function addAdmin() {
+  const idRaw = document.getElementById('newAdminId').value.trim();
+  const msgEl = document.getElementById('addAdminMsg');
+  msgEl.className = 'hidden mt-2 text-xs';
+
+  if (!idRaw) { showAdminMsg('Введите Telegram User ID', 'error'); return; }
+  const tgUserId = parseInt(idRaw, 10);
+  if (isNaN(tgUserId) || tgUserId <= 0) {
+    showAdminMsg('ID должен быть положительным числом', 'error'); return;
+  }
+
+  const btn = document.getElementById('addAdminBtn');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/monitor/api/admins', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tg_user_id: tgUserId })
+    });
+    if (r.ok) {
+      document.getElementById('newAdminId').value = '';
+      showAdminMsg('Администратор добавлен', 'ok');
+      loadAdmins();
+    } else {
+      const e = await r.json().catch(() => ({}));
+      showAdminMsg('Ошибка: ' + (e.detail || r.status), 'error');
+    }
+  } catch (err) {
+    showAdminMsg('Ошибка: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function showAdminMsg(msg, type) {
+  const el = document.getElementById('addAdminMsg');
   el.textContent = msg;
   el.className = 'mt-2 text-xs ' + (type === 'error' ? 'text-red-600' : 'text-green-700');
 }

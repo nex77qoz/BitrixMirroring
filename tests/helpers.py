@@ -72,7 +72,7 @@ def make_message(**overrides: object) -> SimpleNamespace:
         "chat_id": -1001234567890,
         "message_id": 100,
         "message_thread_id": None,
-        "chat": SimpleNamespace(id=-1001234567890, type="supergroup", title="Team"),
+        "chat": SimpleNamespace(id=-1001234567890, type="supergroup", title="Team", is_forum=True),
         "from_user": SimpleNamespace(is_bot=False, username="alice", full_name="Alice Example"),
         "sender_chat": None,
         "reply_to_message": None,

@@ -503,6 +503,13 @@ step_collect_config() {
     print_info "Если оставить пустым, доступ будет открыт (только HTTP Basic Auth)."
     ask_optional MONITOR_ALLOWED_IPS "Разрешённые IP-адреса для панели мониторинга"
 
+    # Telegram admin IDs
+    echo ""
+    print_info "Telegram ID администраторов бота (для команд /connect и /disconnect)."
+    print_info "Можно указать несколько через запятую: 123456789,987654321"
+    print_info "Оставьте пустым — добавите позже через панель мониторинга."
+    ask_optional TG_ADMIN_IDS "Telegram ID администраторов"
+
     print_ok "Конфигурация собрана"
 }
 
@@ -1113,6 +1120,38 @@ SQL
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# STEP — Seed Telegram admins into DB
+# ──────────────────────────────────────────────────────────────────────────────
+step_setup_admins() {
+    print_step "Настройка администраторов Telegram"
+
+    if [[ -z "${TG_ADMIN_IDS:-}" ]]; then
+        print_warn "Telegram-администраторы не настроены. Добавьте через панель мониторинга: https://${DOMAIN}/monitor"
+        return 0
+    fi
+
+    local counter=0
+    IFS=',' read -ra _admin_ids <<< "$TG_ADMIN_IDS"
+    for _id in "${_admin_ids[@]}"; do
+        _id=$(echo "$_id" | xargs)   # trim whitespace
+        if [[ "$_id" =~ ^[0-9]+$ ]]; then
+            sqlite3 "$DB_FILE" \
+                "INSERT OR IGNORE INTO telegram_admins (tg_user_id, added_at_unix) VALUES($_id, $(date +%s));"
+            print_ok "Администратор добавлен: $_id"
+            (( counter++ )) || true
+        else
+            print_warn "Пропущен некорректный Telegram ID: '$_id'"
+        fi
+    done
+
+    if [[ $counter -eq 0 ]]; then
+        print_warn "Ни одного корректного ID не добавлено."
+    else
+        print_ok "Итого добавлено администраторов: $counter"
+    fi
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 # STEP 10 — Fail2ban
 # ──────────────────────────────────────────────────────────────────────────────
 step_setup_fail2ban() {
@@ -1578,6 +1617,7 @@ main() {
             step_setup_logrotate
             step_create_file_cache
             step_chat_mapping
+            step_setup_admins
             step_health_checks
             print_summary
             ;;

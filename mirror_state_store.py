@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from models import CursorState, MessageMirrorLink, MirrorOrigin
+from settings import ChatMapping, _parse_topic_ids
 
 logger = logging.getLogger("tg-bitrix-mirror")
 
@@ -275,7 +276,7 @@ class MirrorStateStore:
             if "topic_ids" not in chat_mapping_columns:
                 connection.execute("ALTER TABLE chat_mappings ADD COLUMN topic_ids TEXT DEFAULT ''")
             connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_mappings_bitrix_dialog_id ON chat_mappings(bitrix_dialog_id)"
+                "DROP INDEX IF EXISTS idx_chat_mappings_bitrix_dialog_id"
             )
 
             # topic_names table — cache for Telegram forum topic names
@@ -299,6 +300,27 @@ class MirrorStateStore:
                 )
                 """
             )
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_admins (
+                    tg_user_id   INTEGER PRIMARY KEY,
+                    added_at_unix INTEGER NOT NULL
+                )
+                """
+            )
+
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS pending_connections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bitrix_dialog_id TEXT NOT NULL,
+                    token TEXT NOT NULL UNIQUE,
+                    expires_at_unix INTEGER NOT NULL,
+                    created_at_unix INTEGER NOT NULL
+                )
+            """)
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_pending_connections_token ON pending_connections(token)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_pending_connections_expires ON pending_connections(expires_at_unix)")
 
             connection.commit()
 
@@ -553,11 +575,132 @@ class MirrorStateStore:
             )
             connection.commit()
 
+    async def is_admin(self, tg_user_id: int) -> bool:
+        return await asyncio.to_thread(self._is_admin_sync, tg_user_id)
+
+    def _is_admin_sync(self, tg_user_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM telegram_admins WHERE tg_user_id = ?",
+                (tg_user_id,),
+            ).fetchone()
+        return row is not None
+
+    async def save_pending_connection(self, bitrix_dialog_id: str, token: str, expires_at_unix: int) -> None:
+        await asyncio.to_thread(self._save_pending_connection_sync, bitrix_dialog_id, token, expires_at_unix)
+
+    def _save_pending_connection_sync(self, bitrix_dialog_id: str, token: str, expires_at_unix: int) -> None:
+        now = int(time.time())
+        with self._connect() as connection:
+            connection.execute("DELETE FROM pending_connections WHERE expires_at_unix < ?", (now,))
+            connection.execute(
+                "INSERT INTO pending_connections (bitrix_dialog_id, token, expires_at_unix, created_at_unix) VALUES (?, ?, ?, ?)",
+                (bitrix_dialog_id, token, expires_at_unix, now),
+            )
+            connection.commit()
+
+    async def verify_and_consume_token(self, bitrix_dialog_id: str, token: str) -> bool:
+        return await asyncio.to_thread(self._verify_and_consume_token_sync, bitrix_dialog_id, token)
+
+    def _verify_and_consume_token_sync(self, bitrix_dialog_id: str, token: str) -> bool:
+        now = int(time.time())
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, bitrix_dialog_id FROM pending_connections WHERE token = ? AND expires_at_unix >= ?",
+                (token, now),
+            ).fetchone()
+            if row is None:
+                return False
+            db_dialog_id = row[1]
+            if db_dialog_id != bitrix_dialog_id:
+                return False
+            connection.execute("DELETE FROM pending_connections WHERE token = ?", (token,))
+            connection.commit()
+            return True
+
+    async def load_all_chat_mappings(self) -> tuple[ChatMapping, ...]:
+        return await asyncio.to_thread(self._load_all_chat_mappings_sync)
+
+    def _load_all_chat_mappings_sync(self) -> tuple[ChatMapping, ...]:
+        with self._connect() as connection:
+            try:
+                rows = connection.execute(
+                    "SELECT id, tg_chat_id, bitrix_dialog_id, topic_ids, label "
+                    "FROM chat_mappings ORDER BY created_at_unix, id"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return ()
+        return tuple(
+            ChatMapping(
+                mapping_id=int(row[0]),
+                tg_chat_id=int(row[1]),
+                bitrix_dialog_id=str(row[2]),
+                topic_ids=_parse_topic_ids(str(row[3]) if row[3] else ""),
+                label=str(row[4]) if row[4] is not None else "",
+            )
+            for row in rows
+        )
+
+    async def add_chat_mapping(
+        self,
+        tg_chat_id: int,
+        bitrix_dialog_id: str,
+        topic_ids: list[int],
+        label: str,
+    ) -> int:
+        return await asyncio.to_thread(
+            self._add_chat_mapping_sync, tg_chat_id, bitrix_dialog_id, topic_ids, label
+        )
+
+    def _add_chat_mapping_sync(
+        self,
+        tg_chat_id: int,
+        bitrix_dialog_id: str,
+        topic_ids: list[int],
+        label: str,
+    ) -> int:
+        topic_ids_str = ",".join(str(t) for t in topic_ids)
+        now = int(time.time())
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO chat_mappings "
+                "(tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) "
+                "VALUES (?,?,?,?,?)",
+                (tg_chat_id, bitrix_dialog_id, label, now, topic_ids_str),
+            )
+            connection.commit()
+            return cursor.lastrowid  # type: ignore[return-value]
+
+    async def update_chat_mapping_topic_ids(self, mapping_id: int, topic_ids: list[int]) -> None:
+        await asyncio.to_thread(self._update_chat_mapping_topic_ids_sync, mapping_id, topic_ids)
+
+    def _update_chat_mapping_topic_ids_sync(self, mapping_id: int, topic_ids: list[int]) -> None:
+        topic_ids_str = ",".join(str(t) for t in topic_ids)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE chat_mappings SET topic_ids = ? WHERE id = ?",
+                (topic_ids_str, mapping_id),
+            )
+            connection.commit()
+
+    async def remove_chat_mapping(self, mapping_id: int) -> bool:
+        return await asyncio.to_thread(self._remove_chat_mapping_sync, mapping_id)
+
+    def _remove_chat_mapping_sync(self, mapping_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM chat_mappings WHERE id = ?", (mapping_id,)
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self._path)
+        connection = sqlite3.connect(self._path, timeout=30.0)
         connection.row_factory = sqlite3.Row
         try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
             yield connection
         finally:
             connection.close()

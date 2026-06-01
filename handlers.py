@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType
 from telegram.ext import ContextTypes
 
@@ -10,14 +12,149 @@ from mirror_service import MirrorService
 
 logger = logging.getLogger("tg-bitrix-mirror")
 
+_bot_reply_ids: dict[int, list[int]] = {}
+
+_ADMIN_CALLBACK_PREFIX = "admin:"
+_SERVICE_NAMES = ("bitrix-bot", "bitrix-monitor", "bitrix-telegram-mirror")
+
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
-    await update.effective_message.reply_text(
+    if update.effective_chat and update.effective_chat.type == ChatType.PRIVATE:
+        mirror: MirrorService = context.application.bot_data["mirror_service"]
+        if await _check_admin(update, mirror):
+            await _reply_admin_panel(update.effective_message, mirror)
+            return
+        await update.effective_message.reply_text("Нет доступа.")
+        return
+    sent = await update.effective_message.reply_text(
         "Бот запущен.\n"
         "Команда /whereami покажет chat_id текущего чата и thread_id темы."
     )
+    _bot_reply_ids.setdefault(update.effective_chat.id, []).append(sent.message_id)
+
+
+async def on_private_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat or chat.type != ChatType.PRIVATE:
+        return
+
+    mirror: MirrorService = context.application.bot_data["mirror_service"]
+    if not await _check_admin(update, mirror):
+        await msg.reply_text("Нет доступа.")
+        return
+    await _reply_admin_panel(msg, mirror)
+
+
+async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or not query.data or not query.data.startswith(_ADMIN_CALLBACK_PREFIX):
+        return
+
+    mirror: MirrorService = context.application.bot_data["mirror_service"]
+    if not await _check_admin(update, mirror):
+        await query.answer("Нет доступа", show_alert=True)
+        return
+
+    await query.answer()
+    action = query.data.removeprefix(_ADMIN_CALLBACK_PREFIX)
+
+    if action == "mappings":
+        await mirror.reload_mappings()
+        await query.edit_message_text(
+            _render_mappings(mirror),
+            reply_markup=_admin_panel_markup(mirror),
+        )
+        return
+
+    if action == "forwarding:off":
+        await mirror.set_forwarding_enabled(False)
+        await query.edit_message_text(
+            "Пересылка остановлена.",
+            reply_markup=_admin_panel_markup(mirror),
+        )
+        return
+
+    if action == "forwarding:on":
+        await mirror.set_forwarding_enabled(True)
+        await query.edit_message_text(
+            "Пересылка включена.",
+            reply_markup=_admin_panel_markup(mirror),
+        )
+        return
+
+    if action == "restart":
+        await query.edit_message_text("Перезагрузка служб запущена.")
+        _schedule_service_restart(context)
+
+
+async def _reply_admin_panel(message, mirror: MirrorService) -> None:
+    status = "включена" if mirror.is_forwarding_enabled() else "остановлена"
+    await message.reply_text(
+        f"Админ-панель. Пересылка: {status}.",
+        reply_markup=_admin_panel_markup(mirror),
+    )
+
+
+def _admin_panel_markup(mirror: MirrorService) -> InlineKeyboardMarkup:
+    forwarding_enabled = mirror.is_forwarding_enabled()
+    forwarding_text = "Остановить пересылку" if forwarding_enabled else "Включить пересылку"
+    forwarding_action = "admin:forwarding:off" if forwarding_enabled else "admin:forwarding:on"
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Проверить маппинги", callback_data="admin:mappings")],
+            [InlineKeyboardButton(forwarding_text, callback_data=forwarding_action)],
+            [InlineKeyboardButton("Перезагрузить службы", callback_data="admin:restart")],
+        ]
+    )
+
+
+def _render_mappings(mirror: MirrorService) -> str:
+    mappings = mirror.get_chat_mappings()
+    if not mappings:
+        return "Маппинги не настроены."
+
+    lines = ["Текущие маппинги:"]
+    for mapping in mappings:
+        topics = ", ".join(str(topic_id) for topic_id in sorted(mapping.topic_ids)) or "все"
+        label = f" ({mapping.label})" if mapping.label else ""
+        lines.append(
+            f"#{mapping.mapping_id}{label}: TG {mapping.tg_chat_id} topics {topics} -> Bitrix {mapping.bitrix_dialog_id}"
+        )
+    return "\n".join(lines)
+
+
+def _schedule_service_restart(context: ContextTypes.DEFAULT_TYPE) -> None:
+    task = _delayed_restart_bot_services()
+    create_task = getattr(context.application, "create_task", None)
+    if callable(create_task):
+        create_task(task)
+    else:
+        asyncio.create_task(task, name="restart-bot-services")
+
+
+async def _delayed_restart_bot_services() -> None:
+    await asyncio.sleep(1)
+    await _restart_bot_services()
+
+
+async def _restart_bot_services() -> None:
+    for service_name in _SERVICE_NAMES:
+        process = await asyncio.create_subprocess_exec(
+            "sudo",
+            "-n",
+            "systemctl",
+            "restart",
+            service_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            details = (stderr or stdout).decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"Failed to restart {service_name}: {details}")
 
 
 async def cmd_whereami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -25,7 +162,7 @@ async def cmd_whereami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     msg = update.effective_message
     chat = update.effective_chat
-    await msg.reply_text(
+    sent = await msg.reply_text(
         "\n".join(
             [
                 f"chat_id: {chat.id}",
@@ -35,6 +172,7 @@ async def cmd_whereami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             ]
         )
     )
+    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -187,3 +325,117 @@ async def on_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE
 # Telegram Bot API does not provide a universal deleted-message update for ordinary bot polling,
 # so Telegram -> Bitrix delete cannot be implemented reliably here.
 
+_BITRIX_ID_RE = re.compile(r"^(chat\d+|sg\d+|\d+)$")
+
+
+async def _check_admin(update: Update, mirror: "MirrorService") -> bool:
+    user = update.effective_user
+    if not user:
+        return False
+    return await mirror.is_admin(user.id)
+
+
+async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return
+
+    mirror: MirrorService = context.application.bot_data["mirror_service"]
+    args = context.args or []
+    
+    if len(args) == 2:
+        # Token-based flow for self-service connection (no admin check required!)
+        bitrix_dialog_id = args[0].strip()
+        token = args[1].strip()
+        
+        if not _BITRIX_ID_RE.match(bitrix_dialog_id):
+            sent = await msg.reply_text("Неверный формат Bitrix Chat ID.")
+            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            return
+
+        is_valid = await mirror.state_store.verify_and_consume_token(bitrix_dialog_id, token)
+        if not is_valid:
+            sent = await msg.reply_text("⚠️ Неверный, использованный или просроченный токен подключения.")
+            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            return
+            
+    elif len(args) == 1:
+        # Traditional admin-only connection flow
+        if not await _check_admin(update, mirror):
+            return
+        bitrix_dialog_id = args[0].strip()
+        if not _BITRIX_ID_RE.match(bitrix_dialog_id):
+            sent = await msg.reply_text("Неверный формат Bitrix Chat ID.")
+            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            return
+    else:
+        sent = await msg.reply_text(
+            "Использование:\n"
+            "Самостоятельно: `/connect <BitrixChatId> <Token>`\n"
+            "Для администраторов: `/connect <BitrixChatId>`"
+        )
+        _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+        return
+
+    is_forum = getattr(chat, "is_forum", False)
+    topic_id = msg.message_thread_id if is_forum else None
+    try:
+        await mirror.connect_mapping(chat.id, bitrix_dialog_id, topic_id, "")
+    except ValueError as exc:
+        sent = await msg.reply_text(f"⚠️ {exc}")
+        _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+        return
+
+    thread_info = f" (ветка #{topic_id})" if topic_id else ""
+    sent = await msg.reply_text(f"✅ Связка установлена: {bitrix_dialog_id} ↔ этот чат{thread_info}")
+    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+
+
+async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return
+
+    mirror: MirrorService = context.application.bot_data["mirror_service"]
+    if not await _check_admin(update, mirror):
+        return
+
+    is_forum = getattr(chat, "is_forum", False)
+    topic_id = msg.message_thread_id if is_forum else None
+    removed = await mirror.disconnect_mapping(chat.id, topic_id)
+    if removed:
+        thread_info = f" (ветка #{topic_id})" if topic_id else ""
+        sent = await msg.reply_text(f"✅ Связка удалена для этого чата{thread_info}.")
+    else:
+        sent = await msg.reply_text("⚠️ Связка для этого чата/ветки не найдена.")
+    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+
+
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return
+
+    mirror: MirrorService = context.application.bot_data["mirror_service"]
+    if not await _check_admin(update, mirror):
+        return
+
+    ids = _bot_reply_ids.pop(chat.id, [])
+    for mid in ids:
+        try:
+            await context.bot.delete_message(chat_id=chat.id, message_id=mid)
+        except Exception:
+            pass
+    try:
+        await msg.delete()
+    except Exception:
+        pass

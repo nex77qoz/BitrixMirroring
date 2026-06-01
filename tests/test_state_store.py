@@ -96,3 +96,72 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         await self.store.save_topic_name(100, 200, "Topic A")
         topics = await self.store.load_topic_names()
         self.assertEqual(topics[(100, 200)], "Topic A")
+
+    async def test_is_admin_returns_false_when_empty(self) -> None:
+        result = await self.store.is_admin(999)
+        self.assertFalse(result)
+
+    async def test_is_admin_true_after_insert(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO telegram_admins (tg_user_id, added_at_unix) VALUES (42, 1000)")
+        conn.commit()
+        conn.close()
+        self.assertTrue(await self.store.is_admin(42))
+        self.assertFalse(await self.store.is_admin(99))
+
+    async def test_load_all_chat_mappings_empty(self) -> None:
+        mappings = await self.store.load_all_chat_mappings()
+        self.assertEqual(mappings, ())
+
+    async def test_add_and_load_chat_mapping(self) -> None:
+        mapping_id = await self.store.add_chat_mapping(
+            tg_chat_id=-100123,
+            bitrix_dialog_id="chat999",
+            topic_ids=[7, 8],
+            label="test label",
+        )
+        self.assertIsInstance(mapping_id, int)
+        mappings = await self.store.load_all_chat_mappings()
+        self.assertEqual(len(mappings), 1)
+        m = mappings[0]
+        self.assertEqual(m.tg_chat_id, -100123)
+        self.assertEqual(m.bitrix_dialog_id, "chat999")
+        self.assertEqual(m.topic_ids, (7, 8))
+        self.assertEqual(m.label, "test label")
+
+    async def test_add_chat_mapping_same_bitrix_id_different_topics_allowed(self) -> None:
+        await self.store.add_chat_mapping(-100123, "chat999", [1], "first")
+        await self.store.add_chat_mapping(-100123, "chat999", [2], "second")
+        mappings = await self.store.load_all_chat_mappings()
+        self.assertEqual(len(mappings), 2)
+
+    async def test_remove_chat_mapping(self) -> None:
+        mapping_id = await self.store.add_chat_mapping(-100123, "chat999", [], "")
+        removed = await self.store.remove_chat_mapping(mapping_id)
+        self.assertTrue(removed)
+        self.assertEqual(await self.store.load_all_chat_mappings(), ())
+
+    async def test_remove_nonexistent_mapping_returns_false(self) -> None:
+        removed = await self.store.remove_chat_mapping(9999)
+        self.assertFalse(removed)
+
+    async def test_pending_connections_flow(self):
+        # 1. Generate token
+        token = "testtoken123"
+        expires_at = int(time.time()) + 600
+        await self.store.save_pending_connection("chat123", token, expires_at)
+        
+        # 2. Verify valid token
+        is_valid = await self.store.verify_and_consume_token("chat123", token)
+        self.assertTrue(is_valid)
+        
+        # 3. Double consumption must fail
+        is_valid_again = await self.store.verify_and_consume_token("chat123", token)
+        self.assertFalse(is_valid_again)
+        
+        # 4. Expired token must fail
+        expired_token = "expired456"
+        await self.store.save_pending_connection("chat123", expired_token, int(time.time()) - 10)
+        is_expired_valid = await self.store.verify_and_consume_token("chat123", expired_token)
+        self.assertFalse(is_expired_valid)
+

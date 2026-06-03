@@ -219,6 +219,11 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         converted = _bbcode_to_html("[b]Hi[/b] <script>")
         self.assertEqual(converted, "<b>Hi</b> &lt;script&gt;")
 
+    async def test_bbcode_plain_url(self) -> None:
+        url = "https://www.technoavia.ru/closed-area/corp_universitet/siz_pechat"
+        converted = _bbcode_to_html(f"[URL]{url}[/URL]")
+        self.assertEqual(converted, f'<a href="{url}">{url}</a>')
+
     async def test_is_admin_delegates_to_state_store(self) -> None:
         self.state_store.is_admin = AsyncMock(return_value=True)
         result = await self.service.is_admin(42)

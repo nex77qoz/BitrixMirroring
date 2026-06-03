@@ -1248,6 +1248,17 @@ CREATE TABLE IF NOT EXISTS telegram_admins (
     tg_user_id INTEGER PRIMARY KEY,
     added_at_unix INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS topic_names (
+    tg_chat_id INTEGER NOT NULL,
+    topic_id   INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    PRIMARY KEY (tg_chat_id, topic_id)
+);
+CREATE TABLE IF NOT EXISTS runtime_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at_unix INTEGER NOT NULL
+);
 SQL
 
     # Ensure permissions for service user
@@ -1274,7 +1285,7 @@ step_restore_db_from_backup() {
         return 0
     fi
 
-    python3 - "$DB_FILE" "$db_json" << 'PYEOF'
+    python3 - "$DB_FILE" "$db_json" 2>>"$LOG_FILE" << 'PYEOF'
 import json, sqlite3, sys
 
 db_path, json_path = sys.argv[1], sys.argv[2]

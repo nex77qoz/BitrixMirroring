@@ -473,7 +473,12 @@ step_restore_backup() {
 
     # Validate structure and extract env vars into a temp shell script
     local tmp_env_sh
-    tmp_env_sh=$(mktemp /tmp/bitrix-bot-env-XXXXXX.sh)
+    tmp_env_sh=$(mktemp /tmp/bitrix-bot-env-XXXXXX.sh) || {
+        print_error "Не удалось создать временный файл"
+        print_warn "Продолжаем без восстановления"
+        BACKUP_FILE=""
+        return 0
+    }
 
     if ! python3 - "$BACKUP_FILE" "$tmp_env_sh" << 'PYEOF'
 import json, sys, shlex
@@ -509,6 +514,9 @@ with open(out_path, "w", encoding="utf-8") as f:
 
 # Save DB portion separately
 import os
+if not out_path:
+    print("ERROR: путь к временному файлу пуст", file=sys.stderr)
+    sys.exit(1)
 db_out = os.path.join(os.path.dirname(out_path), "bitrix-bot-db-restore.json")
 with open(db_out, "w", encoding="utf-8") as f:
     json.dump(data["db"], f, ensure_ascii=False)

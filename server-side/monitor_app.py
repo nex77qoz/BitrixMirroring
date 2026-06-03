@@ -28,8 +28,8 @@ from typing import Optional
 
 from dotenv import load_dotenv
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.responses import HTMLResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 
@@ -49,6 +49,8 @@ DB_PATH = (
     if os.path.isabs(_DB_RAW)
     else str(Path(__file__).resolve().parent.parent / _DB_RAW)
 )
+
+_ENV_FILE_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 MONITOR_USERNAME = os.getenv("MONITOR_USERNAME", "admin")
 MONITOR_PASSWORD = os.getenv("MONITOR_PASSWORD", "")
@@ -444,6 +446,55 @@ def _get_forwarding_status() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Backup helpers
+# ---------------------------------------------------------------------------
+
+_BACKUP_TABLES = (
+    "chat_mappings",
+    "cursor_state",
+    "message_links",
+    "topic_names",
+    "telegram_admins",
+    "runtime_settings",
+)
+
+
+def _read_env_file() -> dict[str, str]:
+    env: dict[str, str] = {}
+    try:
+        text = _ENV_FILE_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return env
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+            val = val[1:-1]
+        if key:
+            env[key] = val
+    return env
+
+
+def _read_db_for_backup() -> dict[str, list[dict]]:
+    conn = _db_connect()
+    try:
+        result: dict[str, list[dict]] = {}
+        for table in _BACKUP_TABLES:
+            try:
+                rows = conn.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608
+                result[table] = [dict(r) for r in rows]
+            except sqlite3.OperationalError:
+                result[table] = []
+        return result
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
@@ -687,6 +738,27 @@ def api_delete_admin(tg_user_id: int, _: str = Depends(_check_auth)):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
         conn.close()
+
+
+@app.get("/monitor/api/backup")
+def api_export_backup(_: str = Depends(_check_auth)) -> Response:
+    import datetime
+    env_data = _read_env_file()
+    db_data = _read_db_for_backup()
+    payload = {
+        "version": "1",
+        "exported_at": int(time.time()),
+        "env": env_data,
+        "db": db_data,
+    }
+    date_str = datetime.date.today().isoformat()
+    filename = f"bitrix-bot-backup-{date_str}.json"
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/monitor/api/services/{service_key}/restart")

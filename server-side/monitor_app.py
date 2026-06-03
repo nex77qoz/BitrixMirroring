@@ -475,6 +475,8 @@ def _read_env_file() -> dict[str, str]:
         val = val.strip()
         if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
             val = val[1:-1]
+        # Unescape backslash-escaped quotes written by _write_env_file
+        val = val.replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
         if key:
             env[key] = val
     return env
@@ -501,10 +503,29 @@ def _write_env_file(env: dict[str, str]) -> None:
         "",
     ]
     for key, val in env.items():
-        escaped = str(val).replace("\\", "\\\\").replace('"', '\\"')
+        # Skip keys that are not valid identifiers or contain newlines
+        if not key or "\n" in key or "\r" in key:
+            continue
+        # Strip newlines from values to prevent line injection
+        val = str(val).replace("\r", "").replace("\n", " ")
+        escaped = val.replace("\\", "\\\\").replace('"', '\\"')
         lines.append(f'{key}="{escaped}"')
-    _ENV_FILE_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _ENV_FILE_PATH.chmod(0o600)
+    content = "\n".join(lines) + "\n"
+    # Write atomically with correct permissions (no race window)
+    import tempfile
+    dir_ = _ENV_FILE_PATH.parent
+    fd, tmp_path = tempfile.mkstemp(dir=dir_, prefix=".env.tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, _ENV_FILE_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _restore_db_from_backup(db_data: dict) -> dict[str, int]:

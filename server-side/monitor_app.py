@@ -984,6 +984,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
 
+    <!-- ── Backup ──────────────────────────────────────────────────────────── -->
+    <section>
+      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Резервное копирование</h2>
+      <div class="bg-white rounded-xl shadow p-5">
+        <div class="flex flex-col gap-4">
+          <div>
+            <button onclick="downloadBackup()" id="downloadBackupBtn"
+                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50">
+              ⬇ Скачать резервную копию
+            </button>
+          </div>
+          <div>
+            <p class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Восстановить из файла</p>
+            <div class="flex gap-2 items-center flex-wrap">
+              <input type="file" id="backupFileInput" accept=".json"
+                     class="text-sm text-gray-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200">
+              <button onclick="uploadBackup()" id="uploadBackupBtn"
+                      class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50">
+                Восстановить
+              </button>
+            </div>
+            <p id="backupMsg" class="hidden mt-2 text-xs"></p>
+          </div>
+          <div class="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+            <span class="shrink-0">⚠</span>
+            <span>Файл содержит секреты (токены, пароли). После восстановления перезапустите сервисы Mirror и Webhook.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section>
       <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Переадресация сообщений</h2>
       <div id="forwardingCard" class="bg-white rounded-xl shadow p-5">
@@ -1828,6 +1859,81 @@ function escHtml(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ── Backup ───────────────────────────────────────────────────────────────────
+async function downloadBackup() {
+  const btn = document.getElementById('downloadBackupBtn');
+  btn.disabled = true;
+  btn.textContent = 'Загрузка…';
+  try {
+    const r = await apiFetch('/monitor/api/backup');
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      alert('Ошибка: ' + (e.detail || r.status));
+      return;
+    }
+    const blob = await r.blob();
+    const cd = r.headers.get('content-disposition') || '';
+    const match = cd.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] : 'bitrix-bot-backup.json';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert('Ошибка: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⬇ Скачать резервную копию';
+  }
+}
+
+async function uploadBackup() {
+  const input = document.getElementById('backupFileInput');
+  if (!input.files || !input.files[0]) {
+    showBackupMsg('Выберите файл резервной копии', 'error');
+    return;
+  }
+  if (!confirm('Это заменит все данные БД и перезапишет .env. Продолжить?')) return;
+  const btn = document.getElementById('uploadBackupBtn');
+  btn.disabled = true;
+  btn.textContent = 'Восстановление…';
+  try {
+    const formData = new FormData();
+    formData.append('file', input.files[0]);
+    const r = await fetch('/monitor/api/backup', {
+      method: 'POST',
+      headers: { 'Authorization': AUTH_HEADER },
+      body: formData,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showBackupMsg('Ошибка: ' + (data.detail || r.status), 'error');
+      return;
+    }
+    const tables = data.tables_restored || {};
+    const summary = Object.entries(tables).map(([t, n]) => t + ': ' + n).join(', ');
+    showBackupMsg('Восстановлено (' + summary + '). Перезапустите сервисы Mirror и Webhook.', 'ok');
+    input.value = '';
+    loadMappings();
+    loadAdmins();
+  } catch (err) {
+    showBackupMsg('Ошибка: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Восстановить';
+  }
+}
+
+function showBackupMsg(msg, type) {
+  const el = document.getElementById('backupMsg');
+  el.textContent = msg;
+  el.className = 'mt-2 text-xs ' + (type === 'error' ? 'text-red-600' : 'text-green-700');
 }
 
 // ── Keyboard shortcuts ───────────────────────────────────────────────────────

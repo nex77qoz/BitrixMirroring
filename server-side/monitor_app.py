@@ -15,6 +15,7 @@ Environment variables (shared with the main .env):
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
@@ -28,7 +29,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 import httpx
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile  # noqa: F401
 from fastapi.responses import HTMLResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
@@ -742,7 +743,6 @@ def api_delete_admin(tg_user_id: int, _: str = Depends(_check_auth)):
 
 @app.get("/monitor/api/backup")
 def api_export_backup(_: str = Depends(_check_auth)) -> Response:
-    import datetime
     env_data = _read_env_file()
     db_data = _read_db_for_backup()
     payload = {

@@ -495,6 +495,45 @@ def _read_db_for_backup() -> dict[str, list[dict]]:
         conn.close()
 
 
+def _write_env_file(env: dict[str, str]) -> None:
+    lines = [
+        f"# Restored from backup on {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+    ]
+    for key, val in env.items():
+        escaped = str(val).replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'{key}="{escaped}"')
+    _ENV_FILE_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _ENV_FILE_PATH.chmod(0o600)
+
+
+def _restore_db_from_backup(db_data: dict) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    conn = _db_connect()
+    try:
+        conn.execute("BEGIN")
+        for table in _BACKUP_TABLES:
+            rows = db_data.get(table) or []
+            conn.execute(f"DELETE FROM {table}")  # noqa: S608
+            for row in rows:
+                if not row:
+                    continue
+                cols = ", ".join(str(k) for k in row.keys())
+                placeholders = ", ".join("?" * len(row))
+                conn.execute(
+                    f"INSERT INTO {table} ({cols}) VALUES ({placeholders})",  # noqa: S608
+                    list(row.values()),
+                )
+            counts[table] = len(rows)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        conn.close()
+        raise
+    conn.close()
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -759,6 +798,47 @@ def api_export_backup(_: str = Depends(_check_auth)) -> Response:
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.post("/monitor/api/backup")
+async def api_import_backup(
+    file: UploadFile = File(...),
+    _: str = Depends(_check_auth),
+) -> dict:
+    content = await file.read()
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Невалидный JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Ожидается JSON-объект")
+    if payload.get("version") != "1":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Неподдерживаемая версия бэкапа: {payload.get('version')!r}",
+        )
+    if not isinstance(payload.get("env"), dict):
+        raise HTTPException(status_code=400, detail='Отсутствует или невалидное поле "env"')
+    if not isinstance(payload.get("db"), dict):
+        raise HTTPException(status_code=400, detail='Отсутствует или невалидное поле "db"')
+
+    try:
+        counts = _restore_db_from_backup(payload["db"])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Ошибка восстановления БД: {exc}") from exc
+
+    env_written = False
+    env_error: Optional[str] = None
+    try:
+        _write_env_file(payload["env"])
+        env_written = True
+    except Exception as exc:
+        env_error = str(exc)
+
+    result: dict = {"ok": True, "tables_restored": counts, "env_written": env_written}
+    if env_error is not None:
+        result["env_error"] = env_error
+    return result
 
 
 @app.post("/monitor/api/services/{service_key}/restart")

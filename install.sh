@@ -1257,6 +1257,75 @@ SQL
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# STEP — Restore DB tables from backup (runs after step_init_db)
+# ──────────────────────────────────────────────────────────────────────────────
+step_restore_db_from_backup() {
+    if [[ "${BACKUP_LOADED:-false}" != "true" ]]; then
+        return 0
+    fi
+
+    print_step "Восстановление базы данных из резервной копии"
+
+    # Find the temp DB file written by step_restore_backup
+    local db_json
+    db_json=$(find /tmp -maxdepth 1 -name "bitrix-bot-db-restore.json" 2>/dev/null | head -n1)
+    if [[ -z "$db_json" || ! -f "$db_json" ]]; then
+        print_warn "Временный файл данных не найден — пропускаем восстановление БД"
+        return 0
+    fi
+
+    python3 - "$DB_FILE" "$db_json" << 'PYEOF'
+import json, sqlite3, sys
+
+db_path, json_path = sys.argv[1], sys.argv[2]
+
+with open(json_path, encoding="utf-8") as f:
+    db_data = json.load(f)
+
+TABLES = (
+    "chat_mappings", "cursor_state", "message_links",
+    "topic_names", "telegram_admins", "runtime_settings",
+)
+
+conn = sqlite3.connect(db_path, timeout=30)
+try:
+    conn.execute("BEGIN")
+    for table in TABLES:
+        rows = db_data.get(table) or []
+        conn.execute(f"DELETE FROM {table}")
+        for row in rows:
+            if not row:
+                continue
+            cols = ", ".join(str(k) for k in row.keys())
+            placeholders = ", ".join("?" * len(row))
+            conn.execute(
+                f"INSERT INTO {table} ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+        print(f"{table}: {len(rows)}")
+    conn.execute("COMMIT")
+except Exception as e:
+    conn.execute("ROLLBACK")
+    conn.close()
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+conn.close()
+PYEOF
+
+    local py_exit=$?
+    if [[ $py_exit -ne 0 ]]; then
+        print_error "Ошибка при восстановлении базы данных. Подробности: $LOG_FILE"
+    else
+        print_ok "База данных восстановлена"
+    fi
+
+    rm -f "$db_json"
+
+    chown "$SVC_USER:$SVC_GROUP" "$DB_FILE" 2>/dev/null || true
+    chmod 660 "$DB_FILE" 2>/dev/null || true
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 # STEP — Seed Telegram admins into DB
 # ──────────────────────────────────────────────────────────────────────────────
 step_setup_admins() {
@@ -1819,6 +1888,7 @@ main() {
             step_setup_logrotate
             step_create_file_cache
             step_init_db
+            step_restore_db_from_backup
             step_setup_admins
             step_health_checks
             print_summary

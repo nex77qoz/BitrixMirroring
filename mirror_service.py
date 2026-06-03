@@ -30,6 +30,8 @@ _BBCODE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\[s\](.*?)\[/s\]", re.DOTALL | re.IGNORECASE), r"<s>\1</s>"),
     (re.compile(r"\[code\](.*?)\[/code\]", re.DOTALL | re.IGNORECASE), r"<code>\1</code>"),
     (re.compile(r"\[quote\](.*?)\[/quote\]", re.DOTALL | re.IGNORECASE), r"<blockquote>\1</blockquote>"),
+    # [URL]https://example.com[/URL] — plain URL without label
+    (re.compile(r"\[url\](.*?)\[/url\]", re.DOTALL | re.IGNORECASE), r'<a href="\1">\1</a>'),
     # [url=https://example.com]label[/url]
     (re.compile(r"\[url=([^\]]+)\](.*?)\[/url\]", re.DOTALL | re.IGNORECASE), r'<a href="\1">\2</a>'),
     # [color=red]text[/color] — Telegram has no colour support; strip the tags, keep content

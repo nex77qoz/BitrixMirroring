@@ -536,14 +536,19 @@ def _restore_db_from_backup(db_data: dict) -> dict[str, int]:
         for table in _BACKUP_TABLES:
             rows = db_data.get(table) or []
             conn.execute(f"DELETE FROM {table}")  # noqa: S608
+            # Fetch valid column names for this table to prevent SQL injection via column names
+            valid_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608
             for row in rows:
                 if not row:
                     continue
-                cols = ", ".join(str(k) for k in row.keys())
-                placeholders = ", ".join("?" * len(row))
+                filtered = {k: v for k, v in row.items() if str(k) in valid_cols}
+                if not filtered:
+                    continue
+                cols = ", ".join(str(k) for k in filtered.keys())
+                placeholders = ", ".join("?" * len(filtered))
                 conn.execute(
                     f"INSERT INTO {table} ({cols}) VALUES ({placeholders})",  # noqa: S608
-                    list(row.values()),
+                    list(filtered.values()),
                 )
             counts[table] = len(rows)
         conn.execute("COMMIT")

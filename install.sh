@@ -1304,14 +1304,18 @@ try:
     for table in TABLES:
         rows = db_data.get(table) or []
         conn.execute(f"DELETE FROM {table}")
+        valid_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         for row in rows:
             if not row:
                 continue
-            cols = ", ".join(str(k) for k in row.keys())
-            placeholders = ", ".join("?" * len(row))
+            filtered = {k: v for k, v in row.items() if str(k) in valid_cols}
+            if not filtered:
+                continue
+            cols = ", ".join(str(k) for k in filtered.keys())
+            placeholders = ", ".join("?" * len(filtered))
             conn.execute(
                 f"INSERT INTO {table} ({cols}) VALUES ({placeholders})",
-                list(row.values()),
+                list(filtered.values()),
             )
         print(f"{table}: {len(rows)}")
     conn.execute("COMMIT")
@@ -1597,6 +1601,11 @@ print_summary() {
     echo -e "    Файловый кэш:  ${CYAN}${FILE_CACHE_DIR}${RESET}"
     echo -e "    Лог установки:  ${CYAN}${LOG_FILE}${RESET}"
     echo -e "    nginx-конфиг:   ${CYAN}${NGINX_CONF}${RESET}"
+    if [[ "${BACKUP_LOADED:-false}" == "true" ]]; then
+        echo ""
+        print_warn "Установка выполнена из резервной копии."
+        print_warn "Проверьте ${ENV_FILE} — нестандартные переменные из бэкапа могут не попасть в шаблон .env"
+    fi
     echo ""
     echo -e "${BOLD}  URL:${RESET}"
     local scheme="https"

@@ -25,6 +25,8 @@ SSL_DIR="/etc/ssl/bitrix-bot"
 SSL_CERT="${SSL_DIR}/cert.pem"
 SSL_KEY="${SSL_DIR}/key.pem"
 FILE_CACHE_DIR="$INSTALL_DIR/file_cache"
+BACKUP_FILE=""    # path to backup JSON (empty = no backup)
+BACKUP_LOADED=false
 
 SERVICES=("bitrix-telegram-mirror" "bitrix-bot" "bitrix-monitor")
 
@@ -447,10 +449,121 @@ SSHEOF
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# STEP 4d — Restore from backup (optional, runs before config collection)
+# ──────────────────────────────────────────────────────────────────────────────
+step_restore_backup() {
+    print_step "Восстановление из резервной копии"
+
+    if [[ -z "${BACKUP_FILE:-}" ]]; then
+        echo -en "  ${YELLOW}Есть файл резервной копии? (y/N): ${RESET}"
+        read -r has_backup
+        if [[ "${has_backup,,}" != "y" && "${has_backup,,}" != "д" ]]; then
+            print_info "Восстановление пропущено — продолжаем обычную установку"
+            return 0
+        fi
+        ask_input BACKUP_FILE "Путь к файлу резервной копии"
+    fi
+
+    if [[ ! -f "$BACKUP_FILE" ]]; then
+        print_error "Файл не найден: $BACKUP_FILE"
+        print_warn "Продолжаем без восстановления"
+        BACKUP_FILE=""
+        return 0
+    fi
+
+    # Validate structure and extract env vars into a temp shell script
+    local tmp_env_sh
+    tmp_env_sh=$(mktemp /tmp/bitrix-bot-env-XXXXXX.sh)
+
+    if ! python3 - "$BACKUP_FILE" "$tmp_env_sh" << 'PYEOF'
+import json, sys, shlex
+
+backup_path, out_path = sys.argv[1], sys.argv[2]
+try:
+    with open(backup_path, encoding="utf-8") as f:
+        data = json.load(f)
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+
+if not isinstance(data, dict):
+    print("ERROR: ожидается JSON-объект", file=sys.stderr)
+    sys.exit(1)
+if data.get("version") != "1":
+    print(f"ERROR: неподдерживаемая версия {data.get('version')!r}", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data.get("env"), dict):
+    print("ERROR: отсутствует поле 'env'", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data.get("db"), dict):
+    print("ERROR: отсутствует поле 'db'", file=sys.stderr)
+    sys.exit(1)
+
+lines = []
+for key, val in data["env"].items():
+    if key and key[0].isalpha() and key.replace("_", "").isalnum():
+        lines.append(f"export {key}={shlex.quote(str(val))}")
+
+with open(out_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+
+# Save DB portion separately
+import os
+db_out = os.path.join(os.path.dirname(out_path), "bitrix-bot-db-restore.json")
+with open(db_out, "w", encoding="utf-8") as f:
+    json.dump(data["db"], f, ensure_ascii=False)
+PYEOF
+    then
+        print_error "Не удалось разобрать файл резервной копии"
+        print_warn "Продолжаем без восстановления"
+        rm -f "$tmp_env_sh"
+        BACKUP_FILE=""
+        return 0
+    fi
+
+    # Source exported env vars
+    # shellcheck disable=SC1090
+    source "$tmp_env_sh"
+    rm -f "$tmp_env_sh"
+    print_ok "Конфигурация загружена из резервной копии"
+
+    # Handle domain — may differ on new server
+    local backup_domain="${APP_DOMAIN:-${DOMAIN:-}}"
+    if [[ -n "$backup_domain" ]]; then
+        print_info "Домен из резервной копии: ${BOLD}${backup_domain}${RESET}"
+        echo -en "  ${YELLOW}Использовать этот домен? (Y/n): ${RESET}"
+        read -r use_domain
+        if [[ "${use_domain,,}" == "n" || "${use_domain,,}" == "н" ]]; then
+            DOMAIN=""
+            APP_DOMAIN=""
+            ask_input DOMAIN "Новый домен сервера (например: bot.example.com)"
+            APP_DOMAIN="$DOMAIN"
+        else
+            DOMAIN="$backup_domain"
+            APP_DOMAIN="$DOMAIN"
+        fi
+    else
+        ask_input DOMAIN "Домен сервера (например: bot.example.com)"
+        APP_DOMAIN="$DOMAIN"
+    fi
+    BOT_HANDLER_URL="https://${DOMAIN}/bitrix/bot"
+    TELEGRAM_WEBHOOK_PUBLIC_URL="https://${DOMAIN}"
+    TELEGRAM_WEBHOOK_PATH="${TELEGRAM_WEBHOOK_PATH:-/telegram/webhook}"
+
+    BACKUP_LOADED=true
+    print_ok "База данных будет восстановлена после инициализации"
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 # STEP 5 — Interactive configuration
 # ──────────────────────────────────────────────────────────────────────────────
 step_collect_config() {
     print_step "Сбор конфигурации"
+
+    if [[ "${BACKUP_LOADED:-false}" == "true" ]]; then
+        print_ok "Конфигурация загружена из резервной копии — пропускаем интерактивный ввод"
+        return 0
+    fi
 
     echo -e "\n${BOLD}  Введите параметры бота (все поля обязательны):${RESET}\n"
 
@@ -1686,6 +1799,7 @@ main() {
             step_python_deps
             step_create_service_user
             step_configure_ssh
+            step_restore_backup
             step_collect_config
             step_write_env
             step_setup_ssl

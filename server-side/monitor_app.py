@@ -476,7 +476,7 @@ def _read_env_file() -> dict[str, str]:
         if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
             val = val[1:-1]
         # Unescape backslash-escaped quotes written by _write_env_file
-        val = val.replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
+        val = val.replace('\\\\', '\\').replace('\\"', '"').replace("\\'", "'")
         if key:
             env[key] = val
     return env

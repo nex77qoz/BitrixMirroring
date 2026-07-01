@@ -43,6 +43,7 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(link.telegram_message_thread_id, 300)
         await self.store.upsert_link(telegram_chat_id=4, telegram_message_id=5, bitrix_message_id=3, origin=MirrorOrigin.BITRIX, telegram_message_date_unix=None, bitrix_author_id=22, last_seen_bitrix_revision='rev2')
         replaced = await self.store.get_link_by_bitrix_message(bitrix_message_id=3)
+        assert replaced is not None
         self.assertEqual((replaced.telegram_chat_id, replaced.telegram_message_id), (4, 5))
 
     async def test_cleanup_and_topic_names(self) -> None:

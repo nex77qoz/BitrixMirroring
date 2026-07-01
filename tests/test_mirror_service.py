@@ -203,6 +203,7 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         app = SimpleNamespace()
         await service.start(app)
         self.assertIsNotNone(service._bitrix_event_task)
+        assert service._bitrix_event_task is not None
         self.assertFalse(service._bitrix_event_task.done())
         old_task = service._bitrix_event_task
         await service.reload_mappings()

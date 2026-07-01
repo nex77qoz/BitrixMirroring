@@ -14,6 +14,7 @@ class ModelsTestCase(unittest.TestCase):
 
     def test_bitrix_user_uses_full_name(self) -> None:
         user = BitrixUser.from_api_payload({"id": 5, "last_name": "Ivanov", "NAME": "Ivan"})
+        assert user is not None
         self.assertEqual(user.display_name, "Ivanov Ivan")
 
     def test_bitrix_message_accepts_camel_case_author_id(self) -> None:
@@ -81,5 +82,6 @@ class ModelsTestCase(unittest.TestCase):
         event = BitrixBotEvent.from_api_payload(
             {"eventId": 12, "type": "MESSAGE_ADD", "data": {"messageId": 3}}
         )
+        assert event is not None
         self.assertEqual(event.event_type, "MESSAGE_ADD")
         self.assertEqual(event.data, {"messageId": 3})

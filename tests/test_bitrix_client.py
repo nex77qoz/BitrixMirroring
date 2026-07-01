@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from bitrix_client import BitrixClient
 from models import BitrixBotEvent, BitrixEventPage

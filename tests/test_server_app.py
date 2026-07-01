@@ -75,8 +75,8 @@ class DbConnectWalLoggingTest(unittest.TestCase):
         if _server_side not in sys.path:
             sys.path.insert(0, _server_side)
 
-        from unittest.mock import MagicMock
         import sqlite3
+        from unittest.mock import MagicMock
 
         import monitor_app
 

@@ -21,7 +21,7 @@ ignore = [
 "main.py" = ["F841", "UP038"]
 "mirror_state_store.py" = ["S608", "UP038", "F841"]
 "bitrix_client.py" = ["B904", "UP038"]
-"mirror_service.py" = ["B007", "S110", "RUF006"]
+"mirror_service.py" = ["B007", "S110", "RUF006", "RUF001", "RUF002", "RUF003"]
 "settings.py" = ["B904"]
 "handlers.py" = ["B904", "RUF006", "S110"]
 

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from settings import ChatMapping, Settings
 from models import BitrixBotEvent
+from settings import ChatMapping, Settings
 
 
 def make_mapping(

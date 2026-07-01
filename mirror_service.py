@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import dataclasses
 import hashlib
@@ -7,13 +8,25 @@ import logging
 import re
 from io import BytesIO
 from pathlib import Path
+from typing import Any
+
 from telegram import Message, ReactionTypeEmoji
 from telegram.error import BadRequest, ChatMigrated
 from telegram.ext import Application
+
 from bitrix_client import BitrixClient
 from mirror_state_store import MirrorStateStore
-from models import BitrixFile, BitrixMessage, MessageMirrorLink, MirrorOrigin, BitrixUser, BitrixDialogSnapshot
+from models import (
+    BitrixBotEvent,
+    BitrixDialogSnapshot,
+    BitrixFile,
+    BitrixMessage,
+    BitrixUser,
+    MessageMirrorLink,
+    MirrorOrigin,
+)
 from settings import ChatMapping, Settings
+
 logger = logging.getLogger('tg-bitrix-mirror')
 _BBCODE_PATTERNS: list[tuple[re.Pattern[str], str]] = [(re.compile('\\[b\\](.*?)\\[/b\\]', re.DOTALL | re.IGNORECASE), '<b>\\1</b>'), (re.compile('\\[i\\](.*?)\\[/i\\]', re.DOTALL | re.IGNORECASE), '<i>\\1</i>'), (re.compile('\\[u\\](.*?)\\[/u\\]', re.DOTALL | re.IGNORECASE), '<u>\\1</u>'), (re.compile('\\[s\\](.*?)\\[/s\\]', re.DOTALL | re.IGNORECASE), '<s>\\1</s>'), (re.compile('\\[code\\](.*?)\\[/code\\]', re.DOTALL | re.IGNORECASE), '<code>\\1</code>'), (re.compile('\\[quote\\](.*?)\\[/quote\\]', re.DOTALL | re.IGNORECASE), '<blockquote>\\1</blockquote>'), (re.compile('\\[url\\](.*?)\\[/url\\]', re.DOTALL | re.IGNORECASE), '<a href="\\1">\\1</a>'), (re.compile('\\[url=([^\\]]+)\\](.*?)\\[/url\\]', re.DOTALL | re.IGNORECASE), '<a href="\\1">\\2</a>'), (re.compile('\\[color=[^\\]]+\\](.*?)\\[/color\\]', re.DOTALL | re.IGNORECASE), '\\1')]
 
@@ -72,7 +85,7 @@ class MirrorService:
         return self._bitrix_to_mapping.get(dialog_id)
 
     def get_chat_mappings(self) -> tuple[ChatMapping, ...]:
-        return tuple((mapping for mappings in self._tg_to_mappings.values() for mapping in mappings))
+        return tuple(mapping for mappings in self._tg_to_mappings.values() for mapping in mappings)
 
     def resolve_mapping_for_telegram_message(self, message: Message) -> ChatMapping | None:
         is_forum = getattr(message.chat, 'is_forum', False)
@@ -94,7 +107,7 @@ class MirrorService:
             if len(multi_topic_mappings) == 1:
                 return multi_topic_mappings[0]
             if len(multi_topic_mappings) > 1:
-                logger.warning('Main feed is ambiguous for tg_chat_id=%s: multiple many-topics mappings found (%s); dropping message', tg_chat_id, ', '.join((str(mapping.mapping_id) for mapping in multi_topic_mappings)))
+                logger.warning('Main feed is ambiguous for tg_chat_id=%s: multiple many-topics mappings found (%s); dropping message', tg_chat_id, ', '.join(str(mapping.mapping_id) for mapping in multi_topic_mappings))
                 return None
         catch_all_mappings = [mapping for mapping in mappings if not mapping.topic_ids]
         if len(catch_all_mappings) == 1:
@@ -312,7 +325,7 @@ class MirrorService:
             try:
                 await self.state_store.save_pending_connection(dialog_id, token, expires_at)
                 reply = f'🔑 Одноразовый токен сгенерирован.\nОтправьте следующую команду в вашей Telegram-группе в течение 10 минут:\n\n/connect {dialog_id} {token}'
-            except Exception as e:
+            except Exception:
                 logger.exception('Failed to create pending connection token')
                 reply = '⚠️ Не удалось создать токен подключения. Попробуйте позже.'
             await self.bitrix.send_message(reply, dialog_id=dialog_id, reply_id=bitrix_message.message_id)
@@ -474,7 +487,7 @@ class MirrorService:
         elif action == 'delete':
             likes_set.discard(user_id)
         sorted_likes = sorted(likes_set)
-        likes_str = ','.join((str(uid) for uid in sorted_likes))
+        likes_str = ','.join(str(uid) for uid in sorted_likes)
         await self._sync_bitrix_reaction_to_telegram(self._application, link, bool(likes_set))
         await self.state_store.update_reaction_state(bitrix_message_id=message_id, bitrix_liked_by_bot=link.bitrix_liked_by_bot, last_seen_bitrix_likes=likes_str)
 
@@ -533,7 +546,7 @@ class MirrorService:
                 if not has_more:
                     try:
                         await asyncio.wait_for(self._stop_event.wait(), timeout=self.settings.bitrix_poll_interval_seconds)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         pass
             except asyncio.CancelledError:
                 break
@@ -542,7 +555,7 @@ class MirrorService:
                 self._poll_error_count += 1
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=backoff)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 backoff = min(backoff * 2, self.settings.bitrix_poll_max_backoff_seconds)
 
@@ -810,14 +823,14 @@ class MirrorService:
             chunks.append(label)
         if message.contact:
             contact = message.contact
-            contact_name = ' '.join((part for part in [contact.first_name, contact.last_name or ''] if part)).strip()
+            contact_name = ' '.join(part for part in [contact.first_name, contact.last_name or ''] if part).strip()
             chunks.append(f'[Контакт] {contact_name} | {contact.phone_number}')
         if message.location:
             location = message.location
             chunks.append(f'[Локация] https://maps.google.com/maps?q={location.latitude},{location.longitude}')
         if message.poll:
             poll = message.poll
-            options = ', '.join((opt.text for opt in poll.options))
+            options = ', '.join(opt.text for opt in poll.options)
             chunks.append(f'[Опрос] {poll.question} | {options}')
         return '\n'.join(chunks)
 
@@ -831,7 +844,7 @@ class MirrorService:
         digest = hashlib.sha256()
         digest.update(bitrix_message.text.encode('utf-8', errors='ignore'))
         digest.update(b'|')
-        digest.update(';'.join((str(file_id) for file_id in bitrix_message.file_ids)).encode('ascii', errors='ignore'))
+        digest.update(';'.join(str(file_id) for file_id in bitrix_message.file_ids).encode('ascii', errors='ignore'))
         return digest.hexdigest()
 
     async def _periodic_cleanup_loop(self) -> None:

@@ -1,11 +1,15 @@
 from __future__ import annotations
+
 import asyncio
 import base64
 import logging
 from typing import Any, cast
+
 import httpx
-from models import BitrixBotEvent, BitrixEventPage, BitrixFile, BitrixMessage, BitrixUser
+
+from models import BitrixBotEvent, BitrixEventPage
 from settings import Settings
+
 logger = logging.getLogger('tg-bitrix-mirror')
 
 class BitrixClient:
@@ -83,9 +87,9 @@ class BitrixClient:
         next_offset = result.get('nextOffset')
         if not isinstance(events, list) or (next_offset is not None and type(next_offset) is not int):
             raise RuntimeError(f'Unexpected Bitrix event response: {data}')
-        if any((not isinstance(event, dict) or type(event.get('eventId')) is not int for event in events)):
+        if any(not isinstance(event, dict) or type(event.get('eventId')) is not int for event in events):
             raise RuntimeError(f'Bitrix event cannot be acknowledged safely: {data}')
-        return BitrixEventPage(events=tuple((BitrixBotEvent.from_api_payload(event) for event in events)), next_offset=next_offset, has_more=bool(result.get('hasMore')))
+        return BitrixEventPage(events=tuple(BitrixBotEvent.from_api_payload(event) for event in events), next_offset=next_offset, has_more=bool(result.get('hasMore')))
 
     async def download_file(self, url: str) -> bytes:
         for attempt in range(1, self.settings.bitrix_retry_attempts + 1):

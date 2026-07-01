@@ -3,13 +3,12 @@ import json
 import logging
 import os
 import re
-import secrets
-import sqlite3
-import time
 from pathlib import Path
 from urllib.parse import parse_qs
+
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+
 app = FastAPI()
 LOG_FILE = Path(os.getenv('BITRIX_LOG_PATH', '/opt/bitrix-bot/bitrix.log'))
 LOG_MAX_SIZE = 50 * 1024 * 1024
@@ -184,11 +183,6 @@ async def bitrix_bot(request: Request):
     reply_id = detect_reply_id(payload)
     bot_id = detect_bot_id(payload)
     write_log('DETECTED_CONTEXT', {'event': event, 'dialog_id': dialog_id, 'message_id': message_id, 'reply_id': reply_id, 'message_text': message_text[:200] if message_text else '', 'bot_id': bot_id, 'has_params': bool(params)})
-    is_local_command = False
-    if event == 'ONIMBOTMESSAGEADD' and message_text:
-        text_lower = message_text.lower().strip()
-        if text_lower in {'/start', 'start', '/ping', 'ping'}:
-            is_local_command = True
     try:
         if event == 'ONIMBOTJOINCHAT' and dialog_id:
             await send_bot_message(dialog_id=dialog_id, bot_id=bot_id, message='Привет. Бот подключён и готов к работе.')

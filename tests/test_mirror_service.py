@@ -1,13 +1,17 @@
 from __future__ import annotations
+
 import asyncio
 import dataclasses
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
 from telegram.error import BadRequest
+
 from mirror_service import MirrorService, _bbcode_to_html
-from models import BitrixDialogSnapshot, BitrixMessage, MirrorOrigin, MessageMirrorLink, BitrixEventPage
-from tests.helpers import make_mapping, make_message, make_settings, make_bitrix_event
+from models import BitrixEventPage, BitrixMessage, MessageMirrorLink, MirrorOrigin
+from tests.helpers import make_bitrix_event, make_mapping, make_message, make_settings
+
 
 class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
 

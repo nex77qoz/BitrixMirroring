@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import logging
 import sqlite3
@@ -7,8 +8,10 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
 from models import MessageMirrorLink, MirrorOrigin
 from settings import ChatMapping, _parse_topic_ids
+
 logger = logging.getLogger('tg-bitrix-mirror')
 
 class MirrorStateStore:
@@ -134,7 +137,7 @@ class MirrorStateStore:
                                 labels.append(label_str)
                         else:
                             logger.warning('Discarding duplicate mapping for bitrix_dialog_id %s in tg_chat_id %s (keeping tg_chat_id %s)', dup_dialog_id, tg_chat_id, merged_tg_chat_id)
-                    merged_topics_str = ','.join((str(t) for t in all_topics))
+                    merged_topics_str = ','.join(str(t) for t in all_topics)
                     merged_label = ', '.join(labels)
                     logger.warning('Merging legacy duplicates for bitrix_dialog_id %s in tg_chat_id %s: topic_ids=%s, label=%s', dup_dialog_id, merged_tg_chat_id, merged_topics_str, merged_label)
                     connection.execute('UPDATE chat_mappings SET topic_ids = ?, label = ? WHERE id = ?', (merged_topics_str, merged_label, first_row_id))
@@ -289,13 +292,13 @@ class MirrorStateStore:
                 rows = connection.execute('SELECT id, tg_chat_id, bitrix_dialog_id, topic_ids, label FROM chat_mappings ORDER BY created_at_unix, id').fetchall()
             except sqlite3.OperationalError:
                 return ()
-        return tuple((ChatMapping(mapping_id=int(row[0]), tg_chat_id=int(row[1]), bitrix_dialog_id=str(row[2]), topic_ids=_parse_topic_ids(str(row[3]) if row[3] else ''), label=str(row[4]) if row[4] is not None else '') for row in rows))
+        return tuple(ChatMapping(mapping_id=int(row[0]), tg_chat_id=int(row[1]), bitrix_dialog_id=str(row[2]), topic_ids=_parse_topic_ids(str(row[3]) if row[3] else ''), label=str(row[4]) if row[4] is not None else '') for row in rows)
 
     async def add_chat_mapping(self, tg_chat_id: int, bitrix_dialog_id: str, topic_ids: list[int], label: str) -> int:
         return await asyncio.to_thread(self._add_chat_mapping_sync, tg_chat_id, bitrix_dialog_id, topic_ids, label)
 
     def _add_chat_mapping_sync(self, tg_chat_id: int, bitrix_dialog_id: str, topic_ids: list[int], label: str) -> int:
-        topic_ids_str = ','.join((str(t) for t in topic_ids))
+        topic_ids_str = ','.join(str(t) for t in topic_ids)
         now = int(time.time())
         with self._connect() as connection:
             try:
@@ -309,7 +312,7 @@ class MirrorStateStore:
         await asyncio.to_thread(self._update_chat_mapping_topic_ids_sync, mapping_id, topic_ids)
 
     def _update_chat_mapping_topic_ids_sync(self, mapping_id: int, topic_ids: list[int]) -> None:
-        topic_ids_str = ','.join((str(t) for t in topic_ids))
+        topic_ids_str = ','.join(str(t) for t in topic_ids)
         with self._connect() as connection:
             connection.execute('UPDATE chat_mappings SET topic_ids = ? WHERE id = ?', (topic_ids_str, mapping_id))
             connection.commit()

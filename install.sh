@@ -596,8 +596,8 @@ step_collect_config() {
     BOT_HANDLER_URL="https://${DOMAIN}/bitrix/bot"
     TELEGRAM_WEBHOOK_PUBLIC_URL="https://${DOMAIN}"
     TELEGRAM_WEBHOOK_PATH="/telegram/webhook"
-    print_info "URL обработчика бота: ${BOLD}${BOT_HANDLER_URL}${RESET}"
-    print_info "Укажите этот URL при регистрации бота в Битрикс (поле handler_url)"
+    print_info "URL локального обработчика (для совместимости/команд): ${BOLD}${BOT_HANDLER_URL}${RESET}"
+    print_info "В режиме eventMode=fetch поле handler_url при регистрации не требуется."
     print_info "URL Telegram webhook: ${BOLD}${TELEGRAM_WEBHOOK_PUBLIC_URL}${TELEGRAM_WEBHOOK_PATH}${RESET}"
 
     # Bot IDs
@@ -1552,7 +1552,7 @@ step_health_checks() {
             all_ok=false
         fi
     else
-        print_info "Internal /health проверка пропущена: main process работает в legacy polling mode"
+        print_info "Internal /health проверка пропущена: main process работает в fetch mode"
     fi
 
     # Webhook /bitrix/bot endpoint
@@ -1685,8 +1685,19 @@ print_summary() {
     done
     echo ""
     echo -e "${YELLOW}${BOLD}  ⚠  Не забудьте зарегистрировать бота в Битрикс!${RESET}"
-    echo -e "  URL для поля handler_url при вызове imbot.register:"
-    echo -e "    ${CYAN}${scheme}://${DOMAIN}/bitrix/bot${RESET}"
+    echo -e "  Для Chatbot API 2.0 выполните REST-запрос ${BOLD}imbot.v2.Bot.register${RESET} со следующим JSON-телом:"
+    echo -e "    ${CYAN}{"
+    echo -e "      \"code\": \"tg_mirror_bot\","
+    echo -e "      \"type\": \"supervisor\","
+    echo -e "      \"eventMode\": \"fetch\","
+    echo -e "      \"isHidden\": false,"
+    echo -e "      \"properties\": {"
+    echo -e "        \"name\": \"Telegram Mirror\","
+    echo -e "        \"desc\": \"Mirrors chats between Telegram and Bitrix24\""
+    echo -e "      }"
+    echo -e "    }${RESET}"
+    echo -e "  Сохраните полученный ${BOLD}botId${RESET} в ${BOLD}BITRIX_BOT_ID${RESET},"
+    echo -e "  а ${BOLD}botToken${RESET} в ${BOLD}BITRIX_BOT_CLIENT_ID${RESET} в вашем .env файле."
     if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
         echo ""
         echo -e "  Telegram webhook будет автоматически зарегистрирован на URL:"

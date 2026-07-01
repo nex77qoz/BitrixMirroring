@@ -160,29 +160,7 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
         current = await mirror.set_forwarding_enabled(enabled)
         return {"ok": True, "forwarding_enabled": current}
 
-    @app.post(settings.mirror_internal_event_path)
-    async def bitrix_event_bridge(request: Request) -> dict[str, object]:
-        if not settings.bitrix_webhook_bridge_enabled:
-            raise HTTPException(status_code=404, detail="Bitrix webhook bridge is disabled")
 
-        _verify_internal_secret(request)
-
-        payload = await request.json()
-        dialog_id = str(payload.get("dialog_id") or "").strip()
-        if not dialog_id:
-            raise HTTPException(status_code=400, detail="dialog_id is required")
-
-        event_name = str(payload.get("event") or "bitrix-webhook").strip() or "bitrix-webhook"
-
-        message_id_raw = payload.get("message_id")
-        message_id: int | None = int(message_id_raw) if isinstance(message_id_raw, (int, float)) else None
-        reply_id_raw = payload.get("reply_id")
-        reply_id: int | None = int(reply_id_raw) if isinstance(reply_id_raw, (int, float)) else None
-
-        accepted = await mirror.schedule_bitrix_dialog_sync(
-            dialog_id, trigger=event_name, message_id=message_id, reply_id=reply_id,
-        )
-        return {"ok": True, "accepted": accepted}
 
     @app.post(settings.telegram_webhook_path)
     async def telegram_webhook(request: Request) -> dict[str, object]:

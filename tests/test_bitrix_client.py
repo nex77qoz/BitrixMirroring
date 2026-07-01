@@ -75,44 +75,12 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(RuntimeError):
                     await self.client.get_bot_events(offset=None)
 
-    async def test_get_messages_page_parses_snapshot(self) -> None:
-        self.client._call = AsyncMock(
-            return_value={
-                "result": {
-                    "messages": [
-                        {"id": 5, "author_id": "11", "text": "b", "params": {"FILE_ID": "2"}},
-                        {"id": 4, "author_id": 10, "text": "a", "params": {"LIKE": ["9"]}},
-                    ],
-                    "users": [{"id": 10, "name": "Alice"}],
-                    "files": {"2": {"id": 2, "name": "doc.txt"}},
-                }
-            }
-        )
-        snapshot = await self.client.get_messages_page(dialog_id="chat42", limit=2)
-        self.assertEqual([item.message_id for item in snapshot.messages], [4, 5])
-        self.assertEqual(snapshot.users_by_id[10].display_name, "Alice")
-        self.assertEqual(snapshot.files_by_id[2].name, "doc.txt")
-
-    async def test_get_recent_messages_combines_pages(self) -> None:
-        self.client._call = AsyncMock(
-            side_effect=[
-                {
-                    "result": {
-                        "messages": [{"id": 7, "text": "w"}, {"id": 8, "text": "x"}],
-                        "users": [{"id": 1, "name": "Alice"}],
-                        "files": [],
-                    }
-                },
-                {
-                    "result": {
-                        "messages": [{"id": 9, "text": "y"}, {"id": 10, "text": "z"}],
-                        "users": [{"id": 2, "name": "Bob"}],
-                        "files": [],
-                    }
-                },
-            ]
-        )
-        with patch("bitrix_client.BITRIX_MESSAGES_PAGE_LIMIT", 2):
-            snapshot = await self.client.get_recent_messages(dialog_id="chat42", limit_total=4)
-        self.assertEqual([item.message_id for item in snapshot.messages], [7, 8, 9, 10])
-        self.assertEqual(sorted(snapshot.users_by_id), [1, 2])
+    def test_bitrix_delivery_code_contains_no_user_scoped_message_methods(self) -> None:
+        from pathlib import Path
+        sources = [
+            Path("bitrix_client.py").read_text(encoding="utf-8"),
+            Path("mirror_service.py").read_text(encoding="utf-8"),
+        ]
+        combined = "\n".join(sources)
+        self.assertNotIn("im.dialog.messages.get", combined)
+        self.assertNotIn("im.dialog.messages.search", combined)

@@ -497,22 +497,37 @@ def _read_db_for_backup() -> dict[str, list[dict]]:
 
 
 def _write_env_file(env: dict[str, str]) -> None:
+    # Read existing .env to preserve secrets that were redacted in the backup
+    existing_env: dict[str, str] = {}
+    if _ENV_FILE_PATH.exists():
+        existing_env = _read_env_file()
+
     lines = [
         f"# Restored from backup on {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
     ]
+    # Write all keys from the backup, preserving existing values for redacted secrets
     for key, val in env.items():
         # Skip keys that are not valid identifiers or contain newlines
         if not key or "\n" in key or "\r" in key:
             continue
-        # Skip redacted secrets — preserve existing values in .env
         str_val = str(val)
         if str_val == "***REDACTED***":
-            continue
+            # Preserve the existing value from current .env
+            if key in existing_env:
+                str_val = existing_env[key]
+            else:
+                continue  # No existing value, skip
         # Strip newlines from values to prevent line injection
         str_val = str_val.replace("\r", "").replace("\n", " ")
         escaped = str_val.replace("\\", "\\\\").replace('"', '\\"')
         lines.append(f'{key}="{escaped}"')
+    # Also preserve keys that exist in current .env but are missing from the backup
+    for key, val in existing_env.items():
+        if key not in env:
+            str_val = str(val).replace("\r", "").replace("\n", " ")
+            escaped = str_val.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'{key}="{escaped}"')
     content = "\n".join(lines) + "\n"
     # Write atomically with correct permissions (no race window)
     import tempfile

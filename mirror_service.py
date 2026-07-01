@@ -582,6 +582,7 @@ class MirrorService:
             except asyncio.CancelledError:
                 break
 
+            mapping = None
             try:
                 if not self._forwarding_enabled:
                     logger.info(
@@ -692,18 +693,12 @@ class MirrorService:
         logger.debug("Loaded full Bitrix snapshot for reconcile dialog=%s: message_count=%s", dialog_id, len(recent_snapshot.messages))
         await self._reconcile_recent_bitrix_messages(application, recent_snapshot)
 
-        # use rescan max message_id as incremental fetch starting point to avoid overlap
-        incremental_after = last_seen or 0
-        if recent_snapshot.messages:
-            rescan_max_id = max(msg.message_id for msg in recent_snapshot.messages)
-            incremental_after = max(incremental_after, rescan_max_id)
-
-        snapshot = await self.bitrix.get_messages_after(dialog_id=dialog_id, after_id=incremental_after, max_pages=20)
+        # incremental fetch from last_seen — idempotency check in _should_forward
+        # skips messages already processed by the rescan
+        snapshot = await self.bitrix.get_messages_after(dialog_id=dialog_id, after_id=last_seen or 0, max_pages=20)
         logger.debug(
-            "Loaded incremental Bitrix snapshot dialog=%s after_id=%s (rescan_max=%s, last_seen=%s): message_count=%s",
+            "Loaded incremental Bitrix snapshot dialog=%s after_id=%s: message_count=%s",
             dialog_id,
-            incremental_after,
-            recent_snapshot.messages and max(msg.message_id for msg in recent_snapshot.messages),
             last_seen,
             len(snapshot.messages),
         )
@@ -1346,7 +1341,7 @@ class MirrorService:
                 )
                 if deleted:
                     logger.info("Periodic DB cleanup: removed %s old link(s)", deleted)
-                    await asyncio.to_thread(self._cleanup_file_cache_sync)
+                await asyncio.to_thread(self._cleanup_file_cache_sync)
             except asyncio.CancelledError:
                 raise
             except Exception:

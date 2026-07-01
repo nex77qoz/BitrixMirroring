@@ -226,6 +226,10 @@ class MirrorStateStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_message_links_updated_at ON message_links(updated_at_unix)"
             )
+            # Drop redundant index — bitrix_message_id has a UNIQUE constraint that auto-indexes
+            connection.execute(
+                "DROP INDEX IF EXISTS idx_message_links_bitrix_message_id"
+            )
 
             # chat_mappings table — managed by the monitoring web dashboard
             connection.execute(

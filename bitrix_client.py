@@ -234,6 +234,19 @@ class BitrixClient:
                     response = await self._client.get(url)
                 response.raise_for_status()
                 return response.content
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code < 500:
+                    raise
+                is_last_attempt = attempt >= self.settings.bitrix_retry_attempts
+                if is_last_attempt:
+                    raise
+                logger.warning(
+                    "Bitrix file download HTTP %s on attempt %s/%s",
+                    exc.response.status_code,
+                    attempt,
+                    self.settings.bitrix_retry_attempts,
+                )
+                await asyncio.sleep(self.settings.bitrix_retry_base_delay_seconds)
             except (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError) as exc:
                 is_last_attempt = attempt >= self.settings.bitrix_retry_attempts
                 if is_last_attempt:
@@ -348,8 +361,10 @@ class BitrixClient:
                 now = asyncio.get_running_loop().time()
                 wait_for = self._rate_last_request + self._rate_min_interval - now
                 if wait_for > 0:
+                    self._rate_last_request = now + wait_for
                     await asyncio.sleep(wait_for)
-                self._rate_last_request = asyncio.get_running_loop().time()
+                else:
+                    self._rate_last_request = now
 
                 async with self._request_semaphore:
                     response = await self._client.post(url, json=payload)

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 from telegram.error import BadRequest
 from mirror_service import MirrorService, _bbcode_to_html
-from models import BitrixDialogSnapshot, BitrixMessage, CursorState, MirrorOrigin, MessageMirrorLink
+from models import BitrixDialogSnapshot, BitrixMessage, CursorState, MirrorOrigin, MessageMirrorLink, BitrixEventPage
 from tests.helpers import make_mapping, make_message, make_settings, make_bitrix_event
 
 
@@ -362,68 +362,9 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(chat_id, self.service._channel_workers)
         self.assertNotIn(chat_id, self.service._channel_queues)
 
-    async def test_poll_scheduler_concurrency(self) -> None:
-        from tests.helpers import make_mapping, make_settings
-        # Create 10 mappings
-        mappings = [
-            make_mapping(mapping_id=i, tg_chat_id=-100123456000 - i, bitrix_dialog_id=f"chat{i}")
-            for i in range(10)
-        ]
-        settings = make_settings(chat_mappings=tuple(mappings))
-        import dataclasses
-        settings = dataclasses.replace(settings, sync_bitrix_to_telegram=True)
-
-        # Instantiate service
-        service = MirrorService(settings, self.bitrix, self.state_store)
-
-        # Track concurrency
-        active_concurrency = 0
-        max_concurrency = 0
-        completed_polls = 0
-        concurrency_lock = asyncio.Lock()
-        done_event = asyncio.Event()
-
-        async def fake_sync_dialog(application, mapping, *, trigger):
-            nonlocal active_concurrency, max_concurrency, completed_polls
-            async with concurrency_lock:
-                active_concurrency += 1
-                if active_concurrency > max_concurrency:
-                    max_concurrency = active_concurrency
-
-            # Sleep a bit to force concurrent execution
-            await asyncio.sleep(0.01)
-
-            async with concurrency_lock:
-                active_concurrency -= 1
-                completed_polls += 1
-                if completed_polls == 10:
-                    done_event.set()
-
-        async def fake_initialize_cursor(mapping):
-            service._last_seen_bitrix_message_ids[mapping.bitrix_dialog_id] = 1
-
-        service._sync_bitrix_dialog = fake_sync_dialog  # type: ignore[method-assign]
-        service._initialize_bitrix_cursor = fake_initialize_cursor  # type: ignore[method-assign]
-
-        # Start polling
-        app = SimpleNamespace()
-        await service.start_bitrix_polling(app)  # type: ignore[arg-type]
-
-        # Wait for all 10 to finish
-        try:
-            await asyncio.wait_for(done_event.wait(), timeout=2.0)
-        finally:
-            await service.stop()
-
-        # Verify no more than 5 ran concurrently
-        self.assertEqual(completed_polls, 10)
-        self.assertEqual(max_concurrency, 5)
-
-    async def test_reload_mappings_starts_and_stops_scheduler_dynamically(self) -> None:
-        from tests.helpers import make_mapping, make_settings
-        # 1. Start with zero mappings
+    async def test_fetcher_task_started_whenever_sync_is_enabled_even_with_zero_mappings(self) -> None:
+        from tests.helpers import make_settings
         settings = make_settings(chat_mappings=())
-        import dataclasses
         settings = dataclasses.replace(settings, sync_bitrix_to_telegram=True)
 
         service = MirrorService(settings, self.bitrix, self.state_store)
@@ -432,31 +373,30 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         # Start service
         await service.start(app)  # type: ignore[arg-type]
 
-        # Verify scheduler task is None because mappings was empty
-        self.assertIsNone(service._scheduler_task)
+        # Verify fetch task is started
+        self.assertIsNotNone(service._bitrix_event_task)
+        self.assertFalse(service._bitrix_event_task.done())
 
-        # Mock load_all_chat_mappings to return a mapping
-        new_mapping = make_mapping(mapping_id=1, tg_chat_id=-1001234567890, bitrix_dialog_id="chat42")
-        self.state_store.load_all_chat_mappings = AsyncMock(return_value=(new_mapping,))
-
-        # Reload mappings (simulates /connect)
+        # Reload mappings does not restart it
+        old_task = service._bitrix_event_task
         await service.reload_mappings()
+        self.assertIs(service._bitrix_event_task, old_task)
 
-        # Verify scheduler task has been started dynamically!
-        self.assertIsNotNone(service._scheduler_task)
-        self.assertFalse(service._scheduler_task.done())
-
-        # Now change load_all_chat_mappings to return empty tuple (simulates disconnecting all mappings)
-        self.state_store.load_all_chat_mappings = AsyncMock(return_value=())
-
-        # Reload mappings again
-        await service.reload_mappings()
-
-        # Verify scheduler task has been cancelled and cleaned up to None!
-        self.assertIsNone(service._scheduler_task)
-
-        # Cleanup
+        # Stop cancels and awaits it
         await service.stop()
+        self.assertIsNone(service._bitrix_event_task)
+
+    async def test_forwarding_disabled_acknowledges_events_without_telegram_side_effects(self) -> None:
+        self.service._forwarding_enabled = False
+        self.service._application = SimpleNamespace(
+            bot=SimpleNamespace(send_message=AsyncMock())
+        )
+        # Handle message add
+        event = make_bitrix_event()
+        await self.service._handle_bitrix_event(event)
+
+        # Verify send_message not called
+        self.service._application.bot.send_message.assert_not_called()
 
     async def test_should_forward_bitrix_message_ignores_own_bot(self) -> None:
         self.service.settings = dataclasses.replace(self.service.settings, bitrix_bot_id=999)
@@ -703,6 +643,60 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         await self.service._handle_bitrix_event(event)
         self.bitrix.download_file_by_id.assert_awaited_once_with(9, fallback_url="https://example.com/pic.jpg")
         self.service._application.bot.send_photo.assert_awaited_once()
+
+    async def test_fetch_cycle_advances_after_each_successful_event(self) -> None:
+        self.state_store.load_bitrix_event_offset.return_value = 100
+        self.bitrix.get_bot_events.return_value = BitrixEventPage(
+            events=(make_bitrix_event(event_id=101),),
+            next_offset=102,
+            has_more=False,
+        )
+        self.service._handle_bitrix_event = AsyncMock()
+
+        await self.service._fetch_bitrix_events_once()
+
+        self.state_store.save_bitrix_event_offset.assert_awaited_once_with(7, 102)
+
+    async def test_fetch_cycle_does_not_advance_failed_event(self) -> None:
+        self.state_store.load_bitrix_event_offset.return_value = 100
+        self.bitrix.get_bot_events.return_value = BitrixEventPage(
+            events=(make_bitrix_event(event_id=101),),
+            next_offset=102,
+            has_more=False,
+        )
+        self.service._handle_bitrix_event = AsyncMock(side_effect=RuntimeError("Telegram down"))
+
+        with self.assertRaises(RuntimeError):
+            await self.service._fetch_bitrix_events_once()
+
+        self.state_store.save_bitrix_event_offset.assert_not_awaited()
+
+    async def test_fetch_cycle_sequentially_saves_event_offsets(self) -> None:
+        self.state_store.load_bitrix_event_offset.return_value = 100
+        self.bitrix.get_bot_events.return_value = BitrixEventPage(
+            events=(
+                make_bitrix_event(event_id=101),
+                make_bitrix_event(event_id=102),
+                make_bitrix_event(event_id=103),
+            ),
+            next_offset=104,
+            has_more=False,
+        )
+        # Mock handle_bitrix_event to fail on the third event
+        async def mock_handle(event):
+            if event.event_id == 103:
+                raise RuntimeError("Fail on third event")
+        self.service._handle_bitrix_event = mock_handle
+
+        with self.assertRaises(RuntimeError):
+            await self.service._fetch_bitrix_events_once()
+
+        # It should save offset 102 (eventId 101 + 1) and offset 103 (eventId 102 + 1)
+        self.assertEqual(self.state_store.save_bitrix_event_offset.call_count, 2)
+        self.state_store.save_bitrix_event_offset.assert_has_awaits([
+            unittest.mock.call(7, 102),
+            unittest.mock.call(7, 103),
+        ])
 
 
 def make_link(

@@ -113,20 +113,20 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
         try:
             state_store = getattr(mirror, "state_store", None)
             if state_store is not None:
-                await state_store.load_cursor("__health_ping__")
+                await state_store.load_bitrix_event_offset(settings.bitrix_bot_id)
                 checks["db"] = "ok"
             else:
                 checks["db"] = "no_state_store"
         except Exception as exc:
             checks["db"] = {"error": str(exc) or type(exc).__name__}
 
-        scheduler_task = getattr(mirror, "_scheduler_task", None)
-        if scheduler_task is not None:
-            checks["scheduler_alive"] = not scheduler_task.done()
-        elif settings.sync_bitrix_to_telegram and settings.chat_mappings:
-            checks["scheduler_alive"] = "not_started"
+        bitrix_event_task = getattr(mirror, "_bitrix_event_task", None)
+        if bitrix_event_task is not None:
+            checks["bitrix_event_fetcher_alive"] = not bitrix_event_task.done()
+        elif settings.sync_bitrix_to_telegram:
+            checks["bitrix_event_fetcher_alive"] = "not_started"
         else:
-            checks["scheduler_alive"] = "disabled"
+            checks["bitrix_event_fetcher_alive"] = "disabled"
 
         return {
             "ok": True,

@@ -82,6 +82,8 @@ class MirrorService:
         self._poll_error_count: int = 0
         self._forwarding_enabled = True
         self._scheduler_task: asyncio.Task | None = None
+        self._bitrix_event_task: asyncio.Task | None = None
+        self._bitrix_event_offset: int | None = None
         self._poll_semaphore: asyncio.Semaphore | None = None
 
     def get_mapping_for_telegram_chat(self, tg_chat_id: int) -> ChatMapping | None:
@@ -198,16 +200,6 @@ class MirrorService:
                 task.cancel()
                 self._channel_queues.pop(chat_id, None)
 
-        if self._scheduler_task is None and mappings and self._application is not None:
-            await self.start_bitrix_polling(self._application)
-        elif not mappings and self._scheduler_task is not None:
-            self._scheduler_task.cancel()
-            try:
-                await self._scheduler_task
-            except asyncio.CancelledError:
-                pass
-            self._scheduler_task = None
-
     async def connect_mapping(
         self,
         tg_chat_id: int,
@@ -301,6 +293,13 @@ class MirrorService:
             except asyncio.CancelledError:
                 pass
             self._scheduler_task = None
+        if self._bitrix_event_task is not None:
+            self._bitrix_event_task.cancel()
+            try:
+                await self._bitrix_event_task
+            except asyncio.CancelledError:
+                pass
+            self._bitrix_event_task = None
         for task in self._bitrix_on_demand_tasks.values():
             task.cancel()
         for task in self._bitrix_on_demand_tasks.values():
@@ -850,15 +849,59 @@ class MirrorService:
         if not self.settings.sync_bitrix_to_telegram:
             logger.info("Bitrix → Telegram sync is disabled by configuration")
             return
-        if not self.settings.chat_mappings:
-            logger.warning("Bitrix → Telegram sync is disabled because no chat mappings are configured")
-            return
 
-        self._poll_semaphore = asyncio.Semaphore(5)
-        self._scheduler_task = asyncio.create_task(
-            self._poll_scheduler_loop(application),
-            name="bitrix-poll-scheduler"
+        self._bitrix_event_offset = await self.state_store.load_bitrix_event_offset(self.settings.bitrix_bot_id)
+        self._bitrix_event_task = asyncio.create_task(
+            self._bitrix_event_loop(application),
+            name="bitrix-event-fetcher"
         )
+
+    async def _bitrix_event_loop(self, application: Application) -> None:
+        logger.info("Starting Bitrix event fetch loop")
+        backoff = self.settings.bitrix_poll_error_backoff_seconds
+        while not self._stop_event.is_set():
+            try:
+                has_more = await self._fetch_bitrix_events_once()
+                self._poll_error_count = 0
+                backoff = self.settings.bitrix_poll_error_backoff_seconds
+                if not has_more:
+                    try:
+                        await asyncio.wait_for(
+                            self._stop_event.wait(),
+                            timeout=self.settings.bitrix_poll_interval_seconds
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Error in Bitrix event fetch loop")
+                self._poll_error_count += 1
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=backoff
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                backoff = min(backoff * 2, self.settings.bitrix_poll_max_backoff_seconds)
+
+    async def _fetch_bitrix_events_once(self) -> bool:
+        page = await self.bitrix.get_bot_events(offset=self._bitrix_event_offset)
+        for event in page.events:
+            await self._handle_bitrix_event(event)
+            self._bitrix_event_offset = event.event_id + 1
+            await self.state_store.save_bitrix_event_offset(
+                self.settings.bitrix_bot_id,
+                self._bitrix_event_offset,
+            )
+        if not page.events and page.next_offset is not None:
+            self._bitrix_event_offset = page.next_offset
+            await self.state_store.save_bitrix_event_offset(
+                self.settings.bitrix_bot_id,
+                self._bitrix_event_offset,
+            )
+        return page.has_more
 
     async def _poll_scheduler_loop(self, application: Application) -> None:
         logger.info("Starting Bitrix central poll scheduler")

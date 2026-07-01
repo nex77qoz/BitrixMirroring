@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from settings import ChatMapping, Settings
+from models import BitrixBotEvent
 
 
 def make_mapping(
@@ -106,4 +107,32 @@ def make_message(**overrides: object) -> SimpleNamespace:
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def make_bitrix_event(
+    event_type: str = "ONIMBOTV2MESSAGEADD",
+    *,
+    event_id: int = 101,
+    dialog_id: str = "chat42",
+    message_id: int = 789,
+    text: str = "hello",
+    author_id: int = 41,
+) -> BitrixBotEvent:
+    return BitrixBotEvent(
+        event_id=event_id,
+        event_type=event_type,
+        data={
+            "bot": {"id": 7},
+            "message": {
+                "id": message_id,
+                "chatId": 42,
+                "authorId": author_id,
+                "text": text,
+                "params": {},
+            },
+            "chat": {"id": 42, "dialogId": dialog_id},
+            "user": {"id": author_id, "firstName": "Ivan", "lastName": "Petrov"},
+        },
+    )
+
 

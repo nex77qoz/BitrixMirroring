@@ -15,7 +15,7 @@ from telegram.ext import Application
 
 from bitrix_client import BitrixClient
 from mirror_state_store import MirrorStateStore
-from models import BitrixDialogSnapshot, BitrixFile, BitrixMessage, CursorState, MessageMirrorLink, MirrorOrigin
+from models import BitrixDialogSnapshot, BitrixFile, BitrixMessage, CursorState, MessageMirrorLink, MirrorOrigin, BitrixUser
 from settings import ChatMapping, Settings
 
 logger = logging.getLogger("tg-bitrix-mirror")
@@ -348,6 +348,341 @@ class MirrorService:
             return
 
         queue.put_nowait(message)
+
+    async def _handle_bitrix_event(self, event: BitrixBotEvent) -> None:
+        handlers = {
+            "ONIMBOTV2MESSAGEADD": self._handle_bitrix_message_add,
+            "ONIMBOTV2MESSAGEUPDATE": self._handle_bitrix_message_update,
+            "ONIMBOTV2MESSAGEDELETE": self._handle_bitrix_message_delete,
+            "ONIMBOTV2REACTIONCHANGE": self._handle_bitrix_reaction_change,
+            "ONIMBOTV2JOINCHAT": self._handle_bitrix_join_chat,
+        }
+        handler = handlers.get(event.event_type)
+        if handler is not None:
+            await handler(event.data)
+
+    async def _handle_bitrix_message_add(self, data: dict[str, Any]) -> None:
+        chat = data.get("chat")
+        message_data = data.get("message")
+        user_data = data.get("user")
+        if not isinstance(chat, dict) or not isinstance(message_data, dict):
+            return
+
+        dialog_id = chat.get("dialogId")
+        if not isinstance(dialog_id, str):
+            return
+
+        bitrix_message = BitrixMessage.from_api_payload(message_data)
+        if bitrix_message is None:
+            return
+
+        if self.settings.bitrix_bot_id and bitrix_message.author_id == self.settings.bitrix_bot_id:
+            return
+
+        # Local commands
+        text_lower = (bitrix_message.text or "").strip().lower()
+        if text_lower in {"/start", "start"}:
+            reply = "Привет. Я получил сообщение и могу отвечать в этот чат."
+            await self.bitrix.send_message(reply, dialog_id=dialog_id, reply_id=bitrix_message.message_id)
+            return
+        elif text_lower in {"/ping", "ping"}:
+            await self.bitrix.send_message("pong", dialog_id=dialog_id, reply_id=bitrix_message.message_id)
+            return
+        elif text_lower == "/tg_connect" or text_lower.startswith("/tg_connect "):
+            import secrets
+            import time
+            token = secrets.token_hex(4)
+            expires_at = int(time.time()) + 600
+            try:
+                await self.state_store.save_pending_connection(dialog_id, token, expires_at)
+                reply = (
+                    f"🔑 Одноразовый токен сгенерирован.\n"
+                    f"Отправьте следующую команду в вашей Telegram-группе в течение 10 минут:\n\n"
+                    f"/connect {dialog_id} {token}"
+                )
+            except Exception as e:
+                logger.exception("Failed to create pending connection token")
+                reply = "⚠️ Не удалось создать токен подключения. Попробуйте позже."
+            await self.bitrix.send_message(reply, dialog_id=dialog_id, reply_id=bitrix_message.message_id)
+            return
+
+        mapping = self.get_mapping_for_bitrix_dialog(dialog_id)
+        if mapping is None:
+            return
+
+        existing_link = await self.state_store.get_link_by_bitrix_message(bitrix_message.message_id)
+        if existing_link is not None:
+            return
+
+        if not self._forwarding_enabled:
+            return
+
+        if self._application is None:
+            return
+
+        users_by_id = {}
+        if isinstance(user_data, dict):
+            user = BitrixUser.from_api_payload(user_data)
+            if user is not None:
+                users_by_id[user.user_id] = user
+
+        files_by_id = {}
+        if isinstance(data.get("files"), dict):
+            for k, v in data["files"].items():
+                f = BitrixFile.from_api_payload(v)
+                if f is not None:
+                    files_by_id[f.file_id] = f
+        elif isinstance(data.get("files"), list):
+            for v in data["files"]:
+                f = BitrixFile.from_api_payload(v)
+                if f is not None:
+                    files_by_id[f.file_id] = f
+
+        for fid in bitrix_message.file_ids:
+            if fid not in files_by_id:
+                files_by_id[fid] = BitrixFile(
+                    file_id=fid,
+                    name=f"file_{fid}",
+                    url_download=None,
+                    mime_type=None,
+                    file_type="file",
+                    is_image=False,
+                    author_id=bitrix_message.author_id,
+                )
+
+        snapshot = BitrixDialogSnapshot(
+            messages=[bitrix_message],
+            users_by_id=users_by_id,
+            files_by_id=files_by_id,
+        )
+
+        tg_chat_id = mapping.tg_chat_id
+        default_thread_id = None if self._is_multi_topic_mode(mapping) else mapping.default_topic_id
+        sender_name = self._resolve_bitrix_sender_name(snapshot, bitrix_message)
+        reply_tg_id: int | None = None
+        message_thread_id = default_thread_id
+
+        if bitrix_message.reply_id is None and bitrix_message.message_id in self._webhook_reply_cache:
+            cached_reply = self._webhook_reply_cache.pop(bitrix_message.message_id)
+            bitrix_message = dataclasses.replace(bitrix_message, reply_id=cached_reply)
+
+        if bitrix_message.reply_id is not None:
+            reply_link = await self.state_store.get_link_by_bitrix_message(
+                bitrix_message_id=bitrix_message.reply_id
+            )
+            if reply_link is not None:
+                reply_tg_id = reply_link.telegram_message_id
+                if reply_link.telegram_chat_id == tg_chat_id and reply_link.telegram_message_thread_id is not None:
+                    message_thread_id = reply_link.telegram_message_thread_id
+
+        try:
+            forwarded = await self._forward_bitrix_message(
+                self._application, snapshot, bitrix_message, sender_name,
+                tg_chat_id=tg_chat_id, message_thread_id=message_thread_id,
+                reply_to_message_id=reply_tg_id
+            )
+            logger.info(
+                "Mirrored Bitrix message %s from dialog %s to Telegram chat %s (photo=%s)",
+                bitrix_message.message_id,
+                dialog_id,
+                tg_chat_id,
+                bool(forwarded.photo),
+            )
+            await self.state_store.upsert_link(
+                telegram_chat_id=forwarded.chat_id,
+                telegram_message_id=forwarded.message_id,
+                bitrix_message_id=bitrix_message.message_id,
+                origin=MirrorOrigin.BITRIX,
+                telegram_message_date_unix=int(forwarded.date.timestamp()) if forwarded.date else None,
+                bitrix_author_id=bitrix_message.author_id,
+                last_seen_bitrix_revision=self._build_bitrix_revision(bitrix_message),
+                telegram_message_thread_id=message_thread_id,
+            )
+            self._forward_attempts.pop(bitrix_message.message_id, None)
+        except Exception:
+            attempts = self._forward_attempts.get(bitrix_message.message_id, 0) + 1
+            self._forward_attempts[bitrix_message.message_id] = attempts
+            if attempts >= self._MAX_BITRIX_FORWARD_ATTEMPTS:
+                logger.exception(
+                    "DEAD-LETTER: Skipping Bitrix message %s from dialog %s after %d failed attempts",
+                    bitrix_message.message_id,
+                    dialog_id,
+                    attempts,
+                )
+                self._forward_attempts.pop(bitrix_message.message_id, None)
+            else:
+                logger.exception(
+                    "Failed to mirror Bitrix message %s (attempt %d/%d)",
+                    bitrix_message.message_id,
+                    attempts,
+                    self._MAX_BITRIX_FORWARD_ATTEMPTS,
+                )
+                raise
+
+    async def _handle_bitrix_message_update(self, data: dict[str, Any]) -> None:
+        chat = data.get("chat")
+        message_data = data.get("message")
+        user_data = data.get("user")
+        if not isinstance(chat, dict) or not isinstance(message_data, dict):
+            return
+
+        dialog_id = chat.get("dialogId")
+        if not isinstance(dialog_id, str):
+            return
+
+        bitrix_message = BitrixMessage.from_api_payload(message_data)
+        if bitrix_message is None:
+            return
+
+        if not self._forwarding_enabled:
+            return
+
+        if self._application is None:
+            return
+
+        link = await self.state_store.get_link_by_bitrix_message(bitrix_message_id=bitrix_message.message_id)
+        if link is None:
+            return
+
+        users_by_id = {}
+        if isinstance(user_data, dict):
+            user = BitrixUser.from_api_payload(user_data)
+            if user is not None:
+                users_by_id[user.user_id] = user
+
+        files_by_id = {}
+        if isinstance(data.get("files"), dict):
+            for k, v in data["files"].items():
+                f = BitrixFile.from_api_payload(v)
+                if f is not None:
+                    files_by_id[f.file_id] = f
+        elif isinstance(data.get("files"), list):
+            for v in data["files"]:
+                f = BitrixFile.from_api_payload(v)
+                if f is not None:
+                    files_by_id[f.file_id] = f
+
+        for fid in bitrix_message.file_ids:
+            if fid not in files_by_id:
+                files_by_id[fid] = BitrixFile(
+                    file_id=fid,
+                    name=f"file_{fid}",
+                    url_download=None,
+                    mime_type=None,
+                    file_type="file",
+                    is_image=False,
+                    author_id=bitrix_message.author_id,
+                )
+
+        snapshot = BitrixDialogSnapshot(
+            messages=[bitrix_message],
+            users_by_id=users_by_id,
+            files_by_id=files_by_id,
+        )
+
+        current_revision = self._build_bitrix_revision(bitrix_message)
+        if link.last_seen_bitrix_revision != current_revision:
+            await self._apply_bitrix_edit_to_telegram(self._application, snapshot, link, bitrix_message)
+            await self.state_store.upsert_link(
+                telegram_chat_id=link.telegram_chat_id,
+                telegram_message_id=link.telegram_message_id,
+                bitrix_message_id=bitrix_message.message_id,
+                origin=link.origin,
+                telegram_message_date_unix=link.telegram_message_date_unix,
+                bitrix_author_id=bitrix_message.author_id,
+                last_seen_bitrix_revision=current_revision,
+                telegram_message_thread_id=link.telegram_message_thread_id,
+            )
+
+    async def _handle_bitrix_message_delete(self, data: dict[str, Any]) -> None:
+        message_id = data.get("messageId")
+        if not isinstance(message_id, int):
+            message_data = data.get("message")
+            if isinstance(message_data, dict):
+                message_id = message_data.get("id")
+        if not isinstance(message_id, int):
+            return
+
+        link = await self.state_store.get_link_by_bitrix_message(bitrix_message_id=message_id)
+        if link is None:
+            return
+
+        if self._application is None:
+            return
+
+        try:
+            await self._application.bot.delete_message(
+                chat_id=link.telegram_chat_id,
+                message_id=link.telegram_message_id,
+            )
+        except BadRequest as exc:
+            if "message to delete not found" in str(exc).lower() or "message not found" in str(exc).lower():
+                logger.warning("Telegram message to delete not found, treating as deleted.")
+            else:
+                raise
+        await self.state_store.delete_link_by_bitrix_message(bitrix_message_id=message_id)
+
+    async def _handle_bitrix_reaction_change(self, data: dict[str, Any]) -> None:
+        reaction = data.get("reaction")
+        action = data.get("action")
+        message_data = data.get("message")
+        user_data = data.get("user")
+        if not isinstance(message_data, dict) or not isinstance(user_data, dict):
+            return
+
+        message_id = message_data.get("id")
+        user_id = user_data.get("id")
+        if not isinstance(message_id, int) or not isinstance(user_id, int):
+            return
+
+        if reaction != "like":
+            return
+
+        link = await self.state_store.get_link_by_bitrix_message(bitrix_message_id=message_id)
+        if link is None:
+            return
+
+        if self._application is None:
+            return
+
+        if link.bitrix_liked_by_bot and self.settings.bitrix_bot_id == user_id:
+            await self.state_store.update_reaction_state(
+                bitrix_message_id=message_id,
+                bitrix_liked_by_bot=False,
+                last_seen_bitrix_likes=link.last_seen_bitrix_likes,
+            )
+            return
+
+        likes_set = set()
+        if link.last_seen_bitrix_likes:
+            for item in link.last_seen_bitrix_likes.split(","):
+                if item.strip().isdigit():
+                    likes_set.add(int(item.strip()))
+
+        if action == "add":
+            likes_set.add(user_id)
+        elif action == "delete":
+            likes_set.discard(user_id)
+
+        sorted_likes = sorted(likes_set)
+        likes_str = ",".join(str(uid) for uid in sorted_likes)
+
+        await self._sync_bitrix_reaction_to_telegram(self._application, link, bool(likes_set))
+        await self.state_store.update_reaction_state(
+            bitrix_message_id=message_id,
+            bitrix_liked_by_bot=link.bitrix_liked_by_bot,
+            last_seen_bitrix_likes=likes_str,
+        )
+
+    async def _handle_bitrix_join_chat(self, data: dict[str, Any]) -> None:
+        dialog_id = data.get("dialogId")
+        if not isinstance(dialog_id, str):
+            dialog_id = data.get("chat", {}).get("dialogId")
+        if not isinstance(dialog_id, str):
+            return
+        bot_id = self.settings.bitrix_bot_id
+        if bot_id:
+            await self.bitrix.send_message("Привет. Бот подключён и готов к работе.", dialog_id=dialog_id)
 
     async def schedule_bitrix_dialog_sync(
         self,

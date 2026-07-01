@@ -6,9 +6,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from telegram.error import BadRequest
 from mirror_service import MirrorService, _bbcode_to_html
-from models import BitrixDialogSnapshot, BitrixMessage, CursorState, MirrorOrigin
-from tests.helpers import make_mapping, make_message, make_settings
+from models import BitrixDialogSnapshot, BitrixMessage, CursorState, MirrorOrigin, MessageMirrorLink
+from tests.helpers import make_mapping, make_message, make_settings, make_bitrix_event
 
 
 class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
@@ -17,6 +18,7 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         settings = make_settings(chat_mappings=(mapping,))
         self.bitrix = AsyncMock()
         self.state_store = AsyncMock()
+        self.state_store.get_link_by_bitrix_message.return_value = None
         self.service = MirrorService(settings, self.bitrix, self.state_store)
 
     async def test_resolve_mapping_prefers_matching_topic(self) -> None:
@@ -541,3 +543,188 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(worker_task, return_exceptions=True)
 
         self.bitrix.send_message.assert_not_awaited()
+
+    async def test_message_add_forwards_without_dialog_history_call(self) -> None:
+        self.service._application = SimpleNamespace(
+            bot=SimpleNamespace(send_message=AsyncMock(return_value=make_message()))
+        )
+        await self.service._handle_bitrix_event(make_bitrix_event())
+        self.service._application.bot.send_message.assert_awaited_once()
+        self.state_store.upsert_link.assert_awaited_once()
+        self.bitrix.get_recent_messages.assert_not_awaited()
+        self.bitrix.get_messages_after.assert_not_awaited()
+
+    async def test_message_add_is_idempotent_when_link_exists(self) -> None:
+        self.state_store.get_link_by_bitrix_message.return_value = make_link(origin=MirrorOrigin.BITRIX)
+        self.service._application = SimpleNamespace(
+            bot=SimpleNamespace(send_message=AsyncMock())
+        )
+        await self.service._handle_bitrix_event(make_bitrix_event())
+        self.service._application.bot.send_message.assert_not_awaited()
+
+    async def test_message_add_ignores_own_bot(self) -> None:
+        self.service._application = SimpleNamespace(
+            bot=SimpleNamespace(send_message=AsyncMock())
+        )
+        await self.service._handle_bitrix_event(make_bitrix_event(author_id=7))
+        self.service._application.bot.send_message.assert_not_awaited()
+
+    async def test_message_add_ignores_unmapped_dialog(self) -> None:
+        self.service._application = SimpleNamespace(
+            bot=SimpleNamespace(send_message=AsyncMock())
+        )
+        await self.service._handle_bitrix_event(make_bitrix_event(dialog_id="chat999"))
+        self.service._application.bot.send_message.assert_not_awaited()
+
+    async def test_tg_connect_saves_token_and_replies_in_bitrix(self) -> None:
+        event = make_bitrix_event(text="/tg_connect")
+        await self.service._handle_bitrix_event(event)
+        self.state_store.save_pending_connection.assert_awaited_once()
+        self.bitrix.send_message.assert_awaited_once()
+        self.service._application = SimpleNamespace(
+            bot=SimpleNamespace(send_message=AsyncMock())
+        )
+        self.service._application.bot.send_message.assert_not_awaited()
+
+    async def test_join_chat_sends_existing_greeting(self) -> None:
+        event = make_bitrix_event("ONIMBOTV2JOINCHAT")
+        event = dataclasses.replace(
+            event,
+            data={"bot": {"id": 7}, "dialogId": "chat42", "chat": {"dialogId": "chat42"}},
+        )
+        await self.service._handle_bitrix_event(event)
+        self.bitrix.send_message.assert_awaited_once()
+
+    async def test_message_update_edits_linked_telegram_message(self) -> None:
+        link = make_link(origin=MirrorOrigin.BITRIX)
+        self.state_store.get_link_by_bitrix_message.return_value = link
+        application = SimpleNamespace(
+            bot=SimpleNamespace(edit_message_text=AsyncMock())
+        )
+        self.service._application = application
+        await self.service._handle_bitrix_event(
+            make_bitrix_event("ONIMBOTV2MESSAGEUPDATE", text="edited")
+        )
+        application.bot.edit_message_text.assert_awaited_once()
+        self.state_store.upsert_link.assert_awaited_once()
+
+    async def test_message_delete_removes_telegram_message_and_link(self) -> None:
+        link = make_link(origin=MirrorOrigin.BITRIX)
+        self.state_store.get_link_by_bitrix_message.return_value = link
+        self.service._application = SimpleNamespace(
+            bot=SimpleNamespace(delete_message=AsyncMock())
+        )
+        event = dataclasses.replace(
+            make_bitrix_event("ONIMBOTV2MESSAGEDELETE"),
+            data={"messageId": 789, "chat": {"dialogId": "chat42"}},
+        )
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.delete_message.assert_awaited_once()
+        self.state_store.delete_link_by_bitrix_message.assert_awaited_once_with(
+            bitrix_message_id=789
+        )
+
+    async def test_message_delete_removes_link_when_telegram_message_not_found(self) -> None:
+        link = make_link(origin=MirrorOrigin.BITRIX)
+        self.state_store.get_link_by_bitrix_message.return_value = link
+        self.service._application = SimpleNamespace(
+            bot=SimpleNamespace(delete_message=AsyncMock(side_effect=BadRequest("Message to delete not found")))
+        )
+        event = dataclasses.replace(
+            make_bitrix_event("ONIMBOTV2MESSAGEDELETE"),
+            data={"messageId": 789, "chat": {"dialogId": "chat42"}},
+        )
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.delete_message.assert_awaited_once()
+        self.state_store.delete_link_by_bitrix_message.assert_awaited_once_with(
+            bitrix_message_id=789
+        )
+
+    async def test_like_event_updates_telegram_and_reaction_state(self) -> None:
+        link = make_link(last_seen_bitrix_likes="")
+        self.state_store.get_link_by_bitrix_message.return_value = link
+        self.service._application = SimpleNamespace(
+            bot=SimpleNamespace(set_message_reaction=AsyncMock())
+        )
+        event = dataclasses.replace(
+            make_bitrix_event("ONIMBOTV2REACTIONCHANGE"),
+            data={
+                "reaction": "like",
+                "action": "add",
+                "message": {"id": 789},
+                "chat": {"dialogId": "chat42"},
+                "user": {"id": 41},
+            },
+        )
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.set_message_reaction.assert_awaited_once()
+        self.state_store.update_reaction_state.assert_awaited_once_with(
+            bitrix_message_id=789,
+            bitrix_liked_by_bot=False,
+            last_seen_bitrix_likes="41",
+        )
+
+    async def test_message_add_resolves_reply_to_message_id(self) -> None:
+        self.service._application = SimpleNamespace(
+            bot=SimpleNamespace(send_message=AsyncMock(return_value=make_message()))
+        )
+        reply_link = make_link(telegram_message_id=456, bitrix_message_id=700)
+        self.state_store.get_link_by_bitrix_message.side_effect = lambda bitrix_message_id: (
+            reply_link if bitrix_message_id == 700 else None
+        )
+        
+        event = make_bitrix_event()
+        event.data["message"]["params"]["REPLY_ID"] = "700"
+        
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.send_message.assert_awaited_once()
+        kwargs = self.service._application.bot.send_message.await_args.kwargs
+        self.assertEqual(kwargs.get("reply_to_message_id"), 456)
+
+    async def test_message_add_delivers_photo_file(self) -> None:
+        self.service._application = SimpleNamespace(
+            bot=SimpleNamespace(send_photo=AsyncMock(return_value=make_message(photo=[SimpleNamespace(file_id="tgfile")])))
+        )
+        self.bitrix.download_file_by_id = AsyncMock(return_value=b"fake-image-bytes")
+        
+        event = make_bitrix_event()
+        event.data["message"]["params"]["FILE_ID"] = ["9"]
+        event.data["files"] = {
+            "9": {
+                "ID": 9,
+                "original_name": "pic.jpg",
+                "TYPE": "file",
+                "MIME_TYPE": "image/jpeg",
+                "DOWNLOAD_URL": "https://example.com/pic.jpg",
+                "AUTHOR_ID": 41,
+            }
+        }
+        
+        await self.service._handle_bitrix_event(event)
+        self.bitrix.download_file_by_id.assert_awaited_once_with(9, fallback_url="https://example.com/pic.jpg")
+        self.service._application.bot.send_photo.assert_awaited_once()
+
+
+def make_link(
+    *,
+    origin: MirrorOrigin = MirrorOrigin.BITRIX,
+    last_seen_bitrix_likes: str = "",
+    bitrix_liked_by_bot: bool = False,
+    telegram_chat_id: int = -1001234567890,
+    telegram_message_id: int = 200,
+    bitrix_message_id: int = 789,
+) -> MessageMirrorLink:
+    return MessageMirrorLink(
+        telegram_chat_id=telegram_chat_id,
+        telegram_message_id=telegram_message_id,
+        bitrix_message_id=bitrix_message_id,
+        origin=origin,
+        telegram_message_date_unix=123456,
+        bitrix_author_id=41,
+        last_seen_bitrix_revision="rev",
+        created_at_unix=123456,
+        updated_at_unix=123456,
+        bitrix_liked_by_bot=bitrix_liked_by_bot,
+        last_seen_bitrix_likes=last_seen_bitrix_likes,
+    )
+

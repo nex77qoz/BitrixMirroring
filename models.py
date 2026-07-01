@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 _logger = logging.getLogger("tg-bitrix-mirror")
 
@@ -14,7 +14,7 @@ class BitrixUser:
     display_name: str
 
     @staticmethod
-    def from_api_payload(payload: dict[str, Any]) -> Optional["BitrixUser"]:
+    def from_api_payload(payload: dict[str, Any]) -> BitrixUser | None:
         raw_user_id = payload.get("id")
         if not isinstance(raw_user_id, int):
             return None
@@ -28,32 +28,32 @@ class BitrixUser:
 
 @dataclass(frozen=True)
 class BitrixDialogSnapshot:
-    messages: list["BitrixMessage"]
+    messages: list[BitrixMessage]
     users_by_id: dict[int, BitrixUser]
-    files_by_id: dict[int, "BitrixFile"]
+    files_by_id: dict[int, BitrixFile]
 
 
 @dataclass(frozen=True)
 class BitrixMessage:
     message_id: int
-    author_id: Optional[int]
+    author_id: int | None
     text: str
     file_ids: tuple[int, ...]
-    update_time_unix: Optional[int]
+    update_time_unix: int | None
     like_user_ids: tuple[int, ...]
-    reply_id: Optional[int] = None
+    reply_id: int | None = None
     is_sticker: bool = False
     is_meeting: bool = False
     is_task: bool = False
 
     @staticmethod
-    def from_api_payload(payload: dict[str, Any]) -> Optional["BitrixMessage"]:
+    def from_api_payload(payload: dict[str, Any]) -> BitrixMessage | None:
         raw_message_id = payload.get("id")
         if not isinstance(raw_message_id, int):
             return None
 
         raw_author_id = payload.get("author_id")
-        author_id: Optional[int]
+        author_id: int | None
         if isinstance(raw_author_id, int):
             author_id = raw_author_id
         elif isinstance(raw_author_id, str) and raw_author_id.strip().isdigit():
@@ -103,7 +103,7 @@ class BitrixMessage:
         is_meeting = isinstance(params, dict) and bool(params.get("MEETING_CONFIRM"))
         is_task = isinstance(params, dict) and bool(params.get("TASK_ID"))
 
-        reply_id: Optional[int] = None
+        reply_id: int | None = None
         # Check top-level payload fields first (im.dialog.messages.get may return it here)
         for key in ("reply_id", "replyId", "REPLY_ID"):
             raw = payload.get(key)
@@ -156,14 +156,14 @@ class BitrixMessage:
 class BitrixFile:
     file_id: int
     name: str
-    url_download: Optional[str]
-    mime_type: Optional[str]
+    url_download: str | None
+    mime_type: str | None
     file_type: str
     is_image: bool
-    author_id: Optional[int] = None
+    author_id: int | None = None
 
     @staticmethod
-    def from_api_payload(payload: dict[str, Any]) -> Optional["BitrixFile"]:
+    def from_api_payload(payload: dict[str, Any]) -> BitrixFile | None:
         raw_file_id = payload.get("id") or payload.get("ID")
         if isinstance(raw_file_id, str) and raw_file_id.strip().isdigit():
             raw_file_id = int(raw_file_id.strip())
@@ -186,7 +186,7 @@ class BitrixFile:
         )
         url_download = str(url_download_raw).strip() if url_download_raw else None
         raw_author_id = payload.get("authorId") or payload.get("author_id") or payload.get("AUTHOR_ID")
-        author_id: Optional[int] = None
+        author_id: int | None = None
         if isinstance(raw_author_id, int):
             author_id = raw_author_id
         elif isinstance(raw_author_id, str) and raw_author_id.strip().isdigit():
@@ -210,7 +210,7 @@ class BitrixFile:
 
 @dataclass(frozen=True)
 class CursorState:
-    last_seen_bitrix_message_id: Optional[int]
+    last_seen_bitrix_message_id: int | None
 
 
 class MirrorOrigin(str, Enum):
@@ -224,17 +224,17 @@ class MessageMirrorLink:
     telegram_message_id: int
     bitrix_message_id: int
     origin: MirrorOrigin
-    telegram_message_date_unix: Optional[int]
-    bitrix_author_id: Optional[int]
+    telegram_message_date_unix: int | None
+    bitrix_author_id: int | None
     last_seen_bitrix_revision: str
     created_at_unix: int
     updated_at_unix: int
     bitrix_liked_by_bot: bool
     last_seen_bitrix_likes: str
-    telegram_message_thread_id: Optional[int] = None
+    telegram_message_thread_id: int | None = None
 
 
-def _extract_unix_timestamp(value: Any) -> Optional[int]:
+def _extract_unix_timestamp(value: Any) -> int | None:
     if isinstance(value, int):
         return value
     if isinstance(value, str):

@@ -5,7 +5,6 @@ import json
 import os
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -131,7 +130,9 @@ def test_export_response_structure(client):
 def test_export_reads_env_file(client, fresh_env):
     r = client.get("/monitor/api/backup", auth=AUTH)
     data = r.json()
-    assert data["env"]["TELEGRAM_BOT_TOKEN"] == "tok123"
+    # secrets are redacted
+    assert data["env"]["TELEGRAM_BOT_TOKEN"] == "***REDACTED***"
+    # non-secret keys are exported as-is
     assert data["env"]["APP_DOMAIN"] == "old.example.com"
 
 

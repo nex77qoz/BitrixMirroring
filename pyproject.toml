@@ -1,0 +1,44 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["graphify-out", "install.sh.bak"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S", "ASYNC", "RUF"]
+ignore = [
+    "E501",
+    "S101",
+    "S603",
+    "S607",
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "ASYNC", "B", "E402", "B904"]
+"server-side/monitor_app.py" = ["S608", "RUF001", "RUF006", "S110"]
+"server-side/app.py" = ["S110", "B007", "RUF001", "UP038"]
+"install.sh" = ["S"]
+"main.py" = ["F841", "UP038"]
+"mirror_state_store.py" = ["S608", "UP038", "F841"]
+"bitrix_client.py" = ["B904", "UP038"]
+"mirror_service.py" = ["B007", "S110", "RUF006"]
+"settings.py" = ["B904"]
+"handlers.py" = ["B904", "RUF006", "S110"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true
+exclude = ["graphify-out/", "install.sh.bak"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = [".", "server-side"]

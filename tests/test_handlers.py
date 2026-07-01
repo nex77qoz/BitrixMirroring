@@ -4,7 +4,14 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from handlers import cmd_start, on_admin_callback, on_edited_message, on_message, on_message_reaction, on_private_admin_message
+from handlers import (
+    cmd_start,
+    on_admin_callback,
+    on_edited_message,
+    on_message,
+    on_message_reaction,
+    on_private_admin_message,
+)
 from tests.helpers import make_message
 
 
@@ -253,7 +260,7 @@ class HandlersTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.context.args = ["chat42", "valid_token_123"]
         await cmd_connect(update, self.context)
-        
+
         self.mirror.state_store.verify_and_consume_token.assert_awaited_once_with("chat42", "valid_token_123")
         self.mirror.connect_mapping.assert_awaited_once_with(-100123, "chat42", None, "")
         self.mirror.bitrix.send_message.assert_awaited_once_with("Связка установлена", dialog_id="chat42")
@@ -277,7 +284,7 @@ class HandlersTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.context.args = ["chat42", "invalid_token"]
         await cmd_connect(update, self.context)
-        
+
         self.mirror.state_store.verify_and_consume_token.assert_awaited_once_with("chat42", "invalid_token")
         self.mirror.connect_mapping.assert_not_called()
         msg.reply_text.assert_awaited_once()

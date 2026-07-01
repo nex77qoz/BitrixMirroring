@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
 import logging
 import sqlite3
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
 
 from models import CursorState, MessageMirrorLink, MirrorOrigin
 from settings import ChatMapping, _parse_topic_ids
@@ -17,6 +18,8 @@ logger = logging.getLogger("tg-bitrix-mirror")
 class MirrorStateStore:
     def __init__(self, path: str) -> None:
         self._path = Path(path)
+        self._conn: sqlite3.Connection | None = None
+        self._conn_lock = threading.Lock()
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize_sync)
@@ -34,10 +37,10 @@ class MirrorStateStore:
         telegram_message_id: int,
         bitrix_message_id: int,
         origin: MirrorOrigin,
-        telegram_message_date_unix: Optional[int],
-        bitrix_author_id: Optional[int],
+        telegram_message_date_unix: int | None,
+        bitrix_author_id: int | None,
         last_seen_bitrix_revision: str,
-        telegram_message_thread_id: Optional[int] = None,
+        telegram_message_thread_id: int | None = None,
     ) -> None:
         await asyncio.to_thread(
             self._upsert_link_sync,
@@ -56,14 +59,14 @@ class MirrorStateStore:
         *,
         telegram_chat_id: int,
         telegram_message_id: int,
-    ) -> Optional[MessageMirrorLink]:
+    ) -> MessageMirrorLink | None:
         return await asyncio.to_thread(
             self._get_link_by_telegram_message_sync,
             telegram_chat_id,
             telegram_message_id,
         )
 
-    async def get_link_by_bitrix_message(self, *, bitrix_message_id: int) -> Optional[MessageMirrorLink]:
+    async def get_link_by_bitrix_message(self, *, bitrix_message_id: int) -> MessageMirrorLink | None:
         return await asyncio.to_thread(self._get_link_by_bitrix_message_sync, bitrix_message_id)
 
     async def delete_link_by_bitrix_message(self, *, bitrix_message_id: int) -> None:
@@ -221,7 +224,7 @@ class MirrorStateStore:
                 connection.execute("ALTER TABLE message_links ADD COLUMN telegram_message_thread_id INTEGER")
 
             connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_message_links_bitrix_message_id ON message_links(bitrix_message_id)"
+                "CREATE INDEX IF NOT EXISTS idx_message_links_updated_at ON message_links(updated_at_unix)"
             )
 
             # chat_mappings table — managed by the monitoring web dashboard
@@ -425,10 +428,10 @@ class MirrorStateStore:
         telegram_message_id: int,
         bitrix_message_id: int,
         origin: MirrorOrigin,
-        telegram_message_date_unix: Optional[int],
-        bitrix_author_id: Optional[int],
+        telegram_message_date_unix: int | None,
+        bitrix_author_id: int | None,
         last_seen_bitrix_revision: str,
-        telegram_message_thread_id: Optional[int] = None,
+        telegram_message_thread_id: int | None = None,
     ) -> None:
         now = int(time.time())
         with self._connect() as connection:
@@ -492,7 +495,7 @@ class MirrorStateStore:
         self,
         telegram_chat_id: int,
         telegram_message_id: int,
-    ) -> Optional[MessageMirrorLink]:
+    ) -> MessageMirrorLink | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
@@ -507,7 +510,7 @@ class MirrorStateStore:
             ).fetchone()
         return self._row_to_link(row)
 
-    def _get_link_by_bitrix_message_sync(self, bitrix_message_id: int) -> Optional[MessageMirrorLink]:
+    def _get_link_by_bitrix_message_sync(self, bitrix_message_id: int) -> MessageMirrorLink | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
@@ -565,7 +568,7 @@ class MirrorStateStore:
         cutoff = int(time.time()) - max_age_seconds
         with self._connect() as connection:
             cursor = connection.execute(
-                "DELETE FROM message_links WHERE created_at_unix < ?",
+                "DELETE FROM message_links WHERE updated_at_unix < ?",
                 (cutoff,),
             )
             deleted = cursor.rowcount
@@ -574,7 +577,7 @@ class MirrorStateStore:
             logger.info("Cleaned up %s old message link(s) older than %s seconds", deleted, max_age_seconds)
         return deleted
 
-    def _row_to_link(self, row: Optional[sqlite3.Row]) -> Optional[MessageMirrorLink]:
+    def _row_to_link(self, row: sqlite3.Row | None) -> MessageMirrorLink | None:
         if row is None:
             return None
         return MessageMirrorLink(
@@ -760,11 +763,10 @@ class MirrorStateStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self._path, timeout=30.0)
-        connection.row_factory = sqlite3.Row
-        try:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=NORMAL")
-            yield connection
-        finally:
-            connection.close()
+        if self._conn is None:
+            self._conn = sqlite3.connect(self._path, timeout=30.0, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+        with self._conn_lock:
+            yield self._conn

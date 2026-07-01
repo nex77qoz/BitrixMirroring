@@ -2,18 +2,38 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import os
 
+import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from telegram import Update
-from telegram.ext import AIORateLimiter, Application, CallbackQueryHandler, CommandHandler, MessageHandler, MessageReactionHandler, filters
+from telegram.ext import (
+    AIORateLimiter,
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    MessageReactionHandler,
+    filters,
+)
 from telegram.request import HTTPXRequest
-import uvicorn
 
 from bitrix_client import BitrixClient
-from handlers import cmd_clear, cmd_connect, cmd_disconnect, cmd_start, cmd_whereami, on_admin_callback, on_edited_message, on_message, on_message_reaction, on_private_admin_message
+from handlers import (
+    cmd_clear,
+    cmd_connect,
+    cmd_disconnect,
+    cmd_start,
+    cmd_whereami,
+    on_admin_callback,
+    on_edited_message,
+    on_message,
+    on_message_reaction,
+    on_private_admin_message,
+)
 from mirror_service import MirrorService
 from mirror_state_store import MirrorStateStore
 from settings import Settings
@@ -88,12 +108,33 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
     @app.get("/health")
     async def health() -> dict[str, object]:
         webhook_status = application.bot_data.get("telegram_webhook_status", {})
+        checks: dict[str, object] = {}
+
+        try:
+            state_store = getattr(mirror, "state_store", None)
+            if state_store is not None:
+                await state_store.load_cursor("__health_ping__")
+                checks["db"] = "ok"
+            else:
+                checks["db"] = "no_state_store"
+        except Exception as exc:
+            checks["db"] = {"error": str(exc) or type(exc).__name__}
+
+        scheduler_task = getattr(mirror, "_scheduler_task", None)
+        if scheduler_task is not None:
+            checks["scheduler_alive"] = not scheduler_task.done()
+        elif settings.sync_bitrix_to_telegram and settings.chat_mappings:
+            checks["scheduler_alive"] = "not_started"
+        else:
+            checks["scheduler_alive"] = "disabled"
+
         return {
             "ok": True,
             "telegram_webhook_enabled": settings.telegram_webhook_enabled,
             "bitrix_webhook_bridge_enabled": settings.bitrix_webhook_bridge_enabled,
             "forwarding_enabled": mirror.is_forwarding_enabled(),
             "telegram_webhook_status": webhook_status,
+            "checks": checks,
         }
 
     def _verify_internal_secret(request: Request) -> None:
@@ -101,7 +142,7 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
         if not expected_secret:
             raise HTTPException(status_code=503, detail="Internal webhook secret is not configured")
         provided_secret = request.headers.get("X-Internal-Webhook-Secret", "")
-        if expected_secret != provided_secret:
+        if not hmac.compare_digest(expected_secret, provided_secret):
             raise HTTPException(status_code=403, detail="Forbidden")
 
     @app.get("/internal/forwarding")
@@ -149,8 +190,10 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
             raise HTTPException(status_code=404, detail="Telegram webhook is disabled")
 
         expected_secret = settings.telegram_webhook_secret or ""
+        if not expected_secret:
+            raise HTTPException(status_code=503, detail="Telegram webhook secret is not configured")
         provided_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if expected_secret != provided_secret:
+        if not hmac.compare_digest(expected_secret, provided_secret):
             raise HTTPException(status_code=403, detail="Forbidden")
 
         payload = await request.json()

@@ -25,11 +25,10 @@ import subprocess
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
 
-from dotenv import load_dotenv
 import httpx
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile  # noqa: F401
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
@@ -299,9 +298,9 @@ def _get_journal(service: str, lines: int = 50, errors_only: bool = False) -> li
         if r.returncode != 0:
             err = r.stderr.strip() or "Unknown error (stdout empty)"
             return [f"❌ Ошибка sudo/journalctl (код {r.returncode}):", err]
-            
+
         result = r.stdout.strip().splitlines()
-        
+
         if errors_only:
             filtered = []
             in_error = False
@@ -488,7 +487,7 @@ def _read_db_for_backup() -> dict[str, list[dict]]:
         result: dict[str, list[dict]] = {}
         for table in _BACKUP_TABLES:
             try:
-                rows = conn.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608
+                rows = conn.execute(f"SELECT * FROM {table}").fetchall()
                 result[table] = [dict(r) for r in rows]
             except sqlite3.OperationalError:
                 result[table] = []
@@ -506,9 +505,13 @@ def _write_env_file(env: dict[str, str]) -> None:
         # Skip keys that are not valid identifiers or contain newlines
         if not key or "\n" in key or "\r" in key:
             continue
+        # Skip redacted secrets — preserve existing values in .env
+        str_val = str(val)
+        if str_val == "***REDACTED***":
+            continue
         # Strip newlines from values to prevent line injection
-        val = str(val).replace("\r", "").replace("\n", " ")
-        escaped = val.replace("\\", "\\\\").replace('"', '\\"')
+        str_val = str_val.replace("\r", "").replace("\n", " ")
+        escaped = str_val.replace("\\", "\\\\").replace('"', '\\"')
         lines.append(f'{key}="{escaped}"')
     content = "\n".join(lines) + "\n"
     # Write atomically with correct permissions (no race window)
@@ -535,9 +538,9 @@ def _restore_db_from_backup(db_data: dict) -> dict[str, int]:
         conn.execute("BEGIN")
         for table in _BACKUP_TABLES:
             rows = db_data.get(table) or []
-            conn.execute(f"DELETE FROM {table}")  # noqa: S608
+            conn.execute(f"DELETE FROM {table}")
             # Fetch valid column names for this table to prevent SQL injection via column names
-            valid_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608
+            valid_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
             for row in rows:
                 if not row:
                     continue
@@ -547,7 +550,7 @@ def _restore_db_from_backup(db_data: dict) -> dict[str, int]:
                 cols = ", ".join(str(k) for k in filtered.keys())
                 placeholders = ", ".join("?" * len(filtered))
                 conn.execute(
-                    f"INSERT INTO {table} ({cols}) VALUES ({placeholders})",  # noqa: S608
+                    f"INSERT INTO {table} ({cols}) VALUES ({placeholders})",
                     list(filtered.values()),
                 )
             counts[table] = len(rows)
@@ -566,7 +569,7 @@ def _restore_db_from_backup(db_data: dict) -> dict[str, int]:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ARG001
+async def lifespan(app: FastAPI):
     _ensure_chat_mappings_table()
     yield
 
@@ -806,14 +809,37 @@ def api_delete_admin(tg_user_id: int, _: str = Depends(_check_auth)):
         conn.close()
 
 
+_SECRET_KEY_PATTERNS = (
+    "TELEGRAM_BOT_TOKEN",
+    "MONITOR_PASSWORD",
+    "BITRIX_BOT_CLIENT_ID",
+    "BITRIX_CLIENT_ID",
+    "MIRROR_INTERNAL_WEBHOOK_SECRET",
+    "TELEGRAM_WEBHOOK_SECRET",
+)
+
+
+def _is_secret_key(key: str) -> bool:
+    upper = key.upper()
+    if upper in _SECRET_KEY_PATTERNS:
+        return True
+    if any(upper.endswith(suffix) for suffix in ("_TOKEN", "_SECRET", "_PASSWORD", "_KEY")):
+        return True
+    return False
+
+
 @app.get("/monitor/api/backup")
 def api_export_backup(_: str = Depends(_check_auth)) -> Response:
     env_data = _read_env_file()
+    redacted_env = {
+        k: ("***REDACTED***" if _is_secret_key(k) else v)
+        for k, v in env_data.items()
+    }
     db_data = _read_db_for_backup()
     payload = {
         "version": "1",
         "exported_at": int(time.time()),
-        "env": env_data,
+        "env": redacted_env,
         "db": db_data,
     }
     date_str = datetime.date.today().isoformat()
@@ -854,7 +880,7 @@ async def api_import_backup(
         raise HTTPException(status_code=500, detail=f"Ошибка восстановления БД: {exc}") from exc
 
     env_written = False
-    env_error: Optional[str] = None
+    env_error: str | None = None
     try:
         _write_env_file(payload["env"])
         env_written = True
@@ -892,9 +918,9 @@ def api_restart(service_key: str, _: str = Depends(_check_auth)):
 
 @app.get("/monitor/api/journal/{service_key}")
 def api_journal(
-    service_key: str, 
-    lines: int = Query(60, ge=1, le=1000), 
-    errors_only: bool = False, 
+    service_key: str,
+    lines: int = Query(60, ge=1, le=1000),
+    errors_only: bool = False,
     _: str = Depends(_check_auth)
 ):
     if service_key not in SERVICES:

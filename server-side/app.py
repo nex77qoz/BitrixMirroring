@@ -1,7 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
-from pathlib import Path
-from urllib.parse import parse_qs
-import httpx
+import hmac
 import json
 import logging
 import os
@@ -9,6 +6,11 @@ import re
 import secrets
 import sqlite3
 import time
+from pathlib import Path
+from urllib.parse import parse_qs
+
+import httpx
+from fastapi import FastAPI, HTTPException, Request
 
 app = FastAPI()
 LOG_FILE = Path(os.getenv("BITRIX_LOG_PATH", "/opt/bitrix-bot/bitrix.log"))
@@ -27,6 +29,7 @@ BITRIX_WEBHOOK_BRIDGE_ENABLED = os.getenv("BITRIX_WEBHOOK_BRIDGE_ENABLED", "fals
 MIRROR_INTERNAL_BASE_URL = os.getenv("MIRROR_INTERNAL_BASE_URL", "").strip().rstrip("/")
 MIRROR_INTERNAL_EVENT_PATH = os.getenv("MIRROR_INTERNAL_EVENT_PATH", "/internal/bitrix/event").strip() or "/internal/bitrix/event"
 MIRROR_INTERNAL_WEBHOOK_SECRET = os.getenv("MIRROR_INTERNAL_WEBHOOK_SECRET", "").strip()
+BITRIX_BOT_WEBHOOK_TOKEN = os.getenv("BITRIX_BOT_WEBHOOK_TOKEN", "").strip()
 MIRROR_INTERNAL_TIMEOUT_SECONDS = float(os.getenv("MIRROR_INTERNAL_TIMEOUT_SECONDS", "10"))
 FORWARDED_EVENTS = {
     item.strip()
@@ -242,6 +245,12 @@ async def health():
 
 @app.post("/bitrix/bot")
 async def bitrix_bot(request: Request):
+    # shared-secret auth via query parameter in the webhook URL
+    if BITRIX_BOT_WEBHOOK_TOKEN:
+        qs_token = request.query_params.get("token")
+        if qs_token is None or not hmac.compare_digest(BITRIX_BOT_WEBHOOK_TOKEN, qs_token):
+            return {"result": False, "error": "Forbidden"}
+
     raw = await request.body()
     payload = parse_bitrix_form(raw)
 

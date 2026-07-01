@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import httpx
 
@@ -22,10 +22,12 @@ class BitrixClient:
             proxy=settings.socks5_proxy_url,
         )
         self._request_semaphore = asyncio.Semaphore(settings.bitrix_max_concurrent_requests)
+        self._rate_last_request: float = 0.0
+        self._rate_min_interval: float = 1.0 / max(settings.bitrix_max_concurrent_requests, 1)
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def send_message(self, text: str, *, dialog_id: str, reply_id: Optional[int] = None) -> int:
+    async def send_message(self, text: str, *, dialog_id: str, reply_id: int | None = None) -> int:
         fields: dict[str, Any] = {
             "message": text,
             "system": False,
@@ -112,14 +114,14 @@ class BitrixClient:
             raise RuntimeError(f"Missing messageId in imbot.v2.File.upload response: {data}")
         return message_id
 
-    async def get_latest_message_id(self, *, dialog_id: str) -> Optional[int]:
+    async def get_latest_message_id(self, *, dialog_id: str) -> int | None:
         snapshot = await self.get_messages_page(dialog_id=dialog_id, limit=1)
         return max((message.message_id for message in snapshot.messages), default=None)
 
     async def get_recent_messages(self, *, dialog_id: str, limit_total: int) -> BitrixDialogSnapshot:
         effective_limit = max(1, limit_total)
         aggregate = BitrixDialogSnapshot(messages=[], users_by_id={}, files_by_id={})
-        next_last_id: Optional[int] = None
+        next_last_id: int | None = None
 
         while len(aggregate.messages) < effective_limit:
             page_limit = min(BITRIX_MESSAGES_PAGE_LIMIT, effective_limit - len(aggregate.messages))
@@ -140,9 +142,10 @@ class BitrixClient:
             )
         return aggregate
 
-    async def get_messages_after(self, *, dialog_id: str, after_id: int) -> BitrixDialogSnapshot:
+    async def get_messages_after(self, *, dialog_id: str, after_id: int, max_pages: int = 0) -> BitrixDialogSnapshot:
         next_first_id = after_id
         aggregate = BitrixDialogSnapshot(messages=[], users_by_id={}, files_by_id={})
+        pages_fetched = 0
 
         while True:
             page = await self.get_messages_page(
@@ -153,7 +156,10 @@ class BitrixClient:
             if not page.messages:
                 break
             aggregate = self._merge_snapshots(aggregate, page)
+            pages_fetched += 1
             if len(page.messages) < BITRIX_MESSAGES_PAGE_LIMIT:
+                break
+            if max_pages and pages_fetched >= max_pages:
                 break
             next_first_id = max(message.message_id for message in page.messages)
 
@@ -163,8 +169,8 @@ class BitrixClient:
         self,
         *,
         dialog_id: str,
-        first_id: Optional[int] = None,
-        last_id: Optional[int] = None,
+        first_id: int | None = None,
+        last_id: int | None = None,
         limit: int = BITRIX_MESSAGES_PAGE_LIMIT,
     ) -> BitrixDialogSnapshot:
         payload: dict[str, Any] = {
@@ -228,7 +234,7 @@ class BitrixClient:
                     response = await self._client.get(url)
                 response.raise_for_status()
                 return response.content
-            except (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError, httpx.HTTPStatusError) as exc:
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError) as exc:
                 is_last_attempt = attempt >= self.settings.bitrix_retry_attempts
                 if is_last_attempt:
                     raise
@@ -241,8 +247,14 @@ class BitrixClient:
                 await asyncio.sleep(self.settings.bitrix_retry_base_delay_seconds)
         raise RuntimeError(f"Bitrix file download exhausted retries for {url}")
 
-    async def download_file_by_id(self, file_id: int, fallback_url: Optional[str] = None) -> bytes:
-        primary_url: Optional[str] = None
+    async def download_file_by_id(self, file_id: int, fallback_url: str | None = None) -> bytes:
+        # use known URL from message payload to avoid extra API call
+        if fallback_url:
+            try:
+                return await self.download_file(fallback_url)
+            except Exception:
+                logger.debug("fallback_url download failed for file_id=%s, trying imbot.v2.File.download", file_id)
+        primary_url: str | None = None
         try:
             primary_url = await self._get_file_download_url(file_id)
         except Exception as exc:
@@ -264,7 +276,7 @@ class BitrixClient:
             f"Unable to download Bitrix file_id={file_id}. Tried: {' | '.join(errors)}"
         )
 
-    async def get_message_reply_id(self, *, dialog_id: str, message_id: int) -> Optional[int]:
+    async def get_message_reply_id(self, *, dialog_id: str, message_id: int) -> int | None:
         """Fetch REPLY_ID for a specific message via im.dialog.messages.search.
 
         im.dialog.messages.get does not return REPLY_ID in params,
@@ -333,6 +345,12 @@ class BitrixClient:
 
         for attempt in range(1, self.settings.bitrix_retry_attempts + 1):
             try:
+                now = asyncio.get_running_loop().time()
+                wait_for = self._rate_last_request + self._rate_min_interval - now
+                if wait_for > 0:
+                    await asyncio.sleep(wait_for)
+                self._rate_last_request = asyncio.get_running_loop().time()
+
                 async with self._request_semaphore:
                     response = await self._client.post(url, json=payload)
 

@@ -261,7 +261,6 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.state_store.add_chat_mapping.assert_not_awaited()
 
     async def test_disconnect_mapping_removes_and_reloads(self) -> None:
-        from tests.helpers import make_mapping
         self.state_store.remove_chat_mapping = AsyncMock(return_value=True)
         self.state_store.load_all_chat_mappings = AsyncMock(return_value=())
         removed = await self.service.disconnect_mapping(-1001234567890, None)
@@ -274,17 +273,17 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_per_channel_queue_throttling_and_overflow(self) -> None:
         from unittest.mock import patch
-        
+
         loop = asyncio.get_event_loop()
         original_time = loop.time
         original_sleep = asyncio.sleep
-        
+
         loop_time = 10.0
         def get_time():
             return loop_time
-        
+
         loop.time = get_time
-        
+
         sleep_calls = []
         async def fake_sleep(delay):
             nonlocal loop_time
@@ -301,19 +300,19 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
                 msg1 = make_message(chat_id=-1001234567890, message_id=1)
                 msg2 = make_message(chat_id=-1001234567890, message_id=2)
                 msg3 = make_message(chat_id=-1001234567890, message_id=3)
-                
+
                 await self.service.enqueue_telegram_message(msg1)
                 await self.service.enqueue_telegram_message(msg2)
                 await self.service.enqueue_telegram_message(msg3)
 
                 queue = self.service._channel_queues[-1001234567890]
-                
+
                 # Let loop process
                 for _ in range(20):
                     if queue.empty():
                         break
                     await asyncio.sleep(0)
-                
+
                 throttling_sleeps = [d for d in sleep_calls if d > 0]
                 self.assertEqual(len(throttling_sleeps), 2)
                 self.assertAlmostEqual(throttling_sleeps[0], 0.2)
@@ -324,16 +323,16 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
             with patch("asyncio.create_task") as mock_create_task, \
                  patch.object(self.service, "resolve_mapping_for_telegram_message", return_value=make_mapping()):
                 mock_create_task.return_value = AsyncMock()
-                
+
                 chat_id_overflow = 9999
                 max_size = self.service.settings.bitrix_send_queue_maxsize
                 for i in range(max_size + 5):
                     msg = make_message(chat_id=chat_id_overflow, message_id=100 + i)
                     await self.service.enqueue_telegram_message(msg)
-                
+
                 # Channel 1 queue has max size, and is full. Next 5 messages are dropped.
                 self.assertEqual(self.service._channel_queues[chat_id_overflow].qsize(), max_size)
-                
+
                 # Other channel is unaffected
                 chat_id_other = 8888
                 msg_other = make_message(chat_id=chat_id_other, message_id=9999)
@@ -354,9 +353,9 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
 
         new_mapping = make_mapping(mapping_id=99, tg_chat_id=-9999, bitrix_dialog_id="chat77")
         self.state_store.load_all_chat_mappings = AsyncMock(return_value=(new_mapping,))
-        
+
         await self.service.reload_mappings()
-        
+
         dummy_task.cancel.assert_called_once()
         self.assertNotIn(chat_id, self.service._channel_workers)
         self.assertNotIn(chat_id, self.service._channel_queues)
@@ -371,10 +370,10 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         settings = make_settings(chat_mappings=tuple(mappings))
         import dataclasses
         settings = dataclasses.replace(settings, sync_bitrix_to_telegram=True)
-        
+
         # Instantiate service
         service = MirrorService(settings, self.bitrix, self.state_store)
-        
+
         # Track concurrency
         active_concurrency = 0
         max_concurrency = 0
@@ -388,7 +387,7 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
                 active_concurrency += 1
                 if active_concurrency > max_concurrency:
                     max_concurrency = active_concurrency
-            
+
             # Sleep a bit to force concurrent execution
             await asyncio.sleep(0.01)
 
@@ -424,36 +423,36 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         settings = make_settings(chat_mappings=())
         import dataclasses
         settings = dataclasses.replace(settings, sync_bitrix_to_telegram=True)
-        
+
         service = MirrorService(settings, self.bitrix, self.state_store)
         app = SimpleNamespace()
-        
+
         # Start service
         await service.start(app)  # type: ignore[arg-type]
-        
+
         # Verify scheduler task is None because mappings was empty
         self.assertIsNone(service._scheduler_task)
-        
+
         # Mock load_all_chat_mappings to return a mapping
         new_mapping = make_mapping(mapping_id=1, tg_chat_id=-1001234567890, bitrix_dialog_id="chat42")
         self.state_store.load_all_chat_mappings = AsyncMock(return_value=(new_mapping,))
-        
+
         # Reload mappings (simulates /connect)
         await service.reload_mappings()
-        
+
         # Verify scheduler task has been started dynamically!
         self.assertIsNotNone(service._scheduler_task)
         self.assertFalse(service._scheduler_task.done())
-        
+
         # Now change load_all_chat_mappings to return empty tuple (simulates disconnecting all mappings)
         self.state_store.load_all_chat_mappings = AsyncMock(return_value=())
-        
+
         # Reload mappings again
         await service.reload_mappings()
-        
+
         # Verify scheduler task has been cancelled and cleaned up to None!
         self.assertIsNone(service._scheduler_task)
-        
+
         # Cleanup
         await service.stop()
 
@@ -509,14 +508,14 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_enqueue_telegram_message_uses_configured_queue_maxsize(self) -> None:
         self.service.settings = dataclasses.replace(self.service.settings, bitrix_send_queue_maxsize=555)
         self.service._forwarding_enabled = True
-        
+
         message = make_message(text="test queue size")
         await self.service.enqueue_telegram_message(message)
-        
+
         # Get the created queue for the chat
         queue = self.service._channel_queues[message.chat_id]
         self.assertEqual(queue.maxsize, 555)
-        
+
         # Cancel the worker task to prevent background task leaks in tests
         if message.chat_id in self.service._channel_workers:
             self.service._channel_workers[message.chat_id].cancel()

@@ -45,7 +45,6 @@ def make_settings(**overrides: object) -> Settings:
         "bitrix_poll_max_backoff_seconds": 0.2,
         "bitrix_max_concurrent_requests": 2,
         "bitrix_send_queue_maxsize": 10,
-        "bitrix_send_workers": 1,
         "bitrix_rescan_recent_messages_limit": 20,
         "max_file_size_bytes": 1024 * 1024,
         "file_cache_dir": "",

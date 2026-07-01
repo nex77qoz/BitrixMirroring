@@ -4,10 +4,9 @@ import os
 import sqlite3 as _sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path as _Path
-from typing import Optional
 
 
-def _read_env(name: str, default: Optional[str] = None) -> str:
+def _read_env(name: str, default: str | None = None) -> str:
     value = os.getenv(name)
     if value is None:
         if default is None:
@@ -26,7 +25,7 @@ def _parse_bool(name: str, default: str) -> bool:
     raise ValueError(f"{name} must be a boolean value")
 
 
-def _parse_optional_int(name: str) -> Optional[int]:
+def _parse_optional_int(name: str) -> int | None:
     raw = _read_env(name, "")
     if not raw:
         return None
@@ -47,7 +46,7 @@ def _parse_float(name: str, default: str, *, minimum: float) -> float:
     return value
 
 
-def _parse_int(name: str, default: Optional[str] = None, *, minimum: int) -> int:
+def _parse_int(name: str, default: str | None = None, *, minimum: int) -> int:
     raw = _read_env(name, default)
     try:
         value = int(raw)
@@ -88,7 +87,7 @@ class ChatMapping:
     label: str = ""
 
     @property
-    def default_topic_id(self) -> Optional[int]:
+    def default_topic_id(self) -> int | None:
         return self.topic_ids[0] if self.topic_ids else None
 
 
@@ -157,7 +156,7 @@ class Settings:
     prefix_with_sender: bool
     disable_link_preview: bool
     request_timeout_seconds: float
-    socks5_proxy_url: Optional[str]
+    socks5_proxy_url: str | None
     bitrix_poll_interval_seconds: float
     sync_bitrix_to_telegram: bool
     sync_telegram_to_bitrix: bool
@@ -169,7 +168,6 @@ class Settings:
     bitrix_poll_max_backoff_seconds: float
     bitrix_max_concurrent_requests: int
     bitrix_send_queue_maxsize: int
-    bitrix_send_workers: int
     bitrix_rescan_recent_messages_limit: int
     max_file_size_bytes: int
     file_cache_dir: str
@@ -179,16 +177,16 @@ class Settings:
     mirror_http_port: int
     bitrix_webhook_bridge_enabled: bool
     mirror_internal_event_path: str
-    mirror_internal_webhook_secret: Optional[str]
+    mirror_internal_webhook_secret: str | None
     telegram_webhook_enabled: bool
     telegram_webhook_path: str
-    telegram_webhook_public_url: Optional[str]
-    telegram_webhook_secret: Optional[str]
+    telegram_webhook_public_url: str | None
+    telegram_webhook_secret: str | None
     telegram_webhook_drop_pending_updates: bool
     telegram_webhook_strict_verify: bool
 
     @staticmethod
-    def from_env() -> "Settings":
+    def from_env() -> Settings:
         telegram_bot_token = _read_env("TELEGRAM_BOT_TOKEN")
         bitrix_webhook_base = _read_env("BITRIX_WEBHOOK_BASE").rstrip("/")
         if not bitrix_webhook_base.startswith(("http://", "https://")):
@@ -256,7 +254,6 @@ class Settings:
             bitrix_poll_max_backoff_seconds=_parse_float("BITRIX_POLL_MAX_BACKOFF_SECONDS", "30", minimum=0.1),
             bitrix_max_concurrent_requests=_parse_int("BITRIX_MAX_CONCURRENT_REQUESTS", "5", minimum=1),
             bitrix_send_queue_maxsize=_parse_int("BITRIX_SEND_QUEUE_MAXSIZE", "1000", minimum=1),
-            bitrix_send_workers=_parse_int("BITRIX_SEND_WORKERS", "2", minimum=1),
             bitrix_rescan_recent_messages_limit=_parse_int("BITRIX_RESCAN_RECENT_MESSAGES_LIMIT", "100", minimum=1),
             max_file_size_bytes=_parse_int("MAX_FILE_SIZE_BYTES", str(100 * 1024 * 1024), minimum=1),
             file_cache_dir=_read_env("FILE_CACHE_DIR", ""),

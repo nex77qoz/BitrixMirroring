@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 import tempfile
 import time
 import unittest
-import asyncio
 from contextlib import closing
 
 from mirror_state_store import MirrorStateStore
@@ -149,20 +149,68 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         token = "testtoken123"
         expires_at = int(time.time()) + 600
         await self.store.save_pending_connection("chat123", token, expires_at)
-        
+
         # 2. Verify valid token
         is_valid = await self.store.verify_and_consume_token("chat123", token)
         self.assertTrue(is_valid)
-        
+
         # 3. Double consumption must fail
         is_valid_again = await self.store.verify_and_consume_token("chat123", token)
         self.assertFalse(is_valid_again)
-        
+
         # 4. Expired token must fail
         expired_token = "expired456"
         await self.store.save_pending_connection("chat123", expired_token, int(time.time()) - 10)
         is_expired_valid = await self.store.verify_and_consume_token("chat123", expired_token)
         self.assertFalse(is_expired_valid)
+
+    async def test_cleanup_preserves_recently_updated_links(self) -> None:
+        """Links updated recently must survive cleanup even if created long ago (#5)."""
+        await self.store.upsert_link(
+            telegram_chat_id=10,
+            telegram_message_id=20,
+            bitrix_message_id=100,
+            origin=MirrorOrigin.BITRIX,
+            telegram_message_date_unix=None,
+            bitrix_author_id=7,
+            last_seen_bitrix_revision="abc",
+        )
+        # link created 8 days ago, updated 1 minute ago. max_age = 7 days.
+        old_created = int(time.time()) - 8 * 86400
+        recent_update = int(time.time()) - 60
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "UPDATE message_links SET created_at_unix = ?, updated_at_unix = ? WHERE bitrix_message_id = ?",
+                (old_created, recent_update, 100),
+            )
+            connection.commit()
+        deleted = await self.store.cleanup_old_links(max_age_seconds=7 * 86400)
+        self.assertEqual(deleted, 0, "Recently updated link must survive cleanup")
+        link = await self.store.get_link_by_bitrix_message(bitrix_message_id=100)
+        self.assertIsNotNone(link, "Recently updated link must still exist after cleanup")
+
+    async def test_cleanup_removes_stale_updated_links(self) -> None:
+        """Links with both old created_at and old updated_at must be deleted."""
+        await self.store.upsert_link(
+            telegram_chat_id=10,
+            telegram_message_id=21,
+            bitrix_message_id=101,
+            origin=MirrorOrigin.TELEGRAM,
+            telegram_message_date_unix=None,
+            bitrix_author_id=None,
+            last_seen_bitrix_revision="rev",
+        )
+        old_stale = int(time.time()) - 8 * 86400
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "UPDATE message_links SET created_at_unix = ?, updated_at_unix = ? WHERE bitrix_message_id = ?",
+                (old_stale, old_stale, 101),
+            )
+            connection.commit()
+        deleted = await self.store.cleanup_old_links(max_age_seconds=7 * 86400)
+        self.assertEqual(deleted, 1, "Stale link must be deleted")
+        link = await self.store.get_link_by_bitrix_message(bitrix_message_id=101)
+        self.assertIsNone(link, "Deleted link must be absent")
 
     async def test_concurrent_token_consumption_is_atomic(self) -> None:
         """Two simultaneous calls must return exactly one True."""

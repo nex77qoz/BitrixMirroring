@@ -8,6 +8,7 @@ from tests.helpers import make_settings
 
 try:
     from fastapi.testclient import TestClient
+
     from main import _allowed_updates, _build_http_app
     IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - environment-specific import failure

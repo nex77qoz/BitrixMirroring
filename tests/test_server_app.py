@@ -2,8 +2,8 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 # Setup temporary DB path before importing app.py so it uses this path
 temp_dir = tempfile.TemporaryDirectory()
@@ -26,6 +26,7 @@ with conn:
 conn.close()
 
 import sys
+
 sys.path.append(str(Path(__file__).parent.parent / "server-side"))
 from app import app
 from fastapi.testclient import TestClient
@@ -173,7 +174,8 @@ class DbConnectWalLoggingTest(unittest.TestCase):
         if _server_side not in sys.path:
             sys.path.insert(0, _server_side)
 
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
+
         import monitor_app
 
         mock_conn = MagicMock(spec=sqlite3.Connection)

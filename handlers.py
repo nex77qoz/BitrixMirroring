@@ -210,7 +210,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             topic_name = message.forum_topic_edited.name
         elif message.reply_to_message and message.reply_to_message.forum_topic_created:
             topic_name = message.reply_to_message.forum_topic_created.name
-            
+
         if topic_name:
             mirror.cache_topic_name(message.chat_id, message.message_thread_id, topic_name)
 
@@ -328,7 +328,7 @@ async def on_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE
 _BITRIX_ID_RE = re.compile(r"^(chat\d+|sg\d+|\d+)$")
 
 
-async def _check_admin(update: Update, mirror: "MirrorService") -> bool:
+async def _check_admin(update: Update, mirror: MirrorService) -> bool:
     user = update.effective_user
     if not user:
         return False
@@ -345,12 +345,12 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     mirror: MirrorService = context.application.bot_data["mirror_service"]
     args = context.args or []
-    
+
     if len(args) == 2:
         # Token-based flow for self-service connection (no admin check required!)
         bitrix_dialog_id = args[0].strip()
         token = args[1].strip()
-        
+
         if not _BITRIX_ID_RE.match(bitrix_dialog_id):
             sent = await msg.reply_text("Неверный формат Bitrix Chat ID.")
             _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
@@ -361,7 +361,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             sent = await msg.reply_text("⚠️ Неверный, использованный или просроченный токен подключения.")
             _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
             return
-            
+
     elif len(args) == 1:
         # Traditional admin-only connection flow
         if not await _check_admin(update, mirror):

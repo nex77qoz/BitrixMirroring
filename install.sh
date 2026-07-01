@@ -326,8 +326,9 @@ step_create_service_user() {
     local sudoers_file="/etc/sudoers.d/bitrix-bot-services"
     cat > "$sudoers_file" << EOF
 # Allow $SVC_USER to restart bot services and view logs (used by monitoring dashboard)
-${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-bot, /usr/bin/systemctl restart bitrix-monitor, /usr/bin/journalctl -u bitrix-telegram-mirror *, /usr/bin/journalctl -u bitrix-bot *, /usr/bin/journalctl -u bitrix-monitor *
+${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-bot, /usr/bin/systemctl restart bitrix-monitor, /usr/bin/journalctl --no-pager -u bitrix-telegram-mirror, /usr/bin/journalctl --no-pager -u bitrix-bot, /usr/bin/journalctl --no-pager -u bitrix-monitor
 EOF
+    visudo -c -f "$sudoers_file" || { print_error "Некорректный синтаксис sudoers-файла"; return 1; }
     chmod 440 "$sudoers_file"
     print_ok "Sudoers-правило создано: $sudoers_file"
 }
@@ -1077,10 +1078,25 @@ step_create_services() {
     print_step "Создание systemd-сервисов"
 
     # 1 — main mirror process
+    local _hardening_mirror="
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=${INSTALL_DIR} /tmp
+PrivateTmp=yes
+MemoryMax=512M
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+UMask=027"
     cat > /etc/systemd/system/bitrix-telegram-mirror.service << EOF
 [Unit]
 Description=Telegram Bitrix Mirror Bot
 After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 User=${SVC_USER}
@@ -1090,18 +1106,36 @@ EnvironmentFile=${ENV_FILE}
 ExecStart=${VENV}/bin/python ${INSTALL_DIR}/main.py
 Restart=always
 RestartSec=3
+StartLimitBurst=5
+StartLimitIntervalSec=60
 StandardOutput=journal
 StandardError=journal
+${_hardening_mirror}
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
     # 2 — webhook handler
+    local _hardening_sidecar="
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=${INSTALL_DIR} /tmp
+PrivateTmp=yes
+MemoryMax=256M
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+UMask=027"
     cat > /etc/systemd/system/bitrix-bot.service << EOF
 [Unit]
 Description=Bitrix Bot Webhook Handler
 After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 User=${SVC_USER}
@@ -1111,8 +1145,11 @@ EnvironmentFile=${ENV_FILE}
 ExecStart=${VENV}/bin/uvicorn app:app --host 127.0.0.1 --port 8081
 Restart=always
 RestartSec=3
+StartLimitBurst=5
+StartLimitIntervalSec=60
 StandardOutput=journal
 StandardError=journal
+${_hardening_sidecar}
 
 [Install]
 WantedBy=multi-user.target
@@ -1123,6 +1160,8 @@ EOF
 [Unit]
 Description=Bitrix Bot Monitoring Dashboard
 After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 User=${SVC_USER}
@@ -1132,8 +1171,11 @@ EnvironmentFile=${ENV_FILE}
 ExecStart=${VENV}/bin/uvicorn monitor_app:app --host 127.0.0.1 --port 8082
 Restart=always
 RestartSec=3
+StartLimitBurst=5
+StartLimitIntervalSec=60
 StandardOutput=journal
 StandardError=journal
+${_hardening_sidecar}
 
 [Install]
 WantedBy=multi-user.target
@@ -1829,7 +1871,7 @@ load_config_file() {
                 val="${val#\'}"
                 export "$key"="$val"
                 # Скрываем вывод для секретных переменных
-                if [[ "$key" =~ TOKEN|SECRET|PASSWORD|WEBHOOK ]]; then
+                if [[ "$key" =~ TOKEN|SECRET|PASSWORD|WEBHOOK|CLIENT_ID|BOT_ID|CODE ]]; then
                     print_ok "Загружено: $key=********"
                   else
                       print_ok "Загружено: $key=$val"
@@ -1847,6 +1889,7 @@ main() {
     mkdir -p "$(dirname "$LOG_FILE")"
     [[ -f "$LOG_FILE" ]] && mv -f "$LOG_FILE" "${LOG_FILE}.old"
     touch "$LOG_FILE"
+    chmod 600 "$LOG_FILE"
 
     CONFIG_FILE_PATH=""
     local action="install"

@@ -1,14 +1,34 @@
 [Unit]
 Description=Bitrix Bot Monitoring Dashboard
 After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
-User=root
+User=bitrix-bot
+Group=bitrix-bot
 WorkingDirectory=/opt/bitrix-bot/server-side
 EnvironmentFile=/opt/bitrix-bot/.env
 ExecStart=/opt/bitrix-bot/.venv/bin/uvicorn monitor_app:app --host 127.0.0.1 --port 8082
 Restart=always
 RestartSec=3
+StartLimitBurst=5
+StartLimitIntervalSec=60
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/bitrix-bot /tmp
+PrivateTmp=yes
+MemoryMax=256M
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+UMask=027
 
 [Install]
 WantedBy=multi-user.target

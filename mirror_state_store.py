@@ -101,6 +101,12 @@ class MirrorStateStore:
     async def set_forwarding_enabled(self, enabled: bool) -> None:
         await asyncio.to_thread(self._set_forwarding_enabled_sync, enabled)
 
+    async def load_bitrix_event_offset(self, bot_id: int) -> int | None:
+        return await asyncio.to_thread(self._load_bitrix_event_offset_sync, bot_id)
+
+    async def save_bitrix_event_offset(self, bot_id: int, offset: int) -> None:
+        await asyncio.to_thread(self._save_bitrix_event_offset_sync, bot_id, offset)
+
     async def cleanup_old_links(self, max_age_seconds: int = 7 * 24 * 3600) -> int:
         """Delete message_links older than max_age_seconds. Returns count of deleted rows."""
         return await asyncio.to_thread(self._cleanup_old_links_sync, max_age_seconds)
@@ -637,6 +643,39 @@ class MirrorStateStore:
                     updated_at_unix = excluded.updated_at_unix
                 """,
                 ("1" if enabled else "0", now),
+            )
+            connection.commit()
+
+    def _load_bitrix_event_offset_sync(self, bot_id: int) -> int | None:
+        key = f"bitrix_event_offset:{bot_id}"
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM runtime_settings WHERE key = ?", (key,)
+            ).fetchone()
+        if row is None:
+            return None
+        val = str(row[0]).strip()
+        return int(val) if val.isdigit() else None
+
+    def _save_bitrix_event_offset_sync(self, bot_id: int, offset: int) -> None:
+        key = f"bitrix_event_offset:{bot_id}"
+        now = int(time.time())
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM runtime_settings WHERE key = ?", (key,)
+            ).fetchone()
+            current = int(row[0]) if row and str(row[0]).isdigit() else None
+            if current is not None and offset < current:
+                return
+            connection.execute(
+                """
+                INSERT INTO runtime_settings(key, value, updated_at_unix)
+                VALUES(?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at_unix = excluded.updated_at_unix
+                """,
+                (key, str(offset), now),
             )
             connection.commit()
 

@@ -272,3 +272,16 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await store.add_chat_mapping(-100456, "chat999", [], "third")
 
+    async def test_bitrix_event_offset_is_scoped_by_bot_id(self) -> None:
+        self.assertIsNone(await self.store.load_bitrix_event_offset(7))
+        await self.store.save_bitrix_event_offset(7, 101)
+        await self.store.save_bitrix_event_offset(8, 202)
+        self.assertEqual(await self.store.load_bitrix_event_offset(7), 101)
+        self.assertEqual(await self.store.load_bitrix_event_offset(8), 202)
+
+    async def test_bitrix_event_offset_rejects_backwards_write(self) -> None:
+        await self.store.save_bitrix_event_offset(7, 101)
+        await self.store.save_bitrix_event_offset(7, 99)
+        self.assertEqual(await self.store.load_bitrix_event_offset(7), 101)
+
+

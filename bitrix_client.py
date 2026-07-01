@@ -87,9 +87,15 @@ class BitrixClient:
         next_offset = result.get('nextOffset')
         if not isinstance(events, list) or (next_offset is not None and type(next_offset) is not int):
             raise RuntimeError(f'Unexpected Bitrix event response: {data}')
-        if any(not isinstance(event, dict) or type(event.get('eventId')) is not int for event in events):
-            raise RuntimeError(f'Bitrix event cannot be acknowledged safely: {data}')
-        return BitrixEventPage(events=tuple(BitrixBotEvent.from_api_payload(event) for event in events), next_offset=next_offset, has_more=bool(result.get('hasMore')))
+        parsed_events: list[BitrixBotEvent] = []
+        for raw_event in events:
+            if not isinstance(raw_event, dict):
+                raise RuntimeError(f'Bitrix event cannot be acknowledged safely: {data}')
+            event = BitrixBotEvent.from_api_payload(raw_event)
+            if event is None:
+                raise RuntimeError(f'Bitrix event cannot be acknowledged safely: {data}')
+            parsed_events.append(event)
+        return BitrixEventPage(events=tuple(parsed_events), next_offset=next_offset, has_more=bool(result.get('hasMore')))
 
     async def download_file(self, url: str) -> bytes:
         for attempt in range(1, self.settings.bitrix_retry_attempts + 1):
@@ -165,7 +171,7 @@ class BitrixClient:
                 if response.status_code >= 500:
                     raise httpx.HTTPStatusError(f'Temporary Bitrix HTTP error: {response.status_code}', request=response.request, response=response)
                 response.raise_for_status()
-                data = response.json()
+                data = cast(dict[str, Any], response.json())
                 if 'error' in data:
                     error_code = str(data.get('error') or '')
                     if error_code.upper() in {'QUERY_LIMIT_EXCEEDED', 'TEMPORARY_ERROR'}:

@@ -96,7 +96,7 @@ def _check_auth(credentials: HTTPBasicCredentials = Depends(security)) -> str:
             status_code=401,
             headers={"WWW-Authenticate": 'Basic realm="Bitrix Bot Monitor"'},
         )
-    return credentials.username
+    return credentials.username  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------

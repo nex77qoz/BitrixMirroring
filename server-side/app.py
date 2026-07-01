@@ -71,7 +71,7 @@ def nested_set(target: dict, parts: list[str], value):
 def parse_bitrix_form(raw: bytes) -> dict:
     text = raw.decode('utf-8', errors='ignore')
     parsed = parse_qs(text, keep_blank_values=True)
-    result = {}
+    result: dict[str, object] = {}
     for key, values in parsed.items():
         value = values[0] if len(values) == 1 else values
         nested_set(result, split_key(key), value)

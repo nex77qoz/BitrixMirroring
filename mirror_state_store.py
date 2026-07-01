@@ -304,7 +304,10 @@ class MirrorStateStore:
             try:
                 cursor = connection.execute('INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) VALUES (?,?,?,?,?)', (tg_chat_id, bitrix_dialog_id, label, now, topic_ids_str))
                 connection.commit()
-                return cursor.lastrowid
+                last_id = cursor.lastrowid
+                if last_id is None:
+                    raise RuntimeError('Failed to get lastrowid after INSERT into chat_mappings')
+                return last_id
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f'Bitrix dialog {bitrix_dialog_id} уже привязан к другому маппингу') from exc
 

@@ -334,7 +334,7 @@ class MirrorService:
         if mapping is None:
             logger.debug('Bitrix message for unmapped dialog %s, acknowledging without forwarding', dialog_id)
             return
-        existing_link = await self.state_store.get_link_by_bitrix_message(bitrix_message.message_id)
+        existing_link = await self.state_store.get_link_by_bitrix_message(bitrix_message_id=bitrix_message.message_id)
         if existing_link is not None:
             return
         if not self._forwarding_enabled:
@@ -622,7 +622,7 @@ class MirrorService:
         if last_seen is not None and bitrix_message.message_id <= last_seen:
             self._forward_attempts.pop(bitrix_message.message_id, None)
             return False
-        existing_link = await self.state_store.get_link_by_bitrix_message(bitrix_message.message_id)
+        existing_link = await self.state_store.get_link_by_bitrix_message(bitrix_message_id=bitrix_message.message_id)
         if existing_link is not None:
             return False
         if bitrix_message.author_id == 0:
@@ -789,7 +789,7 @@ class MirrorService:
             username = message.from_user.username
             if username:
                 return f'{full_name} (@{username})'
-            return full_name
+            return full_name  # type: ignore[no-any-return]
         return 'Неизвестный отправитель'
 
     def _build_body(self, message: Message) -> str:
@@ -810,9 +810,9 @@ class MirrorService:
 
     def _extract_primary_text(self, message: Message) -> str:
         if message.text:
-            return message.text
+            return message.text  # type: ignore[no-any-return]
         if message.caption:
-            return message.caption
+            return message.caption  # type: ignore[no-any-return]
         return ''
 
     def _describe_attachments(self, message: Message) -> str:

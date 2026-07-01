@@ -708,6 +708,8 @@ MIRROR_INTERNAL_BASE_URL=$(env_escape "${MIRROR_INTERNAL_BASE_URL}")
 MIRROR_INTERNAL_EVENT_PATH=$(env_escape "${MIRROR_INTERNAL_EVENT_PATH}")
 MIRROR_INTERNAL_WEBHOOK_SECRET=$(env_escape "${MIRROR_INTERNAL_WEBHOOK_SECRET:-}")
 MIRROR_INTERNAL_TIMEOUT_SECONDS=10
+# Совместимость: v1-события для устаревшего webhook-моста (выключен выше).
+# Fetch-режим (imbot.v2.Event.get) использует события ONIMBOTV2* и не читает эту переменную.
 BITRIX_FORWARDED_EVENTS=$(env_escape "ONIMBOTMESSAGEADD,ONIMBOTJOINCHAT")
 
 # Форматирование

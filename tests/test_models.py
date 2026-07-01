@@ -70,8 +70,8 @@ class ModelsTestCase(unittest.TestCase):
 
     def test_bitrix_bot_event_requires_integer_event_id(self) -> None:
         for payload in ({"type": "message"}, {"eventId": True}):
-            with self.subTest(payload=payload), self.assertRaises(ValueError):
-                BitrixBotEvent.from_api_payload(payload)
+            with self.subTest(payload=payload):
+                self.assertIsNone(BitrixBotEvent.from_api_payload(payload))
 
     def test_bitrix_bot_event_defaults_malformed_optional_fields(self) -> None:
         event = BitrixBotEvent.from_api_payload({"eventId": 12, "type": 3, "data": []})

@@ -15,10 +15,10 @@ class BitrixBotEvent:
     data: dict[str, Any]
 
     @staticmethod
-    def from_api_payload(payload: dict[str, Any]) -> BitrixBotEvent:
+    def from_api_payload(payload: dict[str, Any]) -> BitrixBotEvent | None:
         event_id = payload.get("eventId")
         if type(event_id) is not int:
-            raise ValueError("Bitrix event is missing integer eventId")
+            return None
         event_type = payload.get("type")
         data = payload.get("data")
         return BitrixBotEvent(

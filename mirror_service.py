@@ -279,6 +279,8 @@ class MirrorService:
         handler = handlers.get(event.event_type)
         if handler is not None:
             await handler(event.data)
+        else:
+            logger.warning('Acknowledging unhandled Bitrix event type=%r eventId=%s', event.event_type, event.event_id)
 
     async def _handle_bitrix_message_add(self, data: dict[str, Any]) -> None:
         chat = data.get('chat')
@@ -317,6 +319,7 @@ class MirrorService:
             return
         mapping = self.get_mapping_for_bitrix_dialog(dialog_id)
         if mapping is None:
+            logger.debug('Bitrix message for unmapped dialog %s, acknowledging without forwarding', dialog_id)
             return
         existing_link = await self.state_store.get_link_by_bitrix_message(bitrix_message.message_id)
         if existing_link is not None:

@@ -9,6 +9,33 @@ _logger = logging.getLogger("tg-bitrix-mirror")
 
 
 @dataclass(frozen=True)
+class BitrixBotEvent:
+    event_id: int
+    event_type: str
+    data: dict[str, Any]
+
+    @staticmethod
+    def from_api_payload(payload: dict[str, Any]) -> BitrixBotEvent:
+        event_id = payload.get("eventId")
+        if type(event_id) is not int:
+            raise ValueError("Bitrix event is missing integer eventId")
+        event_type = payload.get("type")
+        data = payload.get("data")
+        return BitrixBotEvent(
+            event_id=event_id,
+            event_type=event_type if isinstance(event_type, str) else "",
+            data=data if isinstance(data, dict) else {},
+        )
+
+
+@dataclass(frozen=True)
+class BitrixEventPage:
+    events: tuple[BitrixBotEvent, ...]
+    next_offset: int | None
+    has_more: bool
+
+
+@dataclass(frozen=True)
 class BitrixUser:
     user_id: int
     display_name: str
@@ -19,8 +46,12 @@ class BitrixUser:
         if not isinstance(raw_user_id, int):
             return None
 
-        last_name = str(payload.get("last_name") or payload.get("LAST_NAME") or "").strip()
-        first_name = str(payload.get("first_name") or payload.get("NAME") or "").strip()
+        last_name = str(
+            payload.get("last_name") or payload.get("lastName") or payload.get("LAST_NAME") or ""
+        ).strip()
+        first_name = str(
+            payload.get("first_name") or payload.get("firstName") or payload.get("NAME") or ""
+        ).strip()
         full_name = " ".join(part for part in [last_name, first_name] if part).strip()
         display_name = full_name or str(payload.get("name") or "").strip() or f"Bitrix user_id: {raw_user_id}"
         return BitrixUser(user_id=raw_user_id, display_name=display_name)
@@ -52,7 +83,7 @@ class BitrixMessage:
         if not isinstance(raw_message_id, int):
             return None
 
-        raw_author_id = payload.get("author_id")
+        raw_author_id = payload.get("author_id") if "author_id" in payload else payload.get("authorId")
         author_id: int | None
         if isinstance(raw_author_id, int):
             author_id = raw_author_id

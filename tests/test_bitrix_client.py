@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from bitrix_client import BitrixClient
+from models import BitrixBotEvent, BitrixEventPage
 from tests.helpers import make_settings
 
 
@@ -21,6 +22,58 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_set_message_like_ignores_duplicate_errors(self) -> None:
         self.client._call = AsyncMock(side_effect=RuntimeError("Bitrix error: REACTION_ALREADY_SET"))
         await self.client.set_message_like(10, liked=True)
+
+    async def test_get_bot_events_parses_page_and_sends_exact_payload(self) -> None:
+        self.client._call = AsyncMock(
+            return_value={
+                "result": {
+                    "events": [{"eventId": 8, "type": "MESSAGE_ADD", "data": {"messageId": 3}}],
+                    "nextOffset": 9,
+                    "hasMore": 1,
+                }
+            }
+        )
+
+        page = await self.client.get_bot_events(offset=7, limit=1500)
+
+        self.assertEqual(
+            page,
+            BitrixEventPage(
+                events=(BitrixBotEvent(8, "MESSAGE_ADD", {"messageId": 3}),),
+                next_offset=9,
+                has_more=True,
+            ),
+        )
+        self.client._call.assert_awaited_once_with(
+            "imbot.v2.Event.get",
+            {"botId": 7, "botToken": "bot-token", "limit": 1000, "offset": 7},
+        )
+
+    async def test_get_bot_events_omits_offset_and_clamps_low_limit(self) -> None:
+        self.client._call = AsyncMock(
+            return_value={"result": {"events": [], "nextOffset": None, "hasMore": False}}
+        )
+
+        await self.client.get_bot_events(offset=None, limit=0)
+
+        self.client._call.assert_awaited_once_with(
+            "imbot.v2.Event.get",
+            {"botId": 7, "botToken": "bot-token", "limit": 1},
+        )
+
+    async def test_get_bot_events_rejects_malformed_response(self) -> None:
+        invalid_results: tuple[object, ...] = (
+            [],
+            {"events": {}},
+            {"events": [{}]},
+            {"events": [], "nextOffset": "9"},
+            {"events": [], "nextOffset": True},
+        )
+        for result in invalid_results:
+            with self.subTest(result=result):
+                self.client._call = AsyncMock(return_value={"result": result})
+                with self.assertRaises(RuntimeError):
+                    await self.client.get_bot_events(offset=None)
 
     async def test_get_messages_page_parses_snapshot(self) -> None:
         self.client._call = AsyncMock(

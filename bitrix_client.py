@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import httpx
 
-from models import BitrixDialogSnapshot, BitrixFile, BitrixMessage, BitrixUser
+from models import BitrixBotEvent, BitrixDialogSnapshot, BitrixEventPage, BitrixFile, BitrixMessage, BitrixUser
 from settings import Settings
 
 logger = logging.getLogger("tg-bitrix-mirror")
@@ -117,6 +117,30 @@ class BitrixClient:
     async def get_latest_message_id(self, *, dialog_id: str) -> int | None:
         snapshot = await self.get_messages_page(dialog_id=dialog_id, limit=1)
         return max((message.message_id for message in snapshot.messages), default=None)
+
+    async def get_bot_events(self, *, offset: int | None, limit: int = 100) -> BitrixEventPage:
+        payload: dict[str, Any] = {
+            "botId": self.settings.bitrix_bot_id,
+            "botToken": self.settings.bitrix_bot_client_id,
+            "limit": max(1, min(limit, 1000)),
+        }
+        if offset is not None:
+            payload["offset"] = offset
+        data = await self._call("imbot.v2.Event.get", payload)
+        result = data.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Unexpected Bitrix event response: {data}")
+        events = result.get("events")
+        next_offset = result.get("nextOffset")
+        if not isinstance(events, list) or (next_offset is not None and type(next_offset) is not int):
+            raise RuntimeError(f"Unexpected Bitrix event response: {data}")
+        if any(not isinstance(event, dict) or type(event.get("eventId")) is not int for event in events):
+            raise RuntimeError(f"Bitrix event cannot be acknowledged safely: {data}")
+        return BitrixEventPage(
+            events=tuple(BitrixBotEvent.from_api_payload(event) for event in events),
+            next_offset=next_offset,
+            has_more=bool(result.get("hasMore")),
+        )
 
     async def get_recent_messages(self, *, dialog_id: str, limit_total: int) -> BitrixDialogSnapshot:
         effective_limit = max(1, limit_total)

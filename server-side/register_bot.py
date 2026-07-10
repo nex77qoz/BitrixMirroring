@@ -59,7 +59,8 @@ def main():
         except Exception:
             pass
 
-    # Step 2: Query list of bots to find if tg_mirror_bot exists
+    # Step 2: Query list of bots to find if any of our candidate codes exists
+    candidate_codes = ["tg_mirror_bot", "tg_mirror_bot_v2", "tg_mirror_bot_v3"]
     found_bot_id = None
     v2_error = None
     v1_error = None
@@ -72,7 +73,7 @@ def main():
         bots_v2 = res_v2["result"].get("bots", [])
         if isinstance(bots_v2, list):
             for bot in bots_v2:
-                if isinstance(bot, dict) and bot.get("code") == "tg_mirror_bot":
+                if isinstance(bot, dict) and bot.get("code") in candidate_codes:
                     found_bot_id = bot.get("id")
                     break
 
@@ -85,12 +86,12 @@ def main():
             bots = res.get("result") or {}
             if isinstance(bots, dict):
                 for bid, bdata in bots.items():
-                    if isinstance(bdata, dict) and bdata.get("CODE") == "tg_mirror_bot":
+                    if isinstance(bdata, dict) and bdata.get("CODE") in candidate_codes:
                         found_bot_id = bid
                         break
             elif isinstance(bots, list):
                 for bdata in bots:
-                    if isinstance(bdata, dict) and bdata.get("CODE") == "tg_mirror_bot":
+                    if isinstance(bdata, dict) and bdata.get("CODE") in candidate_codes:
                         found_bot_id = bdata.get("ID")
                         break
 
@@ -115,24 +116,34 @@ def main():
             "botId": bot_id_val
         })
 
-    # Step 4: Register new bot using imbot.v2.Bot.register
+    # Step 4: Register new bot using imbot.v2.Bot.register (trying candidate codes in sequence)
     new_token = secrets.token_hex(16)
-    reg_payload = {
-        "botToken": new_token,
-        "fields": {
-            "code": "tg_mirror_bot",
-            "type": "supervisor",
-            "eventMode": "fetch",
-            "isHidden": False,
-            "properties": {
-                "name": "Telegram Mirror",
-                "desc": "Mirrors chats between Telegram and Bitrix24"
+    reg_res = None
+    registered_code = None
+
+    for code in candidate_codes:
+        reg_payload = {
+            "botToken": new_token,
+            "fields": {
+                "code": code,
+                "type": "supervisor",
+                "eventMode": "fetch",
+                "isHidden": False,
+                "properties": {
+                    "name": "Telegram Mirror",
+                    "desc": "Mirrors chats between Telegram and Bitrix24"
+                }
             }
         }
-    }
-    
-    reg_res = call_rest(webhook_base, "imbot.v2.Bot.register", reg_payload)
-    if "error" in reg_res:
+        reg_res = call_rest(webhook_base, "imbot.v2.Bot.register", reg_payload)
+        if "error" not in reg_res:
+            registered_code = code
+            break
+        elif reg_res.get("error") != "BOT_CODE_ALREADY_TAKEN":
+            # If the error is not about code conflict, break early (e.g. portal issue, permissions error)
+            break
+
+    if not registered_code or "error" in reg_res:
         print_error(f"Ошибка регистрации бота: {reg_res.get('error')} | {reg_res.get('error_description')}")
         sys.exit(1)
 
@@ -141,7 +152,7 @@ def main():
         print_error(f"Некорректный ID нового бота в ответе: {reg_res}")
         sys.exit(1)
 
-    print_result("ok", "registered", int(new_bot_id), new_token, "Бот успешно зарегистрирован с Chatbot API 2.0")
+    print_result("ok", "registered", int(new_bot_id), new_token, f"Бот успешно зарегистрирован с Chatbot API 2.0 (код: {registered_code})")
 
 if __name__ == "__main__":
     main()

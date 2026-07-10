@@ -81,7 +81,11 @@ def main():
 
     # Step 3: If found, unregister it
     if found_bot_id:
-        unreg_res = call_rest(webhook_base, "imbot.unregister", {
+        # Try both v2 and legacy unregister methods to ensure cleanup
+        call_rest(webhook_base, "imbot.v2.Bot.unregister", {
+            "botId": found_bot_id
+        })
+        call_rest(webhook_base, "imbot.unregister", {
             "BOT_ID": found_bot_id,
             "botId": found_bot_id
         })

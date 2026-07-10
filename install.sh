@@ -575,6 +575,33 @@ step_collect_config() {
         return 0
     fi
 
+    if [[ -f "$ENV_FILE" ]]; then
+        print_info "Обнаружен существующий файл конфигурации: $ENV_FILE"
+        local reuse_env=""
+        echo -en "  ${YELLOW}Использовать параметры из существующего .env? [Y/n]: ${RESET}"
+        read -r reuse_env
+        if [[ -z "$reuse_env" || "${reuse_env,,}" == "y" || "${reuse_env,,}" == "да" ]]; then
+            print_info "Загрузка параметров из $ENV_FILE..."
+            set -a
+            # shellcheck disable=SC1090
+            source "$ENV_FILE"
+            set +a
+            DOMAIN="${APP_DOMAIN:-${DOMAIN:-}}"
+            print_ok "Параметры успешно загружены."
+        else
+            print_info "Параметры будут настроены заново."
+            BITRIX_WEBHOOK_BASE=""
+            DOMAIN=""
+            APP_DOMAIN=""
+            BITRIX_BOT_ID=""
+            BITRIX_BOT_CLIENT_ID=""
+            ACME_EMAIL=""
+            TELEGRAM_BOT_TOKEN=""
+            TELEGRAM_WEBHOOK_SECRET=""
+            MIRROR_INTERNAL_WEBHOOK_SECRET=""
+        fi
+    fi
+
     echo -e "\n${BOLD}  Введите параметры бота (все поля обязательны):${RESET}\n"
 
     # Bitrix webhook

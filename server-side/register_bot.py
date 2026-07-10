@@ -149,8 +149,14 @@ def main():
         print_error(f"Ошибка регистрации бота: {reg_res.get('error')} | {reg_res.get('error_description')}")
         sys.exit(1)
 
-    new_bot_id = reg_res.get("result")
-    if not isinstance(new_bot_id, (int, str)):
+    result_data = reg_res.get("result")
+    new_bot_id = None
+    if isinstance(result_data, dict):
+        new_bot_id = result_data.get("bot", {}).get("id")
+    elif isinstance(result_data, (int, str)):
+        new_bot_id = result_data
+
+    if new_bot_id is None or not isinstance(new_bot_id, (int, str)):
         print_error(f"Некорректный ID нового бота в ответе: {reg_res}")
         sys.exit(1)
 

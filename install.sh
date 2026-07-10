@@ -601,9 +601,43 @@ step_collect_config() {
     print_info "В режиме eventMode=fetch поле handler_url при регистрации не требуется."
     print_info "URL Telegram webhook: ${BOLD}${TELEGRAM_WEBHOOK_PUBLIC_URL}${TELEGRAM_WEBHOOK_PATH}${RESET}"
 
-    # Bot IDs
-    ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
-    ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
+    # Bot IDs (Auto-detect/Register via Python script)
+    print_info "Проверка и автоматическая настройка бота Битрикс через REST API..."
+    BOT_AUTO_REGISTERED="false"
+    local reg_script="$INSTALL_DIR/server-side/register_bot.py"
+    if [[ -f "$reg_script" ]]; then
+        local reg_out
+        reg_out=$(python3 "$reg_script" "$BITRIX_WEBHOOK_BASE" "${BITRIX_BOT_ID:-}" "${BITRIX_BOT_CLIENT_ID:-}" 2>/dev/null || echo "")
+        
+        if [[ -n "$reg_out" ]]; then
+            local status
+            status=$(echo "$reg_out" | grep -oP '"status":"[^"]+"' | cut -d'"' -f4 || echo "error")
+            if [[ "$status" == "ok" ]]; then
+                local bot_id bot_token msg
+                bot_id=$(echo "$reg_out" | grep -oP '"bot_id":\d+' | cut -d':' -f2 || echo "")
+                bot_token=$(echo "$reg_out" | grep -oP '"bot_token":"[^"]+"' | cut -d'"' -f4 || echo "")
+                msg=$(echo "$reg_out" | grep -oP '"message":"[^"]+"' | cut -d'"' -f4 || echo "")
+                
+                BITRIX_BOT_ID="$bot_id"
+                BITRIX_BOT_CLIENT_ID="$bot_token"
+                BOT_AUTO_REGISTERED="true"
+                print_ok "$msg (BOT_ID=$BITRIX_BOT_ID)"
+            else
+                local err_msg
+                err_msg=$(echo "$reg_out" | grep -oP '"message":"[^"]+"' | cut -d'"' -f4 || echo "Неизвестная ошибка")
+                print_warn "Автоматическая настройка не удалась: $err_msg"
+                ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
+                ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
+            fi
+        else
+            print_warn "Не удалось запустить скрипт автонастройки бота. Введите параметры вручную."
+            ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
+            ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
+        fi
+    else
+        ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
+        ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
+    fi
 
     # Email for SSL certificate (acme.sh)
     ask_input ACME_EMAIL "Email для получения уведомлений от Let's Encrypt"
@@ -1687,20 +1721,24 @@ print_summary() {
         echo -e "    ${CYAN}journalctl -u ${svc} -f${RESET}"
     done
     echo ""
-    echo -e "${YELLOW}${BOLD}  ⚠  Не забудьте зарегистрировать бота в Битрикс!${RESET}"
-    echo -e "  Для Chatbot API 2.0 выполните REST-запрос ${BOLD}imbot.v2.Bot.register${RESET} со следующим JSON-телом:"
-    echo -e "    ${CYAN}{"
-    echo -e "      \"code\": \"tg_mirror_bot\","
-    echo -e "      \"type\": \"supervisor\","
-    echo -e "      \"eventMode\": \"fetch\","
-    echo -e "      \"isHidden\": false,"
-    echo -e "      \"properties\": {"
-    echo -e "        \"name\": \"Telegram Mirror\","
-    echo -e "        \"desc\": \"Mirrors chats between Telegram and Bitrix24\""
-    echo -e "      }"
-    echo -e "    }${RESET}"
-    echo -e "  Сохраните полученный ${BOLD}botId${RESET} в ${BOLD}BITRIX_BOT_ID${RESET},"
-    echo -e "  а ${BOLD}botToken${RESET} в ${BOLD}BITRIX_BOT_CLIENT_ID${RESET} в вашем .env файле."
+    if [[ "${BOT_AUTO_REGISTERED:-false}" != "true" ]]; then
+        echo -e "${YELLOW}${BOLD}  ⚠  Не забудьте зарегистрировать бота в Битрикс!${RESET}"
+        echo -e "  Для Chatbot API 2.0 выполните REST-запрос ${BOLD}imbot.v2.Bot.register${RESET} со следующим JSON-телом:"
+        echo -e "    ${CYAN}{"
+        echo -e "      \"code\": \"tg_mirror_bot\","
+        echo -e "      \"type\": \"supervisor\","
+        echo -e "      \"eventMode\": \"fetch\","
+        echo -e "      \"isHidden\": false,"
+        echo -e "      \"properties\": {"
+        echo -e "        \"name\": \"Telegram Mirror\","
+        echo -e "        \"desc\": \"Mirrors chats between Telegram and Bitrix24\""
+        echo -e "      }"
+        echo -e "    }${RESET}"
+        echo -e "  Сохраните полученный ${BOLD}botId${RESET} в ${BOLD}BITRIX_BOT_ID${RESET},"
+        echo -e "  а ${BOLD}botToken${RESET} в ${BOLD}BITRIX_BOT_CLIENT_ID${RESET} в вашем .env файле."
+    else
+        echo -e "${GREEN}${BOLD}  ✓  Бот автоматически проверен / зарегистрирован с Chatbot API 2.0!${RESET}"
+    fi
     if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
         echo ""
         echo -e "  Telegram webhook будет автоматически зарегистрирован на URL:"

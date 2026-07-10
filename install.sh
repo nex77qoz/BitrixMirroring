@@ -251,7 +251,7 @@ step_update_system() {
 step_install_packages() {
     print_step "Установка системных зависимостей"
 
-    local pkgs=(git nginx curl sqlite3 openssl python3 python3-venv python3-dev fail2ban ufw logrotate)
+    local pkgs=(git nginx curl sqlite3 openssl python3 python3-venv python3-dev fail2ban ufw logrotate sudo)
     run_cmd apt-get install -y "${pkgs[@]}"
 
     PYTHON_BIN="python3"
@@ -324,6 +324,7 @@ step_create_service_user() {
     # Allow the service user to restart bot services and view logs without a password
     # (required by the monitoring dashboard's restart and log viewer endpoints)
     local sudoers_file="/etc/sudoers.d/bitrix-bot-services"
+    mkdir -p "$(dirname "$sudoers_file")"
     cat > "$sudoers_file" << EOF
 # Allow $SVC_USER to restart bot services and view logs (used by monitoring dashboard)
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-bot, /usr/bin/systemctl restart bitrix-monitor, /usr/bin/journalctl --no-pager -u bitrix-telegram-mirror, /usr/bin/journalctl --no-pager -u bitrix-bot, /usr/bin/journalctl --no-pager -u bitrix-monitor

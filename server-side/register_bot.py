@@ -67,6 +67,7 @@ def main():
 
     # 2a. Try modern v2 list first
     res_v2 = call_rest(webhook_base, "imbot.v2.Bot.list", {})
+    sys.stderr.write(f"[DEBUG] Результат imbot.v2.Bot.list: {json.dumps(res_v2, ensure_ascii=False)}\n")
     if "error" in res_v2:
         v2_error = f"{res_v2.get('error')} | {res_v2.get('error_description')}"
     elif "result" in res_v2 and isinstance(res_v2["result"], dict):
@@ -80,6 +81,7 @@ def main():
     # 2b. If not found, check legacy imbot.bot.list
     if not found_bot_id:
         res = call_rest(webhook_base, "imbot.bot.list", {})
+        sys.stderr.write(f"[DEBUG] Результат imbot.bot.list: {json.dumps(res, ensure_ascii=False)}\n")
         if "error" in res:
             v1_error = f"{res.get('error')} | {res.get('error_description')}"
         elif "result" in res:

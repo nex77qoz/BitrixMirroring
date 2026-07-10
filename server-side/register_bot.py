@@ -73,7 +73,7 @@ def main():
         bots_v2 = res_v2["result"].get("bots", [])
         if isinstance(bots_v2, list):
             for bot in bots_v2:
-                if isinstance(bot, dict) and bot.get("code") in candidate_codes:
+                if isinstance(bot, dict) and bot.get("code") and bot.get("code").lower() in [c.lower() for c in candidate_codes]:
                     found_bot_id = bot.get("id")
                     break
 
@@ -86,12 +86,12 @@ def main():
             bots = res.get("result") or {}
             if isinstance(bots, dict):
                 for bid, bdata in bots.items():
-                    if isinstance(bdata, dict) and bdata.get("CODE") in candidate_codes:
+                    if isinstance(bdata, dict) and bdata.get("CODE") and bdata.get("CODE").lower() in [c.lower() for c in candidate_codes]:
                         found_bot_id = bid
                         break
             elif isinstance(bots, list):
                 for bdata in bots:
-                    if isinstance(bdata, dict) and bdata.get("CODE") in candidate_codes:
+                    if isinstance(bdata, dict) and bdata.get("CODE") and bdata.get("CODE").lower() in [c.lower() for c in candidate_codes]:
                         found_bot_id = bdata.get("ID")
                         break
 

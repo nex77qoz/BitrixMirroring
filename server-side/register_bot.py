@@ -60,34 +60,59 @@ def main():
             pass
 
     # Step 2: Query list of bots to find if tg_mirror_bot exists
-    res = call_rest(webhook_base, "imbot.bot.list", {})
-    if "error" in res:
-        print_error(f"Не удалось получить список ботов: {res.get('error')} | {res.get('error_description')}")
-        sys.exit(1)
-
-    bots = res.get("result") or {}
     found_bot_id = None
-    
-    if isinstance(bots, dict):
-        for bid, bdata in bots.items():
-            if isinstance(bdata, dict) and bdata.get("CODE") == "tg_mirror_bot":
-                found_bot_id = bid
-                break
-    elif isinstance(bots, list):
-        for bdata in bots:
-            if isinstance(bdata, dict) and bdata.get("CODE") == "tg_mirror_bot":
-                found_bot_id = bdata.get("ID")
-                break
+    v2_error = None
+    v1_error = None
+
+    # 2a. Try modern v2 list first
+    res_v2 = call_rest(webhook_base, "imbot.v2.Bot.list", {})
+    if "error" in res_v2:
+        v2_error = f"{res_v2.get('error')} | {res_v2.get('error_description')}"
+    elif "result" in res_v2 and isinstance(res_v2["result"], dict):
+        bots_v2 = res_v2["result"].get("bots", [])
+        if isinstance(bots_v2, list):
+            for bot in bots_v2:
+                if isinstance(bot, dict) and bot.get("code") == "tg_mirror_bot":
+                    found_bot_id = bot.get("id")
+                    break
+
+    # 2b. If not found, check legacy imbot.bot.list
+    if not found_bot_id:
+        res = call_rest(webhook_base, "imbot.bot.list", {})
+        if "error" in res:
+            v1_error = f"{res.get('error')} | {res.get('error_description')}"
+        elif "result" in res:
+            bots = res.get("result") or {}
+            if isinstance(bots, dict):
+                for bid, bdata in bots.items():
+                    if isinstance(bdata, dict) and bdata.get("CODE") == "tg_mirror_bot":
+                        found_bot_id = bid
+                        break
+            elif isinstance(bots, list):
+                for bdata in bots:
+                    if isinstance(bdata, dict) and bdata.get("CODE") == "tg_mirror_bot":
+                        found_bot_id = bdata.get("ID")
+                        break
+
+    # If bot not found and both API requests failed, report errors
+    if not found_bot_id and v2_error and v1_error:
+        print_error(f"Не удалось получить список ботов (V2: {v2_error}; V1: {v1_error})")
+        sys.exit(1)
 
     # Step 3: If found, unregister it
     if found_bot_id:
+        try:
+            bot_id_val = int(found_bot_id)
+        except Exception:
+            bot_id_val = found_bot_id
+
         # Try both v2 and legacy unregister methods to ensure cleanup
         call_rest(webhook_base, "imbot.v2.Bot.unregister", {
-            "botId": found_bot_id
+            "botId": bot_id_val
         })
         call_rest(webhook_base, "imbot.unregister", {
-            "BOT_ID": found_bot_id,
-            "botId": found_bot_id
+            "BOT_ID": bot_id_val,
+            "botId": bot_id_val
         })
 
     # Step 4: Register new bot using imbot.v2.Bot.register

@@ -606,35 +606,39 @@ step_collect_config() {
     BOT_AUTO_REGISTERED="false"
     local reg_script="$INSTALL_DIR/server-side/register_bot.py"
     if [[ -f "$reg_script" ]]; then
-        local reg_out
-        reg_out=$(python3 "$reg_script" "$BITRIX_WEBHOOK_BASE" "${BITRIX_BOT_ID:-}" "${BITRIX_BOT_CLIENT_ID:-}" 2>/dev/null || echo "")
+        local tmp_out
+        tmp_out=$(mktemp)
         
-        if [[ -n "$reg_out" ]]; then
-            local status
-            status=$(echo "$reg_out" | grep -oP '"status":"[^"]+"' | cut -d'"' -f4 || echo "error")
+        # We run the python script, redirecting stderr to the install log file to preserve debug info, and stdout to our temp file.
+        if python3 "$reg_script" "$BITRIX_WEBHOOK_BASE" "${BITRIX_BOT_ID:-}" "${BITRIX_BOT_CLIENT_ID:-}" > "$tmp_out" 2>> "$LOG_FILE"; then
+            local status bot_id bot_token msg
+            status=$(awk -F= '/^status=/ {print $2}' "$tmp_out")
+            bot_id=$(awk -F= '/^bot_id=/ {print $2}' "$tmp_out")
+            bot_token=$(awk -F= '/^bot_token=/ {print $2}' "$tmp_out")
+            msg=$(awk -F= '/^message=/ {print $2}' "$tmp_out")
+            
             if [[ "$status" == "ok" ]]; then
-                local bot_id bot_token msg
-                bot_id=$(echo "$reg_out" | grep -oP '"bot_id":\d+' | cut -d':' -f2 || echo "")
-                bot_token=$(echo "$reg_out" | grep -oP '"bot_token":"[^"]+"' | cut -d'"' -f4 || echo "")
-                msg=$(echo "$reg_out" | grep -oP '"message":"[^"]+"' | cut -d'"' -f4 || echo "")
-                
                 BITRIX_BOT_ID="$bot_id"
                 BITRIX_BOT_CLIENT_ID="$bot_token"
                 BOT_AUTO_REGISTERED="true"
                 print_ok "$msg (BOT_ID=$BITRIX_BOT_ID)"
             else
-                local err_msg
-                err_msg=$(echo "$reg_out" | grep -oP '"message":"[^"]+"' | cut -d'"' -f4 || echo "Неизвестная ошибка")
-                print_warn "Автоматическая настройка не удалась: $err_msg"
+                print_warn "Автоматическая настройка вернула статус error: $msg"
                 ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
                 ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
             fi
         else
-            print_warn "Не удалось запустить скрипт автонастройки бота. Введите параметры вручную."
+            local err_msg
+            err_msg=$(awk -F= '/^message=/ {print $2}' "$tmp_out" 2>/dev/null || echo "")
+            err_msg="${err_msg:-Неизвестная ошибка выполнения скрипта}"
+            print_warn "Автоматическая настройка не удалась: $err_msg"
+            print_info "Подробный лог сохранён в $LOG_FILE"
             ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
             ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
         fi
+        rm -f "$tmp_out"
     else
+        print_warn "Скрипт автонастройки $reg_script не найден. Введите параметры вручную."
         ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
         ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
     fi

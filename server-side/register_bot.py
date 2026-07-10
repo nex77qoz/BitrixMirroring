@@ -24,12 +24,20 @@ def call_rest(webhook_url, method, payload):
     except Exception as e:
         return {"error": "CONNECTION_ERROR", "error_description": str(e)}
 
+def print_result(status, action, bot_id, bot_token, message):
+    print(f"status={status}")
+    print(f"action={action}")
+    print(f"bot_id={bot_id}")
+    print(f"bot_token={bot_token}")
+    print(f"message={message}")
+
+def print_error(message):
+    print(f"status=error")
+    print(f"message={message}")
+
 def main():
     if len(sys.argv) < 2:
-        print(json.dumps({
-            "status": "error",
-            "message": "Usage: register_bot.py <webhook_base> [<bot_id> <bot_token>]"
-        }))
+        print_error("Usage: register_bot.py <webhook_base> [<bot_id> <bot_token>]")
         sys.exit(1)
 
     webhook_base = sys.argv[1]
@@ -46,13 +54,7 @@ def main():
                 "limit": 1
             })
             if "result" in res and "error" not in res:
-                print(json.dumps({
-                    "status": "ok",
-                    "action": "none",
-                    "bot_id": bot_id_int,
-                    "bot_token": existing_bot_token,
-                    "message": "Бот успешно проверен и уже работает на API 2.0"
-                }))
+                print_result("ok", "none", bot_id_int, existing_bot_token, "Бот успешно проверен и уже работает на API 2.0")
                 sys.exit(0)
         except Exception:
             pass
@@ -60,10 +62,7 @@ def main():
     # Step 2: Query list of bots to find if tg_mirror_bot exists
     res = call_rest(webhook_base, "imbot.bot.list", {})
     if "error" in res:
-        print(json.dumps({
-            "status": "error",
-            "message": f"Не удалось получить список ботов: {res.get('error')} | {res.get('error_description')}"
-        }))
+        print_error(f"Не удалось получить список ботов: {res.get('error')} | {res.get('error_description')}")
         sys.exit(1)
 
     bots = res.get("result") or {}
@@ -105,27 +104,15 @@ def main():
     
     reg_res = call_rest(webhook_base, "imbot.v2.Bot.register", reg_payload)
     if "error" in reg_res:
-        print(json.dumps({
-            "status": "error",
-            "message": f"Ошибка регистрации бота: {reg_res.get('error')} | {reg_res.get('error_description')}"
-        }))
+        print_error(f"Ошибка регистрации бота: {reg_res.get('error')} | {reg_res.get('error_description')}")
         sys.exit(1)
 
     new_bot_id = reg_res.get("result")
     if not isinstance(new_bot_id, (int, str)):
-        print(json.dumps({
-            "status": "error",
-            "message": f"Некорректный ID нового бота в ответе: {reg_res}"
-        }))
+        print_error(f"Некорректный ID нового бота в ответе: {reg_res}")
         sys.exit(1)
 
-    print(json.dumps({
-        "status": "ok",
-        "action": "registered",
-        "bot_id": int(new_bot_id),
-        "bot_token": new_token,
-        "message": "Бот успешно зарегистрирован с Chatbot API 2.0"
-    }))
+    print_result("ok", "registered", int(new_bot_id), new_token, "Бот успешно зарегистрирован с Chatbot API 2.0")
 
 if __name__ == "__main__":
     main()

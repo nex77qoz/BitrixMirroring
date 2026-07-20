@@ -727,7 +727,6 @@ step_collect_config() {
     echo -e "\n${BOLD}  Данные нового бота Bitrix24:${RESET}"
     echo -e "    BITRIX_BOT_ID: ${CYAN}${BITRIX_BOT_ID}${RESET}"
     echo -e "    BITRIX_BOT_CLIENT_ID: ${CYAN}${BITRIX_BOT_CLIENT_ID}${RESET}"
-    notify_telegram_admins_about_bitrix_bot
 
     TELEGRAM_WEBHOOK_ENABLED="true"
 
@@ -780,6 +779,7 @@ step_collect_config() {
     print_info "Можно указать несколько через запятую: 123456789,987654321"
     print_info "Оставьте пустым — добавите позже через панель мониторинга."
     ask_optional TG_ADMIN_IDS "Telegram ID администраторов"
+    notify_telegram_admins_about_bitrix_bot
 
     print_ok "Конфигурация собрана"
 }

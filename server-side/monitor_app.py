@@ -942,7 +942,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div id="loginError"
          class="hidden mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm"></div>
-    <form id="loginForm" class="space-y-3">
+    <form id="loginForm" class="space-y-3" onsubmit="doLogin(); return false;">
       <input id="loginUser" type="text" value="admin"
              class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
              placeholder="Имя пользователя">

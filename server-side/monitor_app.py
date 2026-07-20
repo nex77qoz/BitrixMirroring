@@ -942,18 +942,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div id="loginError"
          class="hidden mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm"></div>
-    <div class="space-y-3">
+    <form id="loginForm" class="space-y-3">
       <input id="loginUser" type="text" value="admin"
              class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
              placeholder="Имя пользователя">
       <input id="loginPass" type="password"
              class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
              placeholder="Пароль">
-      <button onclick="doLogin()"
+      <button type="submit"
               class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-sm transition-colors">
         Войти
       </button>
-    </div>
+    </form>
   </div>
 </div>
 
@@ -1939,8 +1939,9 @@ function showBackupMsg(msg, type) {
 }
 
 // ── Keyboard shortcuts ───────────────────────────────────────────────────────
-document.getElementById('loginPass').addEventListener('keydown', e => {
-  if (e.key === 'Enter') doLogin();
+document.getElementById('loginForm').addEventListener('submit', e => {
+  e.preventDefault();
+  doLogin();
 });
 </script>
 </body>

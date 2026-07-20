@@ -974,7 +974,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
         document.getElementById('loginOverlay').classList.add('hidden');
         document.getElementById('app').classList.remove('hidden');
-        window.AUTH_HEADER = auth;
+        try { AUTH_HEADER = auth; } catch (_) { window.AUTH_HEADER = auth; }
         if (typeof startPolling === 'function') startPolling();
         if (typeof loadMappings === 'function') loadMappings();
         if (typeof loadAdmins === 'function') loadAdmins();

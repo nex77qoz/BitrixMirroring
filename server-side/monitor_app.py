@@ -942,7 +942,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div id="loginError"
          class="hidden mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm"></div>
-    <form id="loginForm" class="space-y-3" onsubmit="event.preventDefault(); doLogin();">
+    <form id="loginForm" class="space-y-3" onsubmit="event.preventDefault(); monitorDoLogin();">
       <input id="loginUser" type="text" value="admin"
              class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
              placeholder="Имя пользователя">
@@ -954,6 +954,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         Войти
       </button>
     </form>
+    <script>
+    async function monitorDoLogin() {
+      const user = document.getElementById('loginUser').value.trim();
+      const pass = document.getElementById('loginPass').value;
+      const error = document.getElementById('loginError');
+      if (!user || !pass) {
+        error.textContent = 'Введите имя пользователя и пароль';
+        error.classList.remove('hidden');
+        return;
+      }
+      const auth = 'Basic ' + btoa(unescape(encodeURIComponent(user + ':' + pass)));
+      try {
+        const response = await fetch('/monitor/api/status', { headers: { Authorization: auth } });
+        if (!response.ok) {
+          error.textContent = response.status === 401 ? 'Неверные учётные данные' : 'Ошибка сервера ' + response.status;
+          error.classList.remove('hidden');
+          return;
+        }
+        document.getElementById('loginOverlay').classList.add('hidden');
+        document.getElementById('app').classList.remove('hidden');
+        window.AUTH_HEADER = auth;
+        if (typeof startPolling === 'function') startPolling();
+        if (typeof loadMappings === 'function') loadMappings();
+        if (typeof loadAdmins === 'function') loadAdmins();
+      } catch (err) {
+        error.textContent = 'Ошибка подключения: ' + err.message;
+        error.classList.remove('hidden');
+      }
+    }
+    </script>
   </div>
 </div>
 

@@ -696,6 +696,7 @@ step_collect_config() {
                 BITRIX_BOT_CLIENT_ID="$bot_token"
                 BOT_AUTO_REGISTERED="true"
                 print_ok "$msg (BOT_ID=$BITRIX_BOT_ID)"
+                print_info "  BOT_TOKEN=$BITRIX_BOT_CLIENT_ID"
             else
                 print_warn "Автоматическая настройка вернула статус error: $msg"
                 ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"

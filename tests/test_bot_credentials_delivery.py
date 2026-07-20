@@ -10,3 +10,5 @@ def test_installation_displays_and_sends_new_bitrix_bot_credentials():
     assert 'api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage' in source
     assert 'BITRIX_BOT_ID:' in source
     assert 'BITRIX_BOT_CLIENT_ID:' in source
+    registration_result = source.index('print_ok "$msg (BOT_ID=$BITRIX_BOT_ID)"')
+    assert source.index('print_info "  BOT_TOKEN=$BITRIX_BOT_CLIENT_ID"', registration_result) > registration_result

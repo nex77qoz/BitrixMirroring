@@ -58,44 +58,11 @@ def main():
         except Exception:
             pass
 
-    # Step 2: Query list of bots to find if any of our candidate codes exists
+    # Step 2: Register a new bot. The list method requires botToken with webhook auth,
+    # which is unavailable during first installation.
     candidate_codes = ["tg_mirror_bot", "tg_mirror_bot_v2", "tg_mirror_bot_v3"]
-    found_bot_id = None
-    v2_error = None
 
-    # 2a. Try modern v2 list first
-    res_v2 = call_rest(webhook_base, "imbot.v2.Bot.list", {})
-    sys.stderr.write(f"[DEBUG] Результат imbot.v2.Bot.list: {json.dumps(res_v2, ensure_ascii=False)}\n")
-    if "error" in res_v2:
-        v2_error = f"{res_v2.get('error')} | {res_v2.get('error_description')}"
-    elif "result" in res_v2 and isinstance(res_v2["result"], dict):
-        bots_v2 = res_v2["result"].get("bots", [])
-        if isinstance(bots_v2, list):
-            for bot in bots_v2:
-                if isinstance(bot, dict) and bot.get("code") and bot.get("code").lower() in [c.lower() for c in candidate_codes]:
-                    found_bot_id = bot.get("id")
-                    break
-
-    if not found_bot_id and v2_error:
-        print_error(f"Не удалось получить список ботов API 2.0: {v2_error}")
-        sys.exit(1)
-
-    # Step 3: If found, unregister it
-    if found_bot_id:
-        if not existing_bot_token:
-            print_error("Найден существующий бот, но его botToken не задан — безопасная перерегистрация невозможна")
-            sys.exit(1)
-        try:
-            bot_id_val = int(found_bot_id)
-        except Exception:
-            bot_id_val = found_bot_id
-
-        call_rest(webhook_base, "imbot.v2.Bot.unregister", {
-            "botId": bot_id_val,
-            "botToken": existing_bot_token
-        })
-
-    # Step 4: Register new bot using imbot.v2.Bot.register (trying candidate codes in sequence)
+    # Step 3: Register using imbot.v2.Bot.register (trying candidate codes in sequence)
     new_token = secrets.token_hex(16)
     reg_res = None
     registered_code = None

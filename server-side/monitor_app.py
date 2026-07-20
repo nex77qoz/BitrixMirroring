@@ -1907,7 +1907,7 @@ async function downloadBackup() {
     const blob = await r.blob();
     const cd = r.headers.get('content-disposition') || '';
     const match = cd.match(/filename="?([^"]+)"?/);
-    const filename = match ? match[1].split(/[/\\]/).pop() || 'bitrix-bot-backup.json' : 'bitrix-bot-backup.json';
+    const filename = match ? match[1] || 'bitrix-bot-backup.json' : 'bitrix-bot-backup.json';
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

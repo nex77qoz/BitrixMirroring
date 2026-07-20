@@ -27,8 +27,6 @@ class MainHttpTestCase(unittest.TestCase):
             process_update=AsyncMock(),
         )
         self.mirror = SimpleNamespace(
-            is_forwarding_enabled=Mock(return_value=True),
-            set_forwarding_enabled=AsyncMock(return_value=False),
             schedule_bitrix_dialog_sync=AsyncMock(),
         )
         self.client = TestClient(_build_http_app(self.settings, self.application, self.mirror))
@@ -43,24 +41,8 @@ class MainHttpTestCase(unittest.TestCase):
         payload = response.json()
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["telegram_webhook_enabled"])
-        self.assertTrue(payload["forwarding_enabled"])
         self.assertEqual(payload["checks"]["db"], "ok")
         self.assertEqual(payload["checks"]["bitrix_event_fetcher_alive"], True)
-
-    def test_forwarding_status_requires_secret(self) -> None:
-        response = self.client.get("/internal/forwarding")
-        self.assertEqual(response.status_code, 403)
-
-    def test_forwarding_toggle_calls_mirror(self) -> None:
-        response = self.client.post(
-            "/internal/forwarding",
-            json={"enabled": False},
-            headers={"X-Internal-Webhook-Secret": self.settings.mirror_internal_webhook_secret},
-        )
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertFalse(payload["forwarding_enabled"])
-        self.mirror.set_forwarding_enabled.assert_awaited_once_with(False)
 
     def test_telegram_webhook_rejects_missing_secret(self) -> None:
         response = self.client.post(self.settings.telegram_webhook_path, json={"update_id": 1})

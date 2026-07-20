@@ -53,8 +53,6 @@ def make_settings(**overrides: object) -> Settings:
         "db_cleanup_max_age_seconds": 3600,
         "mirror_http_host": "127.0.0.1",
         "mirror_http_port": 8090,
-        "bitrix_webhook_bridge_enabled": True,
-        "mirror_internal_event_path": "/internal/bitrix/event",
         "mirror_internal_webhook_secret": "internal-secret",
         "telegram_webhook_enabled": True,
         "telegram_webhook_path": "/telegram/webhook",
@@ -134,5 +132,3 @@ def make_bitrix_event(
             "user": {"id": author_id, "firstName": "Ivan", "lastName": "Petrov"},
         },
     )
-
-

@@ -29,8 +29,6 @@ class SettingsTestCase(unittest.TestCase):
                 "BITRIX_BOT_CLIENT_ID": "client-token",
                 "MIRROR_STATE_DB_PATH": os.path.join(tmpdir, "state.sqlite3"),
                 "ENABLE_SOCKS5_PROXY": "false",
-                "BITRIX_WEBHOOK_BRIDGE_ENABLED": "true",
-                "MIRROR_INTERNAL_WEBHOOK_SECRET": "internal-secret",
                 "TELEGRAM_WEBHOOK_ENABLED": "true",
                 "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://bot.example.com",
                 "TELEGRAM_WEBHOOK_SECRET": "tg-secret",
@@ -38,19 +36,5 @@ class SettingsTestCase(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True):
                 settings = Settings.from_env()
         self.assertEqual(settings.bitrix_webhook_base, "https://example.bitrix24.ru/rest/1/token")
-        self.assertTrue(settings.bitrix_webhook_bridge_enabled)
         self.assertTrue(settings.telegram_webhook_enabled)
         self.assertEqual(settings.telegram_webhook_path, "/telegram/webhook")
-
-    def test_from_env_requires_internal_secret_when_bridge_enabled(self) -> None:
-        env = {
-            "TELEGRAM_BOT_TOKEN": "token",
-            "BITRIX_WEBHOOK_BASE": "https://example.bitrix24.ru/rest/1/token",
-            "BITRIX_BOT_ID": "12",
-            "BITRIX_BOT_CLIENT_ID": "client-token",
-            "BITRIX_WEBHOOK_BRIDGE_ENABLED": "true",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(ValueError):
-                Settings.from_env()
-

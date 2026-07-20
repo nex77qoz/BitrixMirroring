@@ -131,7 +131,6 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
         return {
             "ok": True,
             "telegram_webhook_enabled": settings.telegram_webhook_enabled,
-            "bitrix_webhook_bridge_enabled": settings.bitrix_webhook_bridge_enabled,
             "forwarding_enabled": mirror.is_forwarding_enabled(),
             "telegram_webhook_status": webhook_status,
             "checks": checks,
@@ -140,9 +139,8 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
     def _verify_internal_secret(request: Request) -> None:
         expected_secret = settings.mirror_internal_webhook_secret or ""
         if not expected_secret:
-            raise HTTPException(status_code=503, detail="Internal webhook secret is not configured")
-        provided_secret = request.headers.get("X-Internal-Webhook-Secret", "")
-        if not hmac.compare_digest(expected_secret, provided_secret):
+            raise HTTPException(status_code=503, detail="Internal control secret is not configured")
+        if not hmac.compare_digest(expected_secret, request.headers.get("X-Internal-Webhook-Secret", "")):
             raise HTTPException(status_code=403, detail="Forbidden")
 
     @app.get("/internal/forwarding")
@@ -157,10 +155,7 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
         enabled = payload.get("enabled")
         if not isinstance(enabled, bool):
             raise HTTPException(status_code=400, detail="enabled must be a boolean")
-        current = await mirror.set_forwarding_enabled(enabled)
-        return {"ok": True, "forwarding_enabled": current}
-
-
+        return {"ok": True, "forwarding_enabled": await mirror.set_forwarding_enabled(enabled)}
 
     @app.post(settings.telegram_webhook_path)
     async def telegram_webhook(request: Request) -> dict[str, object]:
@@ -223,10 +218,9 @@ async def _run_combined_runtime(settings: Settings, bitrix: BitrixClient, mirror
     await application.start()
     await mirror.start(application)
     logger.info(
-        "Combined runtime started. host=%s port=%s bitrix_bridge=%s telegram_webhook=%s",
+        "Combined runtime started. host=%s port=%s telegram_webhook=%s",
         settings.mirror_http_host,
         settings.mirror_http_port,
-        settings.bitrix_webhook_bridge_enabled,
         settings.telegram_webhook_enabled,
     )
 
@@ -288,16 +282,15 @@ def main() -> None:
 
     logger = logging.getLogger("tg-bitrix-mirror")
     logger.info(
-        "Starting bot. chat_mappings=%s proxy=%s tg_to_bitrix=%s bitrix_to_tg=%s tg_webhook=%s bitrix_bridge=%s",
+        "Starting bot. chat_mappings=%s proxy=%s tg_to_bitrix=%s bitrix_to_tg=%s tg_webhook=%s",
         [(m.tg_chat_id, m.bitrix_dialog_id) for m in settings.chat_mappings],
         settings.socks5_proxy_url,
         settings.sync_telegram_to_bitrix,
         settings.sync_bitrix_to_telegram,
         settings.telegram_webhook_enabled,
-        settings.bitrix_webhook_bridge_enabled,
     )
 
-    if settings.telegram_webhook_enabled or settings.bitrix_webhook_bridge_enabled:
+    if settings.telegram_webhook_enabled:
         asyncio.run(_run_combined_runtime(settings, bitrix, mirror))
         return
 

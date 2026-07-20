@@ -25,7 +25,6 @@
 - `handlers.py` — обработчики Telegram-команд, обычных сообщений, редактирований и реакций.
 - `mirror_state_store.py` — SQLite-хранилище курсоров, связей между сообщениями и состояния реакций.
 - `settings.py` — загрузка и валидация конфигурации из переменных окружения.
-- `server-side/app.py` — вспомогательный FastAPI webhook для ответов на базовые команды Битрикс-бота (start, ping).
 - `server-side/monitor_app.py` — административная web UI для мониторинга и редактирования маппингов.
 - `DEPLOYMENT.md` — подробная инструкция по установке на сервер с `systemd` и `nginx`.
 
@@ -171,7 +170,6 @@ uvicorn server-side.app:app --host 127.0.0.1 --port 8081
 Доступные маршруты:
 
 - `GET /health`
-- `POST /bitrix/bot`
 
 Этот сервис отвечает на базовые команды бота (например, /start, ping). Дополнительно он может логировать входящие вебхуки от Битрикс.
 
@@ -240,11 +238,8 @@ export MONITOR_PASSWORD='change-me'
 
 ### Webhook bridge (устарел) и Telegram webhook
 
-- `BITRIX_WEBHOOK_BRIDGE_ENABLED=false` — (Устарело/выключено) Включал внутренний мост Bitrix webhook -> main.py.
 - `MIRROR_HTTP_HOST=127.0.0.1`
 - `MIRROR_HTTP_PORT=8090`
-- `MIRROR_INTERNAL_EVENT_PATH=/internal/bitrix/event`
-- `MIRROR_INTERNAL_WEBHOOK_SECRET=...`
 - `TELEGRAM_WEBHOOK_ENABLED=true` — переводит Telegram-бот на webhook вместо polling.
 - `TELEGRAM_WEBHOOK_PUBLIC_URL=https://bot.example.com`
 - `TELEGRAM_WEBHOOK_PATH=/telegram/webhook`
@@ -328,7 +323,6 @@ ALLOWED_TELEGRAM_CHAT_ID=-1001234567890
 
 В каталоге `server-side/` уже лежат готовые шаблоны для production:
 
-- `bitrix-bot.service`
 - `bitrix-telegram-mirror.service`
 - `bitrix-monitor.service`
 - пример env-файла

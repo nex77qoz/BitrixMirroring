@@ -16,7 +16,6 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S", "ASYNC", "B", "E402", "B904"]
 "server-side/monitor_app.py" = ["S608", "RUF001", "RUF006", "S110"]
-"server-side/app.py" = ["S110", "B007", "RUF001", "UP038"]
 "install.sh" = ["S"]
 "main.py" = ["F841", "UP038"]
 "mirror_state_store.py" = ["S608", "UP038", "F841"]

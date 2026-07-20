@@ -58,9 +58,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_WEBHOOK_ENABLED = os.getenv("TELEGRAM_WEBHOOK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 TELEGRAM_WEBHOOK_PUBLIC_URL = os.getenv("TELEGRAM_WEBHOOK_PUBLIC_URL", "").strip().rstrip("/")
 TELEGRAM_WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "/telegram/webhook").strip() or "/telegram/webhook"
-BITRIX_WEBHOOK_BRIDGE_ENABLED = os.getenv("BITRIX_WEBHOOK_BRIDGE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-MIRROR_INTERNAL_BASE_URL = os.getenv("MIRROR_INTERNAL_BASE_URL", "").strip().rstrip("/")
-MIRROR_INTERNAL_EVENT_PATH = os.getenv("MIRROR_INTERNAL_EVENT_PATH", "/internal/bitrix/event").strip() or "/internal/bitrix/event"
 MIRROR_INTERNAL_WEBHOOK_SECRET = os.getenv("MIRROR_INTERNAL_WEBHOOK_SECRET", "")
 MIRROR_HTTP_HOST = os.getenv("MIRROR_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1"
 MIRROR_HTTP_PORT = int(os.getenv("MIRROR_HTTP_PORT", "8090"))
@@ -68,7 +65,6 @@ MIRROR_HTTP_PORT = int(os.getenv("MIRROR_HTTP_PORT", "8090"))
 # Mapping from short key to systemd service name
 SERVICES: dict[str, str] = {
     "mirror": "bitrix-telegram-mirror",
-    "webhook": "bitrix-bot",
 }
 
 logger = logging.getLogger(__name__)
@@ -371,45 +367,6 @@ def _get_telegram_webhook_status() -> dict:
         return status
 
 
-def _get_bitrix_bridge_status() -> dict:
-    health_url = f"http://{MIRROR_HTTP_HOST}:{MIRROR_HTTP_PORT}/health"
-    expected_event_url = f"{MIRROR_INTERNAL_BASE_URL}{MIRROR_INTERNAL_EVENT_PATH}" if MIRROR_INTERNAL_BASE_URL else ""
-    status = {
-        "enabled": BITRIX_WEBHOOK_BRIDGE_ENABLED,
-        "health_url": health_url,
-        "expected_event_url": expected_event_url,
-        "configured_base_url": MIRROR_INTERNAL_BASE_URL,
-        "configured_event_path": MIRROR_INTERNAL_EVENT_PATH,
-        "reachable": False,
-        "main_ok": False,
-        "mirror_bridge_enabled": False,
-        "verified": False,
-    }
-
-    if not BITRIX_WEBHOOK_BRIDGE_ENABLED:
-        status["mode"] = "disabled"
-        return status
-
-    try:
-        response = httpx.get(health_url, timeout=5)
-        response.raise_for_status()
-        payload = response.json()
-        status["reachable"] = True
-        status["main_ok"] = bool(payload.get("ok"))
-        status["mirror_bridge_enabled"] = bool(payload.get("bitrix_webhook_bridge_enabled"))
-        status["telegram_webhook_enabled"] = bool(payload.get("telegram_webhook_enabled"))
-        webhook_status = payload.get("telegram_webhook_status")
-        if isinstance(webhook_status, dict):
-            status["mirror_telegram_webhook_status"] = webhook_status
-        status["verified"] = status["main_ok"] and status["mirror_bridge_enabled"]
-        if not status["mirror_bridge_enabled"]:
-            status["error"] = "Main mirror process reachable, but Bitrix bridge is disabled there"
-        return status
-    except Exception as exc:
-        status["error"] = str(exc)
-        return status
-
-
 def _get_persisted_forwarding_enabled() -> bool:
     try:
         conn = _db_connect()
@@ -674,7 +631,6 @@ def api_status(_: str = Depends(_check_auth)):
     return {
         "services": {k: _get_service_info(v) for k, v in SERVICES.items()},
         "db": _get_db_stats(),
-        "bitrix_bridge": _get_bitrix_bridge_status(),
         "telegram_webhook": _get_telegram_webhook_status(),
         "forwarding": _get_forwarding_status(),
         "ts": int(time.time()),
@@ -829,7 +785,6 @@ _SECRET_KEY_PATTERNS = (
     "MONITOR_PASSWORD",
     "BITRIX_BOT_CLIENT_ID",
     "BITRIX_CLIENT_ID",
-    "MIRROR_INTERNAL_WEBHOOK_SECRET",
     "TELEGRAM_WEBHOOK_SECRET",
 )
 

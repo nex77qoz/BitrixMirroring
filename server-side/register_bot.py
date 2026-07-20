@@ -1,9 +1,8 @@
-import sys
-import os
-import secrets
-import urllib.request
-import urllib.error
 import json
+import secrets
+import sys
+import urllib.error
+import urllib.request
 
 def call_rest(webhook_url, method, payload):
     url = f"{webhook_url.rstrip('/')}/{method}"
@@ -32,7 +31,7 @@ def print_result(status, action, bot_id, bot_token, message):
     print(f"message={message}")
 
 def print_error(message):
-    print(f"status=error")
+    print("status=error")
     print(f"message={message}")
 
 def main():
@@ -63,7 +62,6 @@ def main():
     candidate_codes = ["tg_mirror_bot", "tg_mirror_bot_v2", "tg_mirror_bot_v3"]
     found_bot_id = None
     v2_error = None
-    v1_error = None
 
     # 2a. Try modern v2 list first
     res_v2 = call_rest(webhook_base, "imbot.v2.Bot.list", {})
@@ -78,44 +76,23 @@ def main():
                     found_bot_id = bot.get("id")
                     break
 
-    # 2b. If not found, check legacy imbot.bot.list
-    if not found_bot_id:
-        res = call_rest(webhook_base, "imbot.bot.list", {})
-        sys.stderr.write(f"[DEBUG] Результат imbot.bot.list: {json.dumps(res, ensure_ascii=False)}\n")
-        if "error" in res:
-            v1_error = f"{res.get('error')} | {res.get('error_description')}"
-        elif "result" in res:
-            bots = res.get("result") or {}
-            if isinstance(bots, dict):
-                for bid, bdata in bots.items():
-                    if isinstance(bdata, dict) and bdata.get("CODE") and bdata.get("CODE").lower() in [c.lower() for c in candidate_codes]:
-                        found_bot_id = bid
-                        break
-            elif isinstance(bots, list):
-                for bdata in bots:
-                    if isinstance(bdata, dict) and bdata.get("CODE") and bdata.get("CODE").lower() in [c.lower() for c in candidate_codes]:
-                        found_bot_id = bdata.get("ID")
-                        break
-
-    # If bot not found and both API requests failed, report errors
-    if not found_bot_id and v2_error and v1_error:
-        print_error(f"Не удалось получить список ботов (V2: {v2_error}; V1: {v1_error})")
+    if not found_bot_id and v2_error:
+        print_error(f"Не удалось получить список ботов API 2.0: {v2_error}")
         sys.exit(1)
 
     # Step 3: If found, unregister it
     if found_bot_id:
+        if not existing_bot_token:
+            print_error("Найден существующий бот, но его botToken не задан — безопасная перерегистрация невозможна")
+            sys.exit(1)
         try:
             bot_id_val = int(found_bot_id)
         except Exception:
             bot_id_val = found_bot_id
 
-        # Try both v2 and legacy unregister methods to ensure cleanup
         call_rest(webhook_base, "imbot.v2.Bot.unregister", {
-            "botId": bot_id_val
-        })
-        call_rest(webhook_base, "imbot.unregister", {
-            "BOT_ID": bot_id_val,
-            "botId": bot_id_val
+            "botId": bot_id_val,
+            "botToken": existing_bot_token
         })
 
     # Step 4: Register new bot using imbot.v2.Bot.register (trying candidate codes in sequence)

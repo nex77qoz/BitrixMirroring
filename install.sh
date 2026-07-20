@@ -28,7 +28,7 @@ FILE_CACHE_DIR="$INSTALL_DIR/file_cache"
 BACKUP_FILE=""    # path to backup JSON (empty = no backup)
 BACKUP_LOADED=false
 
-SERVICES=("bitrix-telegram-mirror" "bitrix-bot" "bitrix-monitor")
+SERVICES=("bitrix-telegram-mirror" "bitrix-monitor")
 
 # Service user (non-root)
 SVC_USER="bitrix-bot"
@@ -214,6 +214,57 @@ run_cmd() {
     fi
 }
 
+unregister_bitrix_bot() {
+    [[ -f "$ENV_FILE" ]] || { print_warn "Конфигурация Bitrix не найдена — бот не удалён из Bitrix24"; return 0; }
+
+    local webhook_base bot_id bot_token response
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    webhook_base="${BITRIX_WEBHOOK_BASE:-}"
+    bot_id="${BITRIX_BOT_ID:-}"
+    bot_token="${BITRIX_BOT_CLIENT_ID:-}"
+
+    if [[ -z "$webhook_base" || -z "$bot_id" || -z "$bot_token" ]]; then
+        print_warn "BITRIX_WEBHOOK_BASE, BITRIX_BOT_ID или BITRIX_BOT_CLIENT_ID не заданы — бот не удалён из Bitrix24"
+        return 0
+    fi
+
+    response=$(curl --silent --show-error --location --request POST \
+        --header 'Content-Type: application/json' \
+        --header 'Accept: application/json' \
+        --data "{\"botId\":${bot_id},\"botToken\":\"${bot_token}\"}" \
+        "${webhook_base%/}/imbot.v2.Bot.unregister" 2>&1) || {
+        print_warn "Не удалось удалить бота из Bitrix24: $response"
+        return 0
+    }
+
+    if [[ "$response" == *'"error"'* ]]; then
+        print_warn "Bitrix24 не удалил бота: $response"
+    else
+        print_ok "Бот удалён из Bitrix24 (imbot.v2.Bot.unregister)"
+    fi
+}
+
+notify_telegram_admins_about_bitrix_bot() {
+    [[ -n "${TG_ADMIN_IDS:-}" ]] || return 0
+
+    local admin_id response message
+    message=$'Зарегистрирован новый бот Bitrix24.\n\nBot ID: '\"${BITRIX_BOT_ID}\"$'\nТокен: '\"${BITRIX_BOT_CLIENT_ID}\"
+    IFS=',' read -ra _admin_ids <<< "$TG_ADMIN_IDS"
+    for admin_id in "${_admin_ids[@]}"; do
+        admin_id="${admin_id//[[:space:]]/}"
+        [[ -n "$admin_id" ]] || continue
+        response=$(curl --silent --show-error --max-time 15 \
+            --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${admin_id}" \
+            --data-urlencode "text=${message}" 2>&1) || {
+            print_warn "Не удалось отправить данные бота администратору Telegram $admin_id: $response"
+            continue
+        }
+        [[ "$response" == *'"ok":true'* ]] || print_warn "Telegram не подтвердил отправку администратору $admin_id: $response"
+    done
+}
+
 banner() {
     echo -e "${CYAN}${BOLD}"
     cat << 'EOF'
@@ -327,7 +378,7 @@ step_create_service_user() {
     mkdir -p "$(dirname "$sudoers_file")"
     cat > "$sudoers_file" << EOF
 # Allow $SVC_USER to restart bot services and view logs (used by monitoring dashboard)
-${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-bot, /usr/bin/systemctl restart bitrix-monitor, /usr/bin/journalctl --no-pager -u bitrix-telegram-mirror, /usr/bin/journalctl --no-pager -u bitrix-bot, /usr/bin/journalctl --no-pager -u bitrix-monitor
+${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-monitor, /usr/bin/journalctl --no-pager -u bitrix-telegram-mirror, /usr/bin/journalctl --no-pager -u bitrix-monitor
 EOF
     visudo -c -f "$sudoers_file" || { print_error "Некорректный синтаксис sudoers-файла"; return 1; }
     chmod 440 "$sudoers_file"
@@ -556,7 +607,6 @@ PYEOF
         ask_input DOMAIN "Домен сервера (например: bot.example.com)"
         APP_DOMAIN="$DOMAIN"
     fi
-    BOT_HANDLER_URL="https://${DOMAIN}/bitrix/bot"
     TELEGRAM_WEBHOOK_PUBLIC_URL="https://${DOMAIN}"
     TELEGRAM_WEBHOOK_PATH="${TELEGRAM_WEBHOOK_PATH:-/telegram/webhook}"
 
@@ -598,7 +648,6 @@ step_collect_config() {
             ACME_EMAIL=""
             TELEGRAM_BOT_TOKEN=""
             TELEGRAM_WEBHOOK_SECRET=""
-            MIRROR_INTERNAL_WEBHOOK_SECRET=""
         fi
     fi
 
@@ -621,10 +670,8 @@ step_collect_config() {
     # Domain
     ask_input DOMAIN "Домен сервера (например: bot.example.com)"
     APP_DOMAIN="$DOMAIN"
-    BOT_HANDLER_URL="https://${DOMAIN}/bitrix/bot"
     TELEGRAM_WEBHOOK_PUBLIC_URL="https://${DOMAIN}"
     TELEGRAM_WEBHOOK_PATH="/telegram/webhook"
-    print_info "URL локального обработчика (для совместимости/команд): ${BOLD}${BOT_HANDLER_URL}${RESET}"
     print_info "В режиме eventMode=fetch поле handler_url при регистрации не требуется."
     print_info "URL Telegram webhook: ${BOLD}${TELEGRAM_WEBHOOK_PUBLIC_URL}${TELEGRAM_WEBHOOK_PATH}${RESET}"
 
@@ -676,6 +723,11 @@ step_collect_config() {
     # Telegram token
     ask_secret TELEGRAM_BOT_TOKEN "Токен Telegram-бота (Bot Token)"
 
+    echo -e "\n${BOLD}  Данные нового бота Bitrix24:${RESET}"
+    echo -e "    BITRIX_BOT_ID: ${CYAN}${BITRIX_BOT_ID}${RESET}"
+    echo -e "    BITRIX_BOT_CLIENT_ID: ${CYAN}${BITRIX_BOT_CLIENT_ID}${RESET}"
+    notify_telegram_admins_about_bitrix_bot
+
     TELEGRAM_WEBHOOK_ENABLED="true"
 
     if [[ -n "${TELEGRAM_WEBHOOK_ALREADY_SET:-}" ]]; then
@@ -708,14 +760,6 @@ step_collect_config() {
     fi
 
     ask_secret TELEGRAM_WEBHOOK_SECRET "Секретный токен для Telegram-вебхука"
-
-    BITRIX_WEBHOOK_BRIDGE_ENABLED="true"
-    MIRROR_INTERNAL_WEBHOOK_SECRET="${TELEGRAM_WEBHOOK_SECRET}"
-
-    MIRROR_HTTP_HOST="127.0.0.1"
-    MIRROR_HTTP_PORT="8090"
-    MIRROR_INTERNAL_BASE_URL="http://127.0.0.1:8090"
-    MIRROR_INTERNAL_EVENT_PATH="/internal/bitrix/event"
 
     BITRIX_POLL_INTERVAL_SECONDS_VALUE="60"
 
@@ -767,17 +811,6 @@ BITRIX_BOT_ID=$(env_escape "${BITRIX_BOT_ID}")
 BITRIX_BOT_CLIENT_ID=$(env_escape "${BITRIX_BOT_CLIENT_ID}")
 
 # Мгновенный Bitrix -> Telegram bridge
-BITRIX_WEBHOOK_BRIDGE_ENABLED=${BITRIX_WEBHOOK_BRIDGE_ENABLED}
-MIRROR_HTTP_HOST=$(env_escape "${MIRROR_HTTP_HOST}")
-MIRROR_HTTP_PORT=${MIRROR_HTTP_PORT}
-MIRROR_INTERNAL_BASE_URL=$(env_escape "${MIRROR_INTERNAL_BASE_URL}")
-MIRROR_INTERNAL_EVENT_PATH=$(env_escape "${MIRROR_INTERNAL_EVENT_PATH}")
-MIRROR_INTERNAL_WEBHOOK_SECRET=$(env_escape "${MIRROR_INTERNAL_WEBHOOK_SECRET:-}")
-MIRROR_INTERNAL_TIMEOUT_SECONDS=10
-# Совместимость: v1-события для устаревшего webhook-моста (выключен выше).
-# Fetch-режим (imbot.v2.Event.get) использует события ONIMBOTV2* и не читает эту переменную.
-BITRIX_FORWARDED_EVENTS=$(env_escape "ONIMBOTMESSAGEADD,ONIMBOTJOINCHAT")
-
 # Форматирование
 PREFIX_WITH_CHAT_TITLE=true
 PREFIX_WITH_SENDER=true
@@ -979,17 +1012,6 @@ server {
     # Upload limit (100 MB)
     client_max_body_size 100m;
 
-    location /bitrix/bot {
-        limit_req zone=webhook burst=50 nodelay;
-        limit_req_status 429;
-
-        proxy_pass http://127.0.0.1:8081/bitrix/bot;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
     location /telegram/webhook {
         limit_req zone=webhook burst=50 nodelay;
         limit_req_status 429;
@@ -1065,17 +1087,6 @@ server {
 
     # Upload limit (100 MB)
     client_max_body_size 100m;
-
-    location /bitrix/bot {
-        limit_req zone=webhook burst=50 nodelay;
-        limit_req_status 429;
-
-        proxy_pass http://127.0.0.1:8081/bitrix/bot;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
 
     location /telegram/webhook {
         limit_req zone=webhook burst=50 nodelay;
@@ -1184,7 +1195,7 @@ ${_hardening_mirror}
 WantedBy=multi-user.target
 EOF
 
-    # 2 — webhook handler
+    # 2 — monitoring dashboard
     local _hardening_sidecar="
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -1198,32 +1209,6 @@ ProtectControlGroups=yes
 RestrictNamespaces=yes
 LockPersonality=yes
 UMask=027"
-    cat > /etc/systemd/system/bitrix-bot.service << EOF
-[Unit]
-Description=Bitrix Bot Webhook Handler
-After=network.target
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-User=${SVC_USER}
-Group=${SVC_GROUP}
-WorkingDirectory=${INSTALL_DIR}/server-side
-EnvironmentFile=${ENV_FILE}
-ExecStart=${VENV}/bin/uvicorn app:app --host 127.0.0.1 --port 8081
-Restart=always
-RestartSec=3
-StartLimitBurst=5
-StartLimitIntervalSec=60
-StandardOutput=journal
-StandardError=journal
-${_hardening_sidecar}
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # 3 — monitoring dashboard
     cat > /etc/systemd/system/bitrix-monitor.service << EOF
 [Unit]
 Description=Bitrix Bot Monitoring Dashboard
@@ -1582,38 +1567,19 @@ step_health_checks() {
         fi
     done
 
-    # Webhook /health endpoint
+    # Main mirror health endpoint (used only when Telegram webhook mode is enabled)
     local code
     local health_body
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8081/health 2>/dev/null || echo "000")
-    if [[ "$code" == "200" ]]; then
-        print_ok "Webhook-сервис отвечает на /health (HTTP $code)"
-    else
-        print_error "Webhook-сервис не отвечает на /health (HTTP $code)"
-        all_ok=false
-    fi
-
-    # Main mirror internal /health endpoint
-    if [[ "${BITRIX_WEBHOOK_BRIDGE_ENABLED:-false}" == "true" || "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
+    if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
         health_body=$(curl -s --max-time 5 http://127.0.0.1:${MIRROR_HTTP_PORT:-8090}/health 2>/dev/null || true)
         code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:${MIRROR_HTTP_PORT:-8090}/health 2>/dev/null || echo "000")
         if [[ "$code" == "200" ]]; then
             print_ok "Main mirror-process отвечает на internal /health (HTTP $code)"
-            if [[ "${BITRIX_WEBHOOK_BRIDGE_ENABLED:-false}" == "true" ]]; then
-                if grep -q '"bitrix_webhook_bridge_enabled":true' <<< "$health_body"; then
-                    print_ok "Bitrix bridge включён в основном процессе"
-                else
-                    print_error "Main health доступен, но Bitrix bridge не включён в основном процессе"
-                    all_ok=false
-                fi
-            fi
-            if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
-                if grep -q '"telegram_webhook_enabled":true' <<< "$health_body"; then
-                    print_ok "Telegram webhook mode включён в основном процессе"
-                else
-                    print_error "Main health доступен, но Telegram webhook mode не включён"
-                    all_ok=false
-                fi
+            if grep -q '"telegram_webhook_enabled":true' <<< "$health_body"; then
+                print_ok "Telegram webhook mode включён в основном процессе"
+            else
+                print_error "Main health доступен, но Telegram webhook mode не включён"
+                all_ok=false
             fi
         else
             print_error "Main mirror-process не отвечает на internal /health (HTTP $code)"
@@ -1621,18 +1587,6 @@ step_health_checks() {
         fi
     else
         print_info "Internal /health проверка пропущена: main process работает в fetch mode"
-    fi
-
-    # Webhook /bitrix/bot endpoint
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-        -X POST http://127.0.0.1:8081/bitrix/bot \
-        -H "Content-Type: application/json" \
-        -d '{}' 2>/dev/null || echo "000")
-    if [[ "$code" == "200" || "$code" == "403" ]]; then
-        print_ok "Endpoint /bitrix/bot доступен (HTTP $code)"
-    else
-        print_error "Endpoint /bitrix/bot недоступен (HTTP $code)"
-        all_ok=false
     fi
 
     # Monitor dashboard (прямое обращение к upstream, минуя nginx)
@@ -1722,7 +1676,6 @@ print_summary() {
     if [[ "$SKIP_SSL" == true ]]; then
         scheme="http"
     fi
-    echo -e "    Обработчик бота:   ${CYAN}${scheme}://${DOMAIN}/bitrix/bot${RESET}"
     if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
         echo -e "    Telegram webhook:  ${CYAN}${scheme}://${DOMAIN}${TELEGRAM_WEBHOOK_PATH}${RESET}"
     fi
@@ -1736,7 +1689,6 @@ print_summary() {
     echo -e "    Ротация логов:         ${CYAN}ежедневно, 7 дней${RESET}"
     echo -e "    Очистка БД:            ${CYAN}записи старше 7 дней${RESET}"
     echo -e "    Лимит файлов:          ${CYAN}100 МБ / файл, 10 ГБ кэш${RESET}"
-    echo -e "    Bitrix bridge:         ${CYAN}${BITRIX_WEBHOOK_BRIDGE_ENABLED:-false}${RESET}"
     echo -e "    Telegram webhook:      ${CYAN}${TELEGRAM_WEBHOOK_ENABLED:-false}${RESET}"
     if [[ -n "$MONITOR_ALLOWED_IPS" ]]; then
         echo -e "    IP мониторинга:        ${CYAN}${MONITOR_ALLOWED_IPS}${RESET}"
@@ -1887,6 +1839,7 @@ do_uninstall() {
     fi
 
     print_step "Удаление бота"
+    unregister_bitrix_bot
 
     for svc in "${SERVICES[@]}"; do
         systemctl stop "$svc" 2>/dev/null || true

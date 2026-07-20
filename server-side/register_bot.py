@@ -36,12 +36,13 @@ def print_error(message):
 
 def main():
     if len(sys.argv) < 2:
-        print_error("Usage: register_bot.py <webhook_base> [<bot_id> <bot_token>]")
+        print_error("Usage: register_bot.py <webhook_base> [<bot_id> <bot_token> [<bot_name>]]")
         sys.exit(1)
 
     webhook_base = sys.argv[1]
     existing_bot_id = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else None
     existing_bot_token = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else None
+    bot_name = sys.argv[4].strip() if len(sys.argv) > 4 and sys.argv[4].strip() else "Telegram Mirror"
 
     # Step 1: Check if current credentials are valid and support V2
     if existing_bot_id and existing_bot_token:
@@ -76,7 +77,7 @@ def main():
                 "eventMode": "fetch",
                 "isHidden": False,
                 "properties": {
-                    "name": "Telegram Mirror",
+                    "name": bot_name,
                     "desc": "Mirrors chats between Telegram and Bitrix24"
                 }
             }

@@ -670,6 +670,7 @@ step_collect_config() {
     # Domain
     ask_input DOMAIN "Домен сервера (например: bot.example.com)"
     APP_DOMAIN="$DOMAIN"
+    ask_input BITRIX_BOT_NAME "Название бота в Bitrix24" "Telegram Mirror"
     TELEGRAM_WEBHOOK_PUBLIC_URL="https://${DOMAIN}"
     TELEGRAM_WEBHOOK_PATH="/telegram/webhook"
     print_info "В режиме eventMode=fetch поле handler_url при регистрации не требуется."
@@ -684,7 +685,7 @@ step_collect_config() {
         tmp_out=$(mktemp)
         
         # We run the python script, redirecting stderr to the install log file to preserve debug info, and stdout to our temp file.
-        if python3 "$reg_script" "$BITRIX_WEBHOOK_BASE" "${BITRIX_BOT_ID:-}" "${BITRIX_BOT_CLIENT_ID:-}" > "$tmp_out" 2>> "$LOG_FILE"; then
+        if python3 "$reg_script" "$BITRIX_WEBHOOK_BASE" "${BITRIX_BOT_ID:-}" "${BITRIX_BOT_CLIENT_ID:-}" "$BITRIX_BOT_NAME" > "$tmp_out" 2>> "$LOG_FILE"; then
             local status bot_id bot_token msg
             status=$(awk -F= '/^status=/ {print $2}' "$tmp_out")
             bot_id=$(awk -F= '/^bot_id=/ {print $2}' "$tmp_out")
@@ -808,6 +809,7 @@ TELEGRAM_WEBHOOK_STRICT_VERIFY=true
 
 # Bitrix
 BITRIX_WEBHOOK_BASE=$(env_escape "${BITRIX_WEBHOOK_BASE}")
+BITRIX_BOT_NAME=$(env_escape "${BITRIX_BOT_NAME}")
 BITRIX_BOT_ID=$(env_escape "${BITRIX_BOT_ID}")
 BITRIX_BOT_CLIENT_ID=$(env_escape "${BITRIX_BOT_CLIENT_ID}")
 

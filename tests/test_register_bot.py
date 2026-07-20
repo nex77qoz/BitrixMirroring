@@ -6,5 +6,6 @@ def test_bot_lifecycle_uses_only_v2_methods_and_unregisters_with_token():
 
     assert '"imbot.v2.Bot.register"' in source
     assert '"botToken": new_token' in source
+    assert '"name": bot_name' in source
     assert "imbot.bot.list" not in source
     assert "imbot.unregister" not in source

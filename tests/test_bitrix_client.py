@@ -23,6 +23,16 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
         self.client._call = AsyncMock(side_effect=RuntimeError("Bitrix error: REACTION_ALREADY_SET"))
         await self.client.set_message_like(10, liked=True)
 
+    async def test_update_message_accepts_v2_nested_success_result(self) -> None:
+        self.client._call = AsyncMock(return_value={"result": {"result": True}})
+
+        await self.client.update_message(message_id=10, text="edited")
+
+    async def test_set_message_like_accepts_v2_nested_success_result(self) -> None:
+        self.client._call = AsyncMock(return_value={"result": {"result": True}})
+
+        await self.client.set_message_like(10, liked=True)
+
     async def test_get_bot_events_parses_page_and_sends_exact_payload(self) -> None:
         self.client._call = AsyncMock(
             return_value={

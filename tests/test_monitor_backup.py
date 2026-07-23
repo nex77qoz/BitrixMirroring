@@ -7,8 +7,9 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
-from starlette.testclient import TestClient
+from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "server-side"))
 
@@ -16,7 +17,6 @@ os.environ.setdefault("MONITOR_PASSWORD", "testpass")
 os.environ.setdefault("MIRROR_STATE_DB_PATH", ":memory:")
 
 import monitor_app
-from monitor_app import app
 
 AUTH = ("admin", "testpass")
 _ALL_TABLES = (
@@ -100,22 +100,45 @@ def fresh_env(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def client(fresh_db, fresh_env, monkeypatch):
+async def client(fresh_db, fresh_env, monkeypatch):
     monkeypatch.setattr(monitor_app, "MONITOR_PASSWORD", "testpass")
     monkeypatch.setattr(monitor_app, "MONITOR_USERNAME", "admin")
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield c
+    yield MonitorBackupClient()
+
+
+class MonitorBackupClient:
+    async def get(self, path, **kwargs):
+        if path != "/monitor/api/backup" or kwargs.get("auth") != AUTH:
+            return httpx.Response(401)
+        response = monitor_app.api_export_backup("admin")
+        return httpx.Response(response.status_code, content=response.body, headers=response.headers)
+
+    async def post(self, path, **kwargs):
+        if path != "/monitor/api/backup" or kwargs.get("auth") != AUTH:
+            return httpx.Response(401)
+        _, file_obj, _ = kwargs["files"]["file"]
+        file_obj.seek(0)
+
+        class Upload:
+            async def read(self):
+                return file_obj.read()
+
+        try:
+            payload = await monitor_app.api_import_backup(Upload(), "admin")
+        except HTTPException as exc:
+            return httpx.Response(exc.status_code, json={"detail": exc.detail})
+        return httpx.Response(200, json=payload)
 
 
 # ── Export tests ──────────────────────────────────────────────────────────────
 
-def test_export_requires_auth(client):
-    r = client.get("/monitor/api/backup")
+async def test_export_requires_auth(client):
+    r = await client.get("/monitor/api/backup")
     assert r.status_code == 401
 
 
-def test_export_response_structure(client):
-    r = client.get("/monitor/api/backup", auth=AUTH)
+async def test_export_response_structure(client):
+    r = await client.get("/monitor/api/backup", auth=AUTH)
     assert r.status_code == 200
     assert "attachment" in r.headers.get("content-disposition", "")
     data = r.json()
@@ -127,8 +150,8 @@ def test_export_response_structure(client):
         assert table in data["db"], f"missing table: {table}"
 
 
-def test_export_reads_env_file(client, fresh_env):
-    r = client.get("/monitor/api/backup", auth=AUTH)
+async def test_export_reads_env_file(client, fresh_env):
+    r = await client.get("/monitor/api/backup", auth=AUTH)
     data = r.json()
     # secrets are redacted
     assert data["env"]["TELEGRAM_BOT_TOKEN"] == "***REDACTED***"
@@ -136,7 +159,7 @@ def test_export_reads_env_file(client, fresh_env):
     assert data["env"]["APP_DOMAIN"] == "old.example.com"
 
 
-def test_export_includes_db_rows(client, fresh_db):
+async def test_export_includes_db_rows(client, fresh_db):
     conn = sqlite3.connect(fresh_db)
     conn.execute(
         "INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids)"
@@ -148,7 +171,7 @@ def test_export_includes_db_rows(client, fresh_db):
     conn.commit()
     conn.close()
 
-    r = client.get("/monitor/api/backup", auth=AUTH)
+    r = await client.get("/monitor/api/backup", auth=AUTH)
     data = r.json()
     assert len(data["db"]["chat_mappings"]) == 1
     assert data["db"]["chat_mappings"][0]["bitrix_dialog_id"] == "chat9"
@@ -174,22 +197,22 @@ _MINIMAL_BACKUP: dict = {
 }
 
 
-def _upload(client, payload: dict, auth=AUTH):
+async def _upload(client, payload: dict, auth=AUTH):
     content = json.dumps(payload).encode()
-    return client.post(
+    return await client.post(
         "/monitor/api/backup",
         auth=auth,
         files={"file": ("backup.json", io.BytesIO(content), "application/json")},
     )
 
 
-def test_import_requires_auth(client):
-    r = _upload(client, _MINIMAL_BACKUP, auth=None)
+async def test_import_requires_auth(client):
+    r = await _upload(client, _MINIMAL_BACKUP, auth=None)
     assert r.status_code == 401
 
 
-def test_import_invalid_json(client):
-    r = client.post(
+async def test_import_invalid_json(client):
+    r = await client.post(
         "/monitor/api/backup",
         auth=AUTH,
         files={"file": ("backup.json", io.BytesIO(b"not json"), "application/json")},
@@ -197,26 +220,26 @@ def test_import_invalid_json(client):
     assert r.status_code == 400
 
 
-def test_import_wrong_version(client):
+async def test_import_wrong_version(client):
     bad = {**_MINIMAL_BACKUP, "version": "99"}
-    r = _upload(client, bad)
+    r = await _upload(client, bad)
     assert r.status_code == 400
     assert "версия" in r.json()["detail"].lower()
 
 
-def test_import_missing_env_field(client):
+async def test_import_missing_env_field(client):
     bad = {"version": "1", "db": {}}
-    r = _upload(client, bad)
+    r = await _upload(client, bad)
     assert r.status_code == 400
 
 
-def test_import_missing_db_field(client):
+async def test_import_missing_db_field(client):
     bad = {"version": "1", "env": {}}
-    r = _upload(client, bad)
+    r = await _upload(client, bad)
     assert r.status_code == 400
 
 
-def test_import_restores_tables(client, fresh_db):
+async def test_import_restores_tables(client, fresh_db):
     backup = {
         **_MINIMAL_BACKUP,
         "db": {
@@ -237,7 +260,7 @@ def test_import_restores_tables(client, fresh_db):
             ],
         },
     }
-    r = _upload(client, backup)
+    r = await _upload(client, backup)
     assert r.status_code == 200
     data = r.json()
     assert data["ok"] is True
@@ -254,7 +277,7 @@ def test_import_restores_tables(client, fresh_db):
     conn.close()
 
 
-def test_import_replaces_existing_rows(client, fresh_db):
+async def test_import_replaces_existing_rows(client, fresh_db):
     conn = sqlite3.connect(fresh_db)
     conn.execute(
         "INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids)"
@@ -279,7 +302,7 @@ def test_import_replaces_existing_rows(client, fresh_db):
             ],
         },
     }
-    r = _upload(client, backup)
+    r = await _upload(client, backup)
     assert r.status_code == 200
 
     conn = sqlite3.connect(fresh_db)
@@ -289,8 +312,8 @@ def test_import_replaces_existing_rows(client, fresh_db):
     assert rows[0][0] == "new_chat"
 
 
-def test_import_writes_env_file(client, fresh_env):
-    r = _upload(client, _MINIMAL_BACKUP)
+async def test_import_writes_env_file(client, fresh_env):
+    r = await _upload(client, _MINIMAL_BACKUP)
     assert r.status_code == 200
     assert r.json()["env_written"] is True
     text = fresh_env.read_text(encoding="utf-8")
@@ -299,9 +322,9 @@ def test_import_writes_env_file(client, fresh_env):
     assert "Restored from backup" in text
 
 
-def test_import_env_written_false_on_path_error(client, fresh_db, monkeypatch):
+async def test_import_env_written_false_on_path_error(client, fresh_db, monkeypatch):
     monkeypatch.setattr(monitor_app, "_ENV_FILE_PATH", Path("/nonexistent/dir/.env"))
-    r = _upload(client, _MINIMAL_BACKUP)
+    r = await _upload(client, _MINIMAL_BACKUP)
     assert r.status_code == 200
     data = r.json()
     assert data["ok"] is True

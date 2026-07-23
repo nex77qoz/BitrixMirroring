@@ -51,9 +51,9 @@ Installer автоматически:
 
 ```json
 {
-  "botToken": "generate-a-unique-token",
   "fields": {
     "code": "tg_mirror_bot",
+    "botToken": "generate-a-unique-token",
     "type": "supervisor",
     "eventMode": "fetch",
     "isHidden": false,

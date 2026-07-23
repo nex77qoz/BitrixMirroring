@@ -3,6 +3,21 @@ import secrets
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+
+def registration_token() -> tuple[str, Path]:
+    token_path = Path(__file__).resolve().parent.parent / ".bitrix-registration-token"
+    try:
+        token = token_path.read_text(encoding="utf-8").strip()
+        if token:
+            return token, token_path
+    except OSError:
+        pass
+    token = secrets.token_hex(16)
+    token_path.write_text(token + "\n", encoding="utf-8")
+    token_path.chmod(0o600)
+    return token, token_path
 
 def call_rest(webhook_url, method, payload):
     url = f"{webhook_url.rstrip('/')}/{method}"
@@ -64,15 +79,15 @@ def main():
     candidate_codes = ["tg_mirror_bot", "tg_mirror_bot_v2", "tg_mirror_bot_v3"]
 
     # Step 3: Register using imbot.v2.Bot.register (trying candidate codes in sequence)
-    new_token = secrets.token_hex(16)
+    new_token, _token_path = registration_token()
     reg_res = None
     registered_code = None
 
     for code in candidate_codes:
         reg_payload = {
-            "botToken": new_token,
             "fields": {
                 "code": code,
+                "botToken": new_token,
                 "type": "supervisor",
                 "eventMode": "fetch",
                 "isHidden": False,

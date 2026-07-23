@@ -306,6 +306,19 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         application.bot.edit_message_text.assert_awaited_once()
         self.state_store.upsert_link.assert_awaited_once()
 
+    async def test_message_update_ignores_our_bot(self) -> None:
+        link = make_link(origin=MirrorOrigin.TELEGRAM)
+        self.state_store.get_link_by_bitrix_message.return_value = link
+        application = SimpleNamespace(bot=SimpleNamespace(edit_message_text=AsyncMock()))
+        self.service._application = application
+
+        await self.service._handle_bitrix_event(
+            make_bitrix_event("ONIMBOTV2MESSAGEUPDATE", author_id=self.service.settings.bitrix_bot_id)
+        )
+
+        application.bot.edit_message_text.assert_not_awaited()
+        self.state_store.upsert_link.assert_not_awaited()
+
     async def test_message_delete_removes_telegram_message_and_link(self) -> None:
         link = make_link(origin=MirrorOrigin.BITRIX)
         self.state_store.get_link_by_bitrix_message.return_value = link
@@ -368,6 +381,14 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await self.service._fetch_bitrix_events_once()
         self.state_store.save_bitrix_event_offset.assert_not_awaited()
+
+    async def test_message_add_does_not_acknowledge_after_third_failure(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(side_effect=RuntimeError("Telegram down"))))
+        event = make_bitrix_event()
+        self.service._forward_attempts[event.data["message"]["id"]] = 2
+
+        with self.assertRaises(RuntimeError):
+            await self.service._handle_bitrix_event(event)
 
     async def test_fetch_cycle_sequentially_saves_event_offsets(self) -> None:
         self.state_store.load_bitrix_event_offset.return_value = 100

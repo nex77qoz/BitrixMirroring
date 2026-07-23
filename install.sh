@@ -238,7 +238,7 @@ unregister_bitrix_bot() {
         return 0
     }
 
-    if [[ "$response" == *'"error"'* ]]; then
+    if ! python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("result", {}).get("result") is True and "error" not in data else 1)' <<< "$response" 2>/dev/null; then
         print_warn "Bitrix24 не удалил бота: $response"
     else
         print_ok "Бот удалён из Bitrix24 (imbot.v2.Bot.unregister)"
@@ -329,7 +329,17 @@ step_clone_repo() {
         print_info "Репозиторий уже существует — выполняем git pull"
         # Allow root to operate on a directory owned by the service user
         git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
-        run_cmd git -C "$INSTALL_DIR" pull
+        local current_branch
+        current_branch=$(git -C "$INSTALL_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+        if [[ -z "$current_branch" ]]; then
+            print_error "Установленный репозиторий находится в detached HEAD — обновление остановлено"
+            exit 1
+        fi
+        if ! git -C "$INSTALL_DIR" diff --quiet || ! git -C "$INSTALL_DIR" diff --cached --quiet; then
+            print_error "В установленном репозитории есть локальные изменения — сначала сохраните или отмените их"
+            exit 1
+        fi
+        run_cmd git -C "$INSTALL_DIR" pull --ff-only
     else
         print_info "Клонирование из $REPO_URL (ветка: ${REPO_BRANCH:-default})"
         if [[ -n "$REPO_BRANCH" && "$REPO_BRANCH" != "HEAD" ]]; then
@@ -586,6 +596,12 @@ PYEOF
     # shellcheck disable=SC1090
     source "$tmp_env_sh"
     rm -f "$tmp_env_sh"
+    for _secret_var in TELEGRAM_BOT_TOKEN BITRIX_BOT_CLIENT_ID MONITOR_PASSWORD TELEGRAM_WEBHOOK_SECRET; do
+        if [[ "${!_secret_var:-}" == "***REDACTED***" ]]; then
+            unset "$_secret_var"
+            print_warn "Секрет $_secret_var отсутствует в резервной копии — его нужно ввести заново"
+        fi
+    done
     print_ok "Конфигурация загружена из резервной копии"
 
     # Handle domain — may differ on new server
@@ -621,8 +637,11 @@ step_collect_config() {
     print_step "Сбор конфигурации"
 
     if [[ "${BACKUP_LOADED:-false}" == "true" ]]; then
-        print_ok "Конфигурация загружена из резервной копии — пропускаем интерактивный ввод"
-        return 0
+        if [[ -n "${BITRIX_WEBHOOK_BASE:-}" && -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${BITRIX_BOT_CLIENT_ID:-}" && -n "${MONITOR_PASSWORD:-}" && -n "${TELEGRAM_WEBHOOK_SECRET:-}" ]]; then
+            print_ok "Конфигурация загружена из резервной копии — пропускаем интерактивный ввод"
+            return 0
+        fi
+        print_info "В резервной копии отсутствуют секреты — запрашиваем их повторно"
     fi
 
     if [[ -f "$ENV_FILE" ]]; then
@@ -861,6 +880,7 @@ EOF
 
     chmod 600 "$ENV_FILE"
     chown "$SVC_USER:$SVC_GROUP" "$ENV_FILE"
+    rm -f "$INSTALL_DIR/.bitrix-registration-token"
     print_ok ".env создан ($ENV_FILE)"
 }
 
@@ -1285,6 +1305,7 @@ step_setup_telegram_webhook() {
         echo -e "    ${CYAN}curl -X POST \"https://api.telegram.org/bot<TOKEN>/setWebhook\" \\"
         echo -e "      -H \"Content-Type: application/json\" \\"
         echo -e "      -d '{\"url\": \"${webhook_url}\", \"secret_token\": \"<SECRET>\"}'${RESET}"
+        return 1
     fi
 
     # Verification: send a test request with the secret token
@@ -1301,8 +1322,10 @@ step_setup_telegram_webhook() {
         print_ok "Webhook endpoint принимает запросы с корректным секретом (HTTP 200)"
     elif [[ "$code" == "403" ]]; then
         print_error "Webhook endpoint вернул 403 — проверьте TELEGRAM_WEBHOOK_SECRET в ${ENV_FILE}"
+        return 1
     else
-        print_warn "Webhook endpoint вернул HTTP $code — убедитесь, что сервисы запущены и SSL настроен"
+        print_error "Webhook endpoint вернул HTTP $code — убедитесь, что сервисы запущены и SSL настроен"
+        return 1
     fi
 }
 
@@ -1711,13 +1734,16 @@ print_summary() {
         echo -e "${YELLOW}${BOLD}  ⚠  Не забудьте зарегистрировать бота в Битрикс!${RESET}"
         echo -e "  Для Chatbot API 2.0 выполните REST-запрос ${BOLD}imbot.v2.Bot.register${RESET} со следующим JSON-телом:"
         echo -e "    ${CYAN}{"
-        echo -e "      \"code\": \"tg_mirror_bot\","
-        echo -e "      \"type\": \"supervisor\","
-        echo -e "      \"eventMode\": \"fetch\","
-        echo -e "      \"isHidden\": false,"
-        echo -e "      \"properties\": {"
-        echo -e "        \"name\": \"Telegram Mirror\","
-        echo -e "        \"desc\": \"Mirrors chats between Telegram and Bitrix24\""
+        echo -e "      \"fields\": {"
+        echo -e "        \"code\": \"tg_mirror_bot\","
+        echo -e "        \"botToken\": \"generate-a-unique-token\","
+        echo -e "        \"type\": \"supervisor\","
+        echo -e "        \"eventMode\": \"fetch\","
+        echo -e "        \"isHidden\": false,"
+        echo -e "        \"properties\": {"
+        echo -e "          \"name\": \"Telegram Mirror\","
+        echo -e "          \"desc\": \"Mirrors chats between Telegram and Bitrix24\""
+        echo -e "        }"
         echo -e "      }"
         echo -e "    }${RESET}"
         echo -e "  Сохраните полученный ${BOLD}botId${RESET} в ${BOLD}BITRIX_BOT_ID${RESET},"
@@ -1749,6 +1775,17 @@ do_update() {
         exit 1
     fi
 
+    local current_branch
+    current_branch=$(git -C "$INSTALL_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [[ -z "$current_branch" ]]; then
+        print_error "Установленный репозиторий находится в detached HEAD — обновление остановлено"
+        exit 1
+    fi
+    if ! git -C "$INSTALL_DIR" diff --quiet || ! git -C "$INSTALL_DIR" diff --cached --quiet; then
+        print_error "В установленном репозитории есть локальные изменения — сначала сохраните или отмените их"
+        exit 1
+    fi
+
     # ── Защита пользовательских данных ────────────────────────────────────────
     # .env и mirror_state.sqlite3 перечислены в .gitignore и не затрагиваются
     # git pull. Выводим явное подтверждение, чтобы было видно что они целы.
@@ -1763,7 +1800,7 @@ do_update() {
     git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
     print_info "Получение обновлений из репозитория..."
     local _pull_output _pull_exit
-    _pull_output=$(git -C "$INSTALL_DIR" pull 2>&1) || _pull_exit=$?
+    _pull_output=$(git -C "$INSTALL_DIR" pull --ff-only 2>&1) || _pull_exit=$?
     log "CMD: git -C $INSTALL_DIR pull"
     log "OUTPUT: $_pull_output"
     # Show output line-by-line so user can see what happened
@@ -1983,8 +2020,7 @@ main() {
             step_write_env
             step_setup_ssl
             step_configure_nginx
-            step_create_services
-            step_setup_telegram_webhook
+            step_create_services --no-start
             step_setup_fail2ban
             step_setup_firewall
             step_setup_logrotate
@@ -1992,6 +2028,13 @@ main() {
             step_init_db
             step_restore_db_from_backup
             step_setup_admins
+            run_cmd systemctl daemon-reload
+            for svc in "${SERVICES[@]}"; do
+                run_cmd systemctl start "$svc"
+                print_ok "Сервис $svc запущен"
+            done
+            sleep 3
+            step_setup_telegram_webhook || exit 1
             step_health_checks
             print_summary
             ;;

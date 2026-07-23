@@ -39,10 +39,10 @@ class BitrixClient:
         return message_id
 
     async def update_message(self, *, message_id: int, text: str) -> None:
-        payload: dict[str, Any] = {'botId': self.settings.bitrix_bot_id, 'botToken': self.settings.bitrix_bot_client_id, 'messageId': message_id, 'fields': {'message': text, 'urlPreview': not self.settings.disable_link_preview}}
+        payload: dict[str, Any] = {'botId': self.settings.bitrix_bot_id, 'botToken': self.settings.bitrix_bot_client_id, 'messageId': message_id, 'fields': {'message': text, 'urlPreview': 'Y' if not self.settings.disable_link_preview else 'N'}}
         data = await self._call('imbot.v2.Chat.Message.update', payload)
         result = data.get('result')
-        if result is not True:
+        if not isinstance(result, dict) or result.get('result') is not True:
             raise RuntimeError(f'Unexpected Bitrix response: {data}')
 
     async def set_message_like(self, message_id: int, *, liked: bool) -> None:
@@ -56,7 +56,7 @@ class BitrixClient:
                 return
             raise
         result = data.get('result')
-        if result is not True:
+        if not isinstance(result, dict) or result.get('result') is not True:
             raise RuntimeError(f'Unexpected Bitrix response: {data}')
 
     async def send_photo(self, *, caption: str, filename: str, content: bytes, dialog_id: str) -> int:

@@ -383,12 +383,8 @@ class MirrorService:
         except Exception:
             attempts = self._forward_attempts.get(bitrix_message.message_id, 0) + 1
             self._forward_attempts[bitrix_message.message_id] = attempts
-            if attempts >= self._MAX_BITRIX_FORWARD_ATTEMPTS:
-                logger.exception('DEAD-LETTER: Skipping Bitrix message %s from dialog %s after %d failed attempts', bitrix_message.message_id, dialog_id, attempts)
-                self._forward_attempts.pop(bitrix_message.message_id, None)
-            else:
-                logger.exception('Failed to mirror Bitrix message %s (attempt %d/%d)', bitrix_message.message_id, attempts, self._MAX_BITRIX_FORWARD_ATTEMPTS)
-                raise
+            logger.exception('Failed to mirror Bitrix message %s (attempt %d); leaving event unacknowledged', bitrix_message.message_id, attempts)
+            raise
 
     async def _handle_bitrix_message_update(self, data: dict[str, Any]) -> None:
         chat = data.get('chat')
@@ -401,6 +397,8 @@ class MirrorService:
             return
         bitrix_message = BitrixMessage.from_api_payload(message_data)
         if bitrix_message is None:
+            return
+        if self.settings.bitrix_bot_id and bitrix_message.author_id == self.settings.bitrix_bot_id:
             return
         if not self._forwarding_enabled:
             return
@@ -612,8 +610,6 @@ class MirrorService:
                 logger.exception('Failed to mirror Telegram message %s to Bitrix (chat=%s, dialog=%s, dead_letter_count=%d)', message.message_id, chat_id, mapping.bitrix_dialog_id if mapping else 'unknown', dead_count)
             finally:
                 queue.task_done()
-    _MAX_BITRIX_FORWARD_ATTEMPTS: int = 3
-
     async def _should_forward_bitrix_message(self, dialog_id: str, bitrix_message: BitrixMessage) -> bool:
         if self.settings.bitrix_bot_id and bitrix_message.author_id == self.settings.bitrix_bot_id:
             logger.debug('Ignoring Bitrix message %s from our own bot (author_id=%s)', bitrix_message.message_id, bitrix_message.author_id)

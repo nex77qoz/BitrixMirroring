@@ -347,20 +347,7 @@ class MirrorService:
             user = BitrixUser.from_api_payload(user_data)
             if user is not None:
                 users_by_id[user.user_id] = user
-        files_by_id = {}
-        if isinstance(data.get('files'), dict):
-            for k, v in data['files'].items():
-                f = BitrixFile.from_api_payload(v)
-                if f is not None:
-                    files_by_id[f.file_id] = f
-        elif isinstance(data.get('files'), list):
-            for v in data['files']:
-                f = BitrixFile.from_api_payload(v)
-                if f is not None:
-                    files_by_id[f.file_id] = f
-        for fid in bitrix_message.file_ids:
-            if fid not in files_by_id:
-                files_by_id[fid] = BitrixFile(file_id=fid, name=f'file_{fid}', url_download=None, mime_type=None, file_type='file', is_image=False, author_id=bitrix_message.author_id)
+        files_by_id = await self._collect_files_by_id(data, bitrix_message)
         snapshot = BitrixDialogSnapshot(messages=[bitrix_message], users_by_id=users_by_id, files_by_id=files_by_id)
         tg_chat_id = mapping.tg_chat_id
         default_thread_id = None if self._is_multi_topic_mode(mapping) else mapping.default_topic_id
@@ -413,20 +400,7 @@ class MirrorService:
             user = BitrixUser.from_api_payload(user_data)
             if user is not None:
                 users_by_id[user.user_id] = user
-        files_by_id = {}
-        if isinstance(data.get('files'), dict):
-            for k, v in data['files'].items():
-                f = BitrixFile.from_api_payload(v)
-                if f is not None:
-                    files_by_id[f.file_id] = f
-        elif isinstance(data.get('files'), list):
-            for v in data['files']:
-                f = BitrixFile.from_api_payload(v)
-                if f is not None:
-                    files_by_id[f.file_id] = f
-        for fid in bitrix_message.file_ids:
-            if fid not in files_by_id:
-                files_by_id[fid] = BitrixFile(file_id=fid, name=f'file_{fid}', url_download=None, mime_type=None, file_type='file', is_image=False, author_id=bitrix_message.author_id)
+        files_by_id = await self._collect_files_by_id(data, bitrix_message)
         snapshot = BitrixDialogSnapshot(messages=[bitrix_message], users_by_id=users_by_id, files_by_id=files_by_id)
         current_revision = self._build_bitrix_revision(bitrix_message)
         if link.last_seen_bitrix_revision != current_revision:
@@ -508,7 +482,13 @@ class MirrorService:
         if link is None:
             logger.debug('Skipping Telegram edit %s because no Bitrix mapping was found', message.message_id)
             return
-        await self.bitrix.update_message(message_id=link.bitrix_message_id, text=self.render_telegram_message(message))
+        try:
+            await self.bitrix.update_message(message_id=link.bitrix_message_id, text=self.render_telegram_message(message))
+        except RuntimeError as exc:
+            if 'BITRIX_ACCESS_DENIED' in str(exc):
+                logger.warning('Cannot edit Bitrix message %s (created by previous bot before Vibe migration); skipping edit mirror', link.bitrix_message_id)
+                return
+            raise
         logger.info('Mirrored Telegram edit %s from chat %s to Bitrix message %s', message.message_id, message.chat_id, link.bitrix_message_id)
 
     async def sync_telegram_reaction(self, chat_id: int, message_id: int, has_reactions: bool) -> None:
@@ -533,6 +513,38 @@ class MirrorService:
             logger.exception('Failed to mirror Telegram reaction on message %s to Bitrix message %s', message_id, link.bitrix_message_id)
 
 
+
+
+    async def _collect_files_by_id(self, data: dict[str, Any], bitrix_message: BitrixMessage) -> dict[int, BitrixFile]:
+        """Build file_id -> BitrixFile from the event payload, filling gaps via disk metadata.
+
+        Vibe events may or may not inline `data.files`; for any attachment the
+        event does not describe, fall back to GET /files/:id (named metadata),
+        and finally to an anonymous placeholder so forwarding still proceeds.
+        """
+        files_by_id: dict[int, BitrixFile] = {}
+        raw_files = data.get('files')
+        if isinstance(raw_files, dict):
+            for v in raw_files.values():
+                if isinstance(v, dict):
+                    f = BitrixFile.from_api_payload(v)
+                    if f is not None:
+                        files_by_id[f.file_id] = f
+        elif isinstance(raw_files, list):
+            for v in raw_files:
+                if isinstance(v, dict):
+                    f = BitrixFile.from_api_payload(v)
+                    if f is not None:
+                        files_by_id[f.file_id] = f
+        for fid in bitrix_message.file_ids:
+            if fid in files_by_id:
+                continue
+            meta = await self.bitrix.get_file_meta(fid)
+            if meta is not None:
+                files_by_id[fid] = meta
+            else:
+                files_by_id[fid] = BitrixFile(file_id=fid, name=f'file_{fid}', url_download=None, mime_type=None, file_type='file', is_image=False, author_id=bitrix_message.author_id)
+        return files_by_id
 
     async def _bitrix_event_loop(self, application: Application) -> None:
         logger.info('Starting Bitrix event fetch loop')
@@ -684,8 +696,9 @@ class MirrorService:
             raise ValueError('No uploadable file attachment found in message')
         telegram_file = await file_source.get_file()
         file_bytes = await telegram_file.download_as_bytearray()
-        if len(file_bytes) > self.settings.max_file_size_bytes:
-            logger.warning('Telegram file too large (%s bytes > %s max), skipping upload for message %s', len(file_bytes), self.settings.max_file_size_bytes, message.message_id)
+        cap = min(self.settings.max_file_size_bytes, self.settings.bitrix_max_upload_file_bytes)
+        if len(file_bytes) > cap:
+            logger.warning('Telegram file too large (%s bytes > %s max), skipping upload for message %s', len(file_bytes), cap, message.message_id)
             return await self.bitrix.send_message(self.render_telegram_message(message) + '\n\n[Файл слишком большой для пересылки]', dialog_id=dialog_id, reply_id=reply_id)
         file_path_name = telegram_file.file_path.rsplit('/', 1)[-1] if telegram_file.file_path else None
         filename = original_name or file_path_name or fallback_name

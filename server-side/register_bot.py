@@ -1,43 +1,81 @@
 import json
-import secrets
+import os
 import sys
 import urllib.error
 import urllib.request
-from pathlib import Path
-from typing import Any, cast
+from typing import Any
+
+DEFAULT_BASE_URL = "https://vibecode.bitrix24.tech/v1"
+BOT_CODE = "tg_mirror_bot_v2"
 
 
-def registration_token() -> tuple[str, Path]:
-    token_path = Path(__file__).resolve().parent.parent / ".bitrix-registration-token"
-    try:
-        token = token_path.read_text(encoding="utf-8").strip()
-        if token:
-            return token, token_path
-    except OSError:
-        pass
-    token = secrets.token_hex(16)
-    token_path.write_text(token + "\n", encoding="utf-8")
-    token_path.chmod(0o600)
-    return token, token_path
+def vibe_request(api_key: str, base_url: str, method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+    """Perform one Vibe API call. Returns (http_status, parsed_json_envelope).
 
-def call_rest(webhook_url: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-    url = f"{webhook_url.rstrip('/')}/{method}"
-    req = urllib.request.Request(  # noqa: S310 - URL is validated as HTTPS by caller
+    Raises RuntimeError on transport failure or a non-JSON response.
+    """
+    url = f"{base_url.rstrip('/')}{path}"
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(  # noqa: S310 - base URL is HTTPS by configuration
         url,
-        data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json'},
-        method='POST'
+        data=data,
+        headers={
+            "X-Api-Key": api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method=method,
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as res:  # noqa: S310 - HTTPS-only webhook
-            return cast(dict[str, Any], json.loads(res.read().decode('utf-8')))
+        with urllib.request.urlopen(req, timeout=15) as res:  # noqa: S310 - HTTPS-only endpoint
+            status = res.status
+            payload = res.read().decode("utf-8")
     except urllib.error.HTTPError as e:
+        status = e.code
         try:
-            return cast(dict[str, Any], json.loads(e.read().decode('utf-8')))
-        except Exception:
-            return {"error": "HTTP_ERROR", "error_description": str(e)}
-    except Exception as e:
-        return {"error": "CONNECTION_ERROR", "error_description": str(e)}
+            payload = e.read().decode("utf-8")
+        except Exception as exc:
+            raise RuntimeError(f"{method} {path} -> HTTP {status} (unreadable body)") from exc
+    except Exception as exc:
+        raise RuntimeError(f"{method} {path} -> {exc}") from exc
+    try:
+        envelope = json.loads(payload)
+    except ValueError as exc:
+        raise RuntimeError(f"{method} {path} -> non-JSON response (HTTP {status})") from exc
+    if not isinstance(envelope, dict):
+        raise RuntimeError(f"{method} {path} -> unexpected JSON payload (HTTP {status})")
+    return status, envelope
+
+
+def vibe_get(api_key: str, base_url: str, path: str) -> tuple[int, dict[str, Any]]:
+    return vibe_request(api_key, base_url, "GET", path)
+
+
+def vibe_post(api_key: str, base_url: str, path: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    return vibe_request(api_key, base_url, "POST", path, body)
+
+
+def envelope_error(envelope: dict[str, Any]) -> tuple[str, str]:
+    error = envelope.get("error")
+    if isinstance(error, dict):
+        return str(error.get("code") or ""), str(error.get("message") or "")
+    return "", ""
+
+
+def envelope_data(envelope: dict[str, Any]) -> dict[str, Any]:
+    data = envelope.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def list_bots(api_key: str, base_url: str) -> list[dict[str, Any]]:
+    status, envelope = vibe_get(api_key, base_url, "/bots")
+    if status != 200 or not envelope.get("success"):
+        code, message = envelope_error(envelope)
+        raise RuntimeError(f"GET /bots -> HTTP {status} {code} {message}".strip())
+    data = envelope_data(envelope)
+    items = data.get("items") if isinstance(data.get("items"), list) else data.get("bots")
+    return [item for item in (items or []) if isinstance(item, dict)]
+
 
 def print_result(status, action, bot_id, bot_token, message):
     print(f"status={status}")
@@ -46,84 +84,94 @@ def print_result(status, action, bot_id, bot_token, message):
     print(f"bot_token={bot_token}")
     print(f"message={message}")
 
+
 def print_error(message):
     print("status=error")
     print(f"message={message}")
 
-def main():
-    if len(sys.argv) < 2:
-        print_error("Usage: register_bot.py <webhook_base> [<bot_id> <bot_token> [<bot_name>]]")
-        sys.exit(1)
 
-    webhook_base = sys.argv[1]
-    existing_bot_id = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else None
-    existing_bot_token = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else None
-    bot_name = sys.argv[4].strip() if len(sys.argv) > 4 and sys.argv[4].strip() else "Telegram Mirror"
-
-    # Step 1: Check if current credentials are valid and support V2
-    if existing_bot_id and existing_bot_token:
-        try:
-            bot_id_int = int(existing_bot_id)
-            res = call_rest(webhook_base, "imbot.v2.Event.get", {
-                "botId": bot_id_int,
-                "botToken": existing_bot_token,
-                "limit": 1
-            })
-            if "result" in res and "error" not in res:
-                print_result("ok", "none", bot_id_int, existing_bot_token, "Бот успешно проверен и уже работает на API 2.0")
-                sys.exit(0)
-        except Exception as exc:
-            print(f"Не удалось проверить существующего бота: {exc}", file=sys.stderr)  # noqa: RUF001
-
-    # Step 2: Register a new bot. The list method requires botToken with webhook auth,
-    # which is unavailable during first installation.
-    candidate_codes = ["tg_mirror_bot", "tg_mirror_bot_v2", "tg_mirror_bot_v3"]
-
-    # Step 3: Register using imbot.v2.Bot.register (trying candidate codes in sequence)
-    new_token, _token_path = registration_token()
-    reg_res: dict[str, Any] = {}
-    registered_code = None
-
+def try_register(api_key: str, base_url: str, bot_name: str) -> tuple[str, int] | dict[str, Any]:
+    """Try POST /bots with candidate codes. Returns (code, bot_id) or an error dict."""
+    candidate_codes = [BOT_CODE] + [f"{BOT_CODE}_{n}" for n in range(2, 7)]
+    last_error: dict[str, Any] = {"code": "", "message": "no attempts made"}
     for code in candidate_codes:
-        reg_payload = {
-            "fields": {
-                "code": code,
-                "botToken": new_token,
-                "type": "supervisor",
-                "eventMode": "fetch",
-                "isHidden": False,
-                "properties": {
-                    "name": bot_name,
-                    "desc": "Mirrors chats between Telegram and Bitrix24"
+        body = {"code": code, "name": bot_name, "type": "supervisor", "eventMode": "fetch"}
+        status, envelope = vibe_post(api_key, base_url, "/bots", body)
+        if status in (200, 201) and envelope.get("success"):
+            data = envelope_data(envelope)
+            bot_id = data.get("botId")
+            if not isinstance(bot_id, int):
+                bot = data.get("bot")
+                if isinstance(bot, dict) and isinstance(bot.get("id"), int):
+                    bot_id = bot["id"]
+            if isinstance(bot_id, int):
+                return code, bot_id
+            return {"code": "REGISTRATION_FAILED", "message": f"Vibe не вернул botId: {envelope}"}
+        code_err, message = envelope_error(envelope)
+        last_error = {"code": code_err, "message": message, "_status": status}
+        if status == 409 and code_err == "BOT_ALREADY_EXISTS":
+            data = envelope_data(envelope)
+            conflicting_bot_id = data.get("botId")
+            if isinstance(conflicting_bot_id, int):
+                # The code is owned by another API key's bot record — do not
+                # silently spawn suffix bots; tell the operator to transfer.
+                return {
+                    "code": "BOT_ALREADY_EXISTS",
+                    "message": (
+                        f"код {code} занят ботом (botId={conflicting_bot_id}) другого API-ключа — "
+                        "перенесите владение (POST /v1/bots/:id/transfer) или используйте другой ключ"
+                    ),
                 }
-            }
-        }
-        reg_res = call_rest(webhook_base, "imbot.v2.Bot.register", reg_payload)
-        if "error" not in reg_res:
-            registered_code = code
-            break
-        elif reg_res.get("error") != "BOT_CODE_ALREADY_TAKEN":
-            # If the error is not about code conflict, break early (e.g. portal issue, permissions error)
-            break
+            # 409 without data: external bot holds the code on the portal — try next candidate.
+            continue
+        return last_error
+    return last_error
 
-    if not registered_code or "error" in reg_res:
-        print_error(f"Ошибка регистрации бота: {reg_res.get('error')} | {reg_res.get('error_description')}")
+
+def main():
+    if len(sys.argv) < 2 or not sys.argv[1].strip():
+        print_error("Usage: register_bot.py <vibe_api_key> [<bot_id> [<bot_name>]]")
         sys.exit(1)
 
-    result_data = reg_res.get("result")
-    new_bot_id = None
-    if isinstance(result_data, dict):
-        bot_data = result_data.get("bot")
-        if isinstance(bot_data, dict):
-            new_bot_id = bot_data.get("id")
-    elif isinstance(result_data, int | str):
-        new_bot_id = result_data
+    api_key = sys.argv[1].strip()
+    base_url = (os.environ.get("VIBE_BASE_URL", "") or DEFAULT_BASE_URL).strip().rstrip("/") or DEFAULT_BASE_URL
+    existing_bot_id = sys.argv[2].strip() if len(sys.argv) > 2 and sys.argv[2].strip() else None
+    bot_name = sys.argv[3].strip() if len(sys.argv) > 3 and sys.argv[3].strip() else "Telegram Mirror"
 
-    if new_bot_id is None or not isinstance(new_bot_id, int | str):
-        print_error(f"Некорректный ID нового бота в ответе: {reg_res}")
+    try:
+        # Step 1: a bot id was supplied — check it is registered under this key.
+        if existing_bot_id:
+            if not existing_bot_id.isdigit():
+                print_error(f"Некорректный bot_id: {existing_bot_id}")
+                sys.exit(1)
+            status, envelope = vibe_get(api_key, base_url, f"/bots/{existing_bot_id}")
+            if status == 200 and envelope.get("success"):
+                print_result("ok", "kept", int(existing_bot_id), "", "Бот уже зарегистрирован через Vibe API")
+                sys.exit(0)
+            # 404/403 or any other answer — fall through to discovery/registration.
+
+        # Step 2: discover a bot with our code owned by this key.
+        for bot in list_bots(api_key, base_url):
+            if bot.get("code") == BOT_CODE and isinstance(bot.get("botId"), int):
+                print_result("ok", "existing", bot["botId"], "", f"Найден существующий бот Vibe (код: {BOT_CODE})")
+                sys.exit(0)
+
+        # Step 3: register a new supervisor bot.
+        outcome = try_register(api_key, base_url, bot_name)
+        if isinstance(outcome, dict):
+            err_code = outcome.get("code", "")
+            err_message = outcome.get("message", "")
+            hint = ""
+            if err_code in ("WRITE_BLOCKED_READONLY_KEY", "SCOPE_DENIED", "TOKEN_MISSING") or outcome.get("_status") == 401:
+                hint = " (нужен READWRITE-ключ со скоупами imbot, disk)"
+            print_error(f"Ошибка регистрации бота через Vibe API: {err_code} | {err_message}{hint}")
+            sys.exit(1)
+        registered_code, new_bot_id = outcome
+        print_result("ok", "registered", new_bot_id, "", f"Бот успешно зарегистрирован через Vibe API (код: {registered_code})")
+    except RuntimeError as exc:
+        print_error(f"Ошибка обращения к Vibe API: {exc}")
         sys.exit(1)
 
-    print_result("ok", "registered", int(new_bot_id), new_token, f"Бот успешно зарегистрирован c Chatbot API 2.0 (код: {registered_code})")
 
 if __name__ == "__main__":
     main()

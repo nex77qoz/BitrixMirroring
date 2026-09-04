@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 from telegram.error import BadRequest
 
 from mirror_service import MirrorService, _bbcode_to_html
-from models import BitrixEventPage, BitrixMessage, MessageMirrorLink, MirrorOrigin
+from models import BitrixEventPage, BitrixFile, BitrixMessage, MessageMirrorLink, MirrorOrigin
 from tests.helpers import make_bitrix_event, make_mapping, make_message, make_settings
 
 
@@ -59,6 +59,21 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         message = make_message(text='edited text')
         await self.service.sync_telegram_edit(message)
         self.bitrix.update_message.assert_awaited_once()
+
+    async def test_sync_telegram_edit_skips_legacy_bitrix_message(self) -> None:
+        self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(bitrix_message_id=99)
+        self.bitrix.update_message = AsyncMock(side_effect=RuntimeError('Vibe error: BITRIX_ACCESS_DENIED | Access denied'))
+        message = make_message(text='edited text')
+
+        await self.service.sync_telegram_edit(message)
+
+    async def test_sync_telegram_edit_propagates_other_errors(self) -> None:
+        self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(bitrix_message_id=99)
+        self.bitrix.update_message = AsyncMock(side_effect=RuntimeError('Vibe error: RATE_LIMITED | slow down'))
+        message = make_message(text='edited text')
+
+        with self.assertRaisesRegex(RuntimeError, 'RATE_LIMITED'):
+            await self.service.sync_telegram_edit(message)
 
     async def test_sync_telegram_reaction_updates_state(self) -> None:
         self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(bitrix_message_id=99, bitrix_liked_by_bot=False, last_seen_bitrix_likes='')
@@ -411,6 +426,43 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         await self.service._handle_bitrix_event(event)
         self.bitrix.download_file_by_id.assert_awaited_once_with(9, fallback_url='https://example.com/pic.jpg')
         self.service._application.bot.send_photo.assert_awaited_once()
+
+    async def test_message_add_fetches_file_meta_when_event_lacks_files(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_photo=AsyncMock(return_value=make_message(photo=[SimpleNamespace(file_id='tgfile')]))))
+        self.bitrix.download_file_by_id = AsyncMock(return_value=b'fake-image-bytes')
+        self.bitrix.get_file_meta = AsyncMock(return_value=BitrixFile(
+            file_id=9, name='photo.jpg', url_download='https://example.com/photo.jpg',
+            mime_type='image/jpeg', file_type='image', is_image=True, author_id=41,
+        ))
+        event = make_bitrix_event()
+        event.data['message']['params']['FILE_ID'] = ['9']
+
+        await self.service._handle_bitrix_event(event)
+
+        self.bitrix.get_file_meta.assert_awaited_once_with(9)
+        # the named disk record (with its download URL) reached the forwarder,
+        # not the anonymous file_9 placeholder
+        self.bitrix.download_file_by_id.assert_awaited_once_with(9, fallback_url='https://example.com/photo.jpg')
+        self.service._application.bot.send_photo.assert_awaited_once()
+
+    async def test_message_add_without_files_falls_back_to_placeholder(self) -> None:
+        # get_file_meta returns None -> anonymous placeholder with no download
+        # URL -> the file is NOT fetched, message forwards as plain text.
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(
+            send_message=AsyncMock(return_value=make_message()),
+            send_photo=AsyncMock(),
+        ))
+        self.bitrix.download_file_by_id = AsyncMock(return_value=b'fake-image-bytes')
+        self.bitrix.get_file_meta = AsyncMock(return_value=None)
+        event = make_bitrix_event()
+        event.data['message']['params']['FILE_ID'] = ['9']
+
+        await self.service._handle_bitrix_event(event)
+
+        self.bitrix.get_file_meta.assert_awaited_once_with(9)
+        self.bitrix.download_file_by_id.assert_not_awaited()
+        self.service._application.bot.send_photo.assert_not_awaited()
+        self.service._application.bot.send_message.assert_awaited_once()
 
     async def test_fetch_cycle_advances_after_each_successful_event(self) -> None:
         self.state_store.load_bitrix_event_offset.return_value = 100

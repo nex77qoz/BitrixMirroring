@@ -49,6 +49,9 @@ MONITOR_ALLOWED_IPS=""
 # Python binary used throughout the script
 PYTHON_BIN="python3"
 
+# Vibe API (бот-платформа Битрикс24) базовый URL по умолчанию
+VIBE_BASE_URL_DEFAULT="https://vibecode.bitrix24.tech/v1"
+
 # Resolved script path (avoids /dev/fd/XX when run via pipe)
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")"
 
@@ -217,31 +220,30 @@ run_cmd() {
 unregister_bitrix_bot() {
     [[ -f "$ENV_FILE" ]] || { print_warn "Конфигурация Bitrix не найдена — бот не удалён из Bitrix24"; return 0; }
 
-    local webhook_base bot_id bot_token response
+    local vibe_api_key vibe_base bot_id response
     # shellcheck disable=SC1090
     source "$ENV_FILE"
-    webhook_base="${BITRIX_WEBHOOK_BASE:-}"
+    vibe_api_key="${VIBE_API_KEY:-}"
     bot_id="${BITRIX_BOT_ID:-}"
-    bot_token="${BITRIX_BOT_CLIENT_ID:-}"
+    vibe_base="${VIBE_BASE_URL:-$VIBE_BASE_URL_DEFAULT}"
 
-    if [[ -z "$webhook_base" || -z "$bot_id" || -z "$bot_token" ]]; then
-        print_warn "BITRIX_WEBHOOK_BASE, BITRIX_BOT_ID или BITRIX_BOT_CLIENT_ID не заданы — бот не удалён из Bitrix24"
+    if [[ -z "$vibe_api_key" || -z "$bot_id" ]]; then
+        print_warn "VIBE_API_KEY или BITRIX_BOT_ID не заданы — бот не удалён из Bitrix24"
         return 0
     fi
 
-    response=$(curl --silent --show-error --location --request POST \
-        --header 'Content-Type: application/json' \
+    response=$(curl --silent --show-error --location --request DELETE \
+        --header "X-Api-Key: ${vibe_api_key}" \
         --header 'Accept: application/json' \
-        --data "{\"botId\":${bot_id},\"botToken\":\"${bot_token}\"}" \
-        "${webhook_base%/}/imbot.v2.Bot.unregister" 2>&1) || {
+        "${vibe_base%/}/bots/${bot_id}" 2>&1) || {
         print_warn "Не удалось удалить бота из Bitrix24: $response"
         return 0
     }
 
-    if ! python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("result", {}).get("result") is True and "error" not in data else 1)' <<< "$response" 2>/dev/null; then
+    if ! python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("success") is True else 1)' <<< "$response" 2>/dev/null; then
         print_warn "Bitrix24 не удалил бота: $response"
     else
-        print_ok "Бот удалён из Bitrix24 (imbot.v2.Bot.unregister)"
+        print_ok "Бот удалён из Bitrix24 (DELETE /v1/bots/${bot_id})"
     fi
 }
 
@@ -249,7 +251,7 @@ notify_telegram_admins_about_bitrix_bot() {
     [[ -n "${TG_ADMIN_IDS:-}" ]] || return 0
 
     local admin_id response message
-    message=$'Зарегистрирован новый бот Bitrix24.\n\nBot ID: '\"${BITRIX_BOT_ID}\"$'\nТокен: '\"${BITRIX_BOT_CLIENT_ID}\"
+    message=$'Зарегистрирован новый бот Bitrix24 через Vibe API.\n\nBot ID: '"${BITRIX_BOT_ID}"
     IFS=',' read -ra _admin_ids <<< "$TG_ADMIN_IDS"
     for admin_id in "${_admin_ids[@]}"; do
         admin_id="${admin_id//[[:space:]]/}"
@@ -596,7 +598,7 @@ PYEOF
     # shellcheck disable=SC1090
     source "$tmp_env_sh"
     rm -f "$tmp_env_sh"
-    for _secret_var in TELEGRAM_BOT_TOKEN BITRIX_BOT_CLIENT_ID MONITOR_PASSWORD TELEGRAM_WEBHOOK_SECRET; do
+    for _secret_var in TELEGRAM_BOT_TOKEN VIBE_API_KEY MONITOR_PASSWORD TELEGRAM_WEBHOOK_SECRET; do
         if [[ "${!_secret_var:-}" == "***REDACTED***" ]]; then
             unset "$_secret_var"
             print_warn "Секрет $_secret_var отсутствует в резервной копии — его нужно ввести заново"
@@ -637,7 +639,7 @@ step_collect_config() {
     print_step "Сбор конфигурации"
 
     if [[ "${BACKUP_LOADED:-false}" == "true" ]]; then
-        if [[ -n "${BITRIX_WEBHOOK_BASE:-}" && -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${BITRIX_BOT_CLIENT_ID:-}" && -n "${MONITOR_PASSWORD:-}" && -n "${TELEGRAM_WEBHOOK_SECRET:-}" ]]; then
+        if [[ -n "${VIBE_API_KEY:-}" && -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${MONITOR_PASSWORD:-}" && -n "${TELEGRAM_WEBHOOK_SECRET:-}" ]]; then
             print_ok "Конфигурация загружена из резервной копии — пропускаем интерактивный ввод"
             return 0
         fi
@@ -659,11 +661,10 @@ step_collect_config() {
             print_ok "Параметры успешно загружены."
         else
             print_info "Параметры будут настроены заново."
-            BITRIX_WEBHOOK_BASE=""
+            VIBE_API_KEY=""
             DOMAIN=""
             APP_DOMAIN=""
             BITRIX_BOT_ID=""
-            BITRIX_BOT_CLIENT_ID=""
             ACME_EMAIL=""
             TELEGRAM_BOT_TOKEN=""
             TELEGRAM_WEBHOOK_SECRET=""
@@ -672,18 +673,16 @@ step_collect_config() {
 
     echo -e "\n${BOLD}  Введите параметры бота (все поля обязательны):${RESET}\n"
 
-    # Bitrix webhook
+    # Vibe API key
     while true; do
-        ask_secret BITRIX_WEBHOOK_BASE "URL вебхука Битрикс (https://company.bitrix24.ru/rest/1/CODE)"
-        if [[ "$BITRIX_WEBHOOK_BASE" == https://* ]]; then
+        ask_secret VIBE_API_KEY "Vibe API ключ (vibe_api_..., READWRITE, скоупы imbot+disk)"
+        if [[ -n "$VIBE_API_KEY" ]]; then
             break
         fi
-        print_error "URL должен начинаться с https://"
         if [[ -n "${CONFIG_FILE_PATH:-}" ]]; then
-            print_error "Недопустимое значение BITRIX_WEBHOOK_BASE в конфигурационном файле."
+            print_error "Недопустимое значение VIBE_API_KEY в конфигурационном файле."
             exit 1
         fi
-        BITRIX_WEBHOOK_BASE=""
     done
 
     # Domain
@@ -695,32 +694,28 @@ step_collect_config() {
     print_info "В режиме eventMode=fetch поле handler_url при регистрации не требуется."
     print_info "URL Telegram webhook: ${BOLD}${TELEGRAM_WEBHOOK_PUBLIC_URL}${TELEGRAM_WEBHOOK_PATH}${RESET}"
 
-    # Bot IDs (Auto-detect/Register via Python script)
-    print_info "Проверка и автоматическая настройка бота Битрикс через REST API..."
+    # Bot IDs (Auto-detect/Register via Vibe API)
+    print_info "Проверка и автоматическая настройка бота Битрикс через Vibe API..."
     BOT_AUTO_REGISTERED="false"
     local reg_script="$INSTALL_DIR/server-side/register_bot.py"
     if [[ -f "$reg_script" ]]; then
         local tmp_out
         tmp_out=$(mktemp)
-        
+
         # We run the python script, redirecting stderr to the install log file to preserve debug info, and stdout to our temp file.
-        if python3 "$reg_script" "$BITRIX_WEBHOOK_BASE" "${BITRIX_BOT_ID:-}" "${BITRIX_BOT_CLIENT_ID:-}" "$BITRIX_BOT_NAME" > "$tmp_out" 2>> "$LOG_FILE"; then
-            local status bot_id bot_token msg
+        if VIBE_BASE_URL="${VIBE_BASE_URL:-$VIBE_BASE_URL_DEFAULT}" python3 "$reg_script" "$VIBE_API_KEY" "${BITRIX_BOT_ID:-}" "$BITRIX_BOT_NAME" > "$tmp_out" 2>> "$LOG_FILE"; then
+            local status bot_id msg
             status=$(awk -F= '/^status=/ {print $2}' "$tmp_out")
             bot_id=$(awk -F= '/^bot_id=/ {print $2}' "$tmp_out")
-            bot_token=$(awk -F= '/^bot_token=/ {print $2}' "$tmp_out")
             msg=$(awk -F= '/^message=/ {print $2}' "$tmp_out")
-            
+
             if [[ "$status" == "ok" ]]; then
                 BITRIX_BOT_ID="$bot_id"
-                BITRIX_BOT_CLIENT_ID="$bot_token"
                 BOT_AUTO_REGISTERED="true"
                 print_ok "$msg (BOT_ID=$BITRIX_BOT_ID)"
-                print_info "  BOT_TOKEN=$BITRIX_BOT_CLIENT_ID"
             else
                 print_warn "Автоматическая настройка вернула статус error: $msg"
-                ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
-                ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
+                ask_input BITRIX_BOT_ID "ID бота в Битрикс (BOT_ID)"
             fi
         else
             local err_msg
@@ -728,14 +723,12 @@ step_collect_config() {
             err_msg="${err_msg:-Неизвестная ошибка выполнения скрипта}"
             print_warn "Автоматическая настройка не удалась: $err_msg"
             print_info "Подробный лог сохранён в $LOG_FILE"
-            ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
-            ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
+            ask_input BITRIX_BOT_ID "ID бота в Битрикс (BOT_ID)"
         fi
         rm -f "$tmp_out"
     else
         print_warn "Скрипт автонастройки $reg_script не найден. Введите параметры вручную."
-        ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
-        ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
+        ask_input BITRIX_BOT_ID "ID бота в Битрикс (BOT_ID)"
     fi
 
     # Email for SSL certificate (acme.sh)
@@ -746,7 +739,7 @@ step_collect_config() {
 
     echo -e "\n${BOLD}  Данные нового бота Bitrix24:${RESET}"
     echo -e "    BITRIX_BOT_ID: ${CYAN}${BITRIX_BOT_ID}${RESET}"
-    echo -e "    BITRIX_BOT_CLIENT_ID: ${CYAN}${BITRIX_BOT_CLIENT_ID}${RESET}"
+    print_info "Добавьте бота (ID=${BITRIX_BOT_ID}) во все зеркалируемые чаты Битрикс24 и перезапустите сервис."
 
     TELEGRAM_WEBHOOK_ENABLED="true"
 
@@ -827,10 +820,10 @@ TELEGRAM_WEBHOOK_DROP_PENDING_UPDATES=true
 TELEGRAM_WEBHOOK_STRICT_VERIFY=true
 
 # Bitrix
-BITRIX_WEBHOOK_BASE=$(env_escape "${BITRIX_WEBHOOK_BASE}")
+VIBE_API_KEY=$(env_escape "${VIBE_API_KEY}")
+VIBE_BASE_URL=$(env_escape "${VIBE_BASE_URL:-$VIBE_BASE_URL_DEFAULT}")
 BITRIX_BOT_NAME=$(env_escape "${BITRIX_BOT_NAME}")
 BITRIX_BOT_ID=$(env_escape "${BITRIX_BOT_ID}")
-BITRIX_BOT_CLIENT_ID=$(env_escape "${BITRIX_BOT_CLIENT_ID}")
 
 # Мгновенный Bitrix -> Telegram bridge
 # Форматирование
@@ -863,6 +856,7 @@ REQUEST_TIMEOUT_SECONDS=20
 # Лимиты файлов (100 МБ на файл, 10 ГБ кэш)
 MAX_FILE_SIZE_BYTES=104857600
 FILE_CACHE_DIR=$(env_escape "${FILE_CACHE_DIR}")
+BITRIX_MAX_UPLOAD_FILE_BYTES=31457280
 FILE_CACHE_MAX_BYTES=10737418240
 
 # Очистка БД (7 дней)
@@ -880,7 +874,7 @@ EOF
 
     chmod 600 "$ENV_FILE"
     chown "$SVC_USER:$SVC_GROUP" "$ENV_FILE"
-    rm -f "$INSTALL_DIR/.bitrix-registration-token"
+    rm -f "$INSTALL_DIR/.bitrix-registration-token" 2>/dev/null || true
     print_ok ".env создан ($ENV_FILE)"
 }
 
@@ -1731,25 +1725,19 @@ print_summary() {
     done
     echo ""
     if [[ "${BOT_AUTO_REGISTERED:-false}" != "true" ]]; then
-        echo -e "${YELLOW}${BOLD}  ⚠  Не забудьте зарегистрировать бота в Битрикс!${RESET}"
-        echo -e "  Для Chatbot API 2.0 выполните REST-запрос ${BOLD}imbot.v2.Bot.register${RESET} со следующим JSON-телом:"
+        echo -e "${YELLOW}${BOLD}  ⚠  Не забудьте зарегистрировать бота через Vibe API!${RESET}"
+        echo -e "  Выполните запрос ${BOLD}POST ${VIBE_BASE_URL:-$VIBE_BASE_URL_DEFAULT}/bots${RESET} со следующим JSON-телом"
+        echo -e "  (заголовок ${BOLD}X-Api-Key: <VIBE_API_KEY>${RESET}, ключ — чтение+запись, скоупы imbot, disk):"
         echo -e "    ${CYAN}{"
-        echo -e "      \"fields\": {"
-        echo -e "        \"code\": \"tg_mirror_bot\","
-        echo -e "        \"botToken\": \"generate-a-unique-token\","
-        echo -e "        \"type\": \"supervisor\","
-        echo -e "        \"eventMode\": \"fetch\","
-        echo -e "        \"isHidden\": false,"
-        echo -e "        \"properties\": {"
-        echo -e "          \"name\": \"Telegram Mirror\","
-        echo -e "          \"desc\": \"Mirrors chats between Telegram and Bitrix24\""
-        echo -e "        }"
-        echo -e "      }"
+        echo -e "      \"code\": \"tg_mirror_bot_v2\","
+        echo -e "      \"name\": \"${BITRIX_BOT_NAME:-Telegram Mirror}\","
+        echo -e "      \"type\": \"supervisor\","
+        echo -e "      \"eventMode\": \"fetch\""
         echo -e "    }${RESET}"
-        echo -e "  Сохраните полученный ${BOLD}botId${RESET} в ${BOLD}BITRIX_BOT_ID${RESET},"
-        echo -e "  а ${BOLD}botToken${RESET} в ${BOLD}BITRIX_BOT_CLIENT_ID${RESET} в вашем .env файле."
+        echo -e "  Сохраните полученный ${BOLD}data.botId${RESET} в ${BOLD}BITRIX_BOT_ID${RESET} в вашем .env файле."
+        echo -e "  Или повторно запустите: ${BOLD}python3 ${INSTALL_DIR}/server-side/register_bot.py \"\$VIBE_API_KEY\"${RESET}"
     else
-        echo -e "${GREEN}${BOLD}  ✓  Бот автоматически проверен / зарегистрирован с Chatbot API 2.0!${RESET}"
+        echo -e "${GREEN}${BOLD}  ✓  Бот автоматически проверен / зарегистрирован через Vibe API!${RESET}"
     fi
     if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
         echo ""

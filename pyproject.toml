@@ -23,6 +23,7 @@ ignore = [
 "mirror_service.py" = ["B007", "S110", "RUF006", "RUF001", "RUF002", "RUF003"]
 "settings.py" = ["B904"]
 "handlers.py" = ["B904", "RUF006", "S110"]
+"server-side/register_bot.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.11"

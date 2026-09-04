@@ -148,9 +148,9 @@ def _validate_chat_mappings(mappings: tuple[ChatMapping, ...]) -> None:
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
-    bitrix_webhook_base: str
+    vibe_api_key: str
+    vibe_base_url: str
     bitrix_bot_id: int
-    bitrix_bot_client_id: str
     chat_mappings: tuple[ChatMapping, ...]
     prefix_with_chat_title: bool
     prefix_with_sender: bool
@@ -170,6 +170,7 @@ class Settings:
     bitrix_send_queue_maxsize: int
     bitrix_rescan_recent_messages_limit: int
     max_file_size_bytes: int
+    bitrix_max_upload_file_bytes: int
     file_cache_dir: str
     file_cache_max_bytes: int
     db_cleanup_max_age_seconds: int
@@ -186,12 +187,14 @@ class Settings:
     @staticmethod
     def from_env() -> Settings:
         telegram_bot_token = _read_env("TELEGRAM_BOT_TOKEN")
-        bitrix_webhook_base = _read_env("BITRIX_WEBHOOK_BASE").rstrip("/")
-        if not bitrix_webhook_base.startswith("https://"):
-            raise ValueError("BITRIX_WEBHOOK_BASE must use https://")
+        vibe_api_key = _read_env("VIBE_API_KEY")
+        if not vibe_api_key:
+            raise ValueError("VIBE_API_KEY is required")
+        vibe_base_url = _read_env("VIBE_BASE_URL", "https://vibecode.bitrix24.tech/v1").rstrip("/")
+        if not vibe_base_url.startswith("https://"):
+            raise ValueError("VIBE_BASE_URL must use https://")
 
         bitrix_bot_id = _parse_int("BITRIX_BOT_ID", minimum=1)
-        bitrix_bot_client_id = _read_env("BITRIX_BOT_CLIENT_ID")
 
         mirror_state_db_path = _read_env("MIRROR_STATE_DB_PATH", "mirror_state.sqlite3")
 
@@ -225,9 +228,9 @@ class Settings:
 
         return Settings(
             telegram_bot_token=telegram_bot_token,
-            bitrix_webhook_base=bitrix_webhook_base,
+            vibe_api_key=vibe_api_key,
+            vibe_base_url=vibe_base_url,
             bitrix_bot_id=bitrix_bot_id,
-            bitrix_bot_client_id=bitrix_bot_client_id,
             chat_mappings=chat_mappings,
             prefix_with_chat_title=_parse_bool("PREFIX_WITH_CHAT_TITLE", "false"),
             prefix_with_sender=_parse_bool("PREFIX_WITH_SENDER", "true"),
@@ -247,6 +250,7 @@ class Settings:
             bitrix_send_queue_maxsize=_parse_int("BITRIX_SEND_QUEUE_MAXSIZE", "1000", minimum=1),
             bitrix_rescan_recent_messages_limit=_parse_int("BITRIX_RESCAN_RECENT_MESSAGES_LIMIT", "100", minimum=1),
             max_file_size_bytes=_parse_int("MAX_FILE_SIZE_BYTES", str(100 * 1024 * 1024), minimum=1),
+            bitrix_max_upload_file_bytes=_parse_int("BITRIX_MAX_UPLOAD_FILE_BYTES", str(30 * 1024 * 1024), minimum=1024),
             file_cache_dir=_read_env("FILE_CACHE_DIR", ""),
             file_cache_max_bytes=_parse_int("FILE_CACHE_MAX_BYTES", str(10 * 1024 * 1024 * 1024), minimum=0),
             db_cleanup_max_age_seconds=_parse_int("DB_CLEANUP_MAX_AGE_SECONDS", str(7 * 24 * 3600), minimum=3600),

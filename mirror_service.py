@@ -466,13 +466,24 @@ class MirrorService:
 
     async def _handle_bitrix_join_chat(self, data: dict[str, Any]) -> None:
         dialog_id = data.get('dialogId')
+        raw_chat = data.get('chat')
+        chat: dict[str, Any] = raw_chat if isinstance(raw_chat, dict) else {}
         if not isinstance(dialog_id, str):
-            dialog_id = data.get('chat', {}).get('dialogId')
+            dialog_id = chat.get('dialogId')
         if not isinstance(dialog_id, str):
+            return
+        if self._is_group_dialog(dialog_id, chat):
+            logger.debug('Suppressing join-chat greeting in group dialog %s', dialog_id)
             return
         bot_id = self.settings.bitrix_bot_id
         if bot_id:
             await self.bitrix.send_message('Привет. Бот подключён и готов к работе.', dialog_id=dialog_id)
+
+    @staticmethod
+    def _is_group_dialog(dialog_id: str, chat: dict[str, Any]) -> bool:
+        # Bitrix24 group dialogs use a "chat<id>" dialogId and chat.type == "chat";
+        # personal 1:1 dialogs use the numeric user id. Greet only the latter.
+        return dialog_id.lower().startswith('chat') or chat.get('type') == 'chat'
 
     async def sync_telegram_edit(self, message: Message) -> None:
         if not self._forwarding_enabled:

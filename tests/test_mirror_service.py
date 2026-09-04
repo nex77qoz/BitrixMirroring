@@ -351,11 +351,25 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
         self.service._application.bot.send_message.assert_not_awaited()
 
-    async def test_join_chat_sends_existing_greeting(self) -> None:
+    async def test_join_chat_greets_personal_dialog_only(self) -> None:
+        # personal 1:1 dialog: numeric dialogId, chat.type != "chat"
+        event = make_bitrix_event('ONIMBOTV2JOINCHAT')
+        event = dataclasses.replace(event, data={'bot': {'id': 7}, 'dialogId': '55', 'chat': {'dialogId': '55', 'type': 'im'}})
+        await self.service._handle_bitrix_event(event)
+        self.bitrix.send_message.assert_awaited_once_with('Привет. Бот подключён и готов к работе.', dialog_id='55')
+
+    async def test_join_chat_does_not_greet_group_dialog(self) -> None:
+        event = make_bitrix_event('ONIMBOTV2JOINCHAT')
+        event = dataclasses.replace(event, data={'bot': {'id': 7}, 'dialogId': 'chat42', 'chat': {'dialogId': 'chat42', 'type': 'chat'}})
+        await self.service._handle_bitrix_event(event)
+        self.bitrix.send_message.assert_not_awaited()
+
+    async def test_join_chat_does_not_greet_group_dialog_without_type(self) -> None:
+        # group dialog identified purely by the "chatXXX" dialogId prefix
         event = make_bitrix_event('ONIMBOTV2JOINCHAT')
         event = dataclasses.replace(event, data={'bot': {'id': 7}, 'dialogId': 'chat42', 'chat': {'dialogId': 'chat42'}})
         await self.service._handle_bitrix_event(event)
-        self.bitrix.send_message.assert_awaited_once()
+        self.bitrix.send_message.assert_not_awaited()
 
     async def test_message_update_edits_linked_telegram_message(self) -> None:
         link = make_link(origin=MirrorOrigin.BITRIX)

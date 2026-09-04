@@ -58,7 +58,10 @@ class _Upload:
 
 
 async def _import(payload: dict, mode: str = "merge") -> dict:
-    return await monitor_app.api_import_mappings(_Upload(payload), mode, "admin")
+    # monitor_app is imported dynamically (server-side path); to mypy its return
+    # is Any, so bind through a typed local to satisfy no-any-return.
+    result: dict = await monitor_app.api_import_mappings(_Upload(payload), mode, "admin")
+    return result
 
 
 # ── Export ───────────────────────────────────────────────────────────────────

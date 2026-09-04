@@ -68,13 +68,55 @@ def envelope_data(envelope: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_bots(api_key: str, base_url: str) -> list[dict[str, Any]]:
-    status, envelope = vibe_get(api_key, base_url, "/bots")
+    status, envelope = vibe_get(api_key, base_url, "/bots?limit=200")
     if status != 200 or not envelope.get("success"):
         code, message = envelope_error(envelope)
         raise RuntimeError(f"GET /bots -> HTTP {status} {code} {message}".strip())
     data = envelope_data(envelope)
-    items = data.get("items") if isinstance(data.get("items"), list) else data.get("bots")
+    items = data.get("bots") if isinstance(data.get("bots"), list) else data.get("items")
     return [item for item in (items or []) if isinstance(item, dict)]
+
+
+def _bot_id(bot: dict[str, Any]) -> int | None:
+    # GET /v1/bots names the id field "id"; POST /v1/bots and the 409 conflict
+    # envelope name it "botId". Accept either so a second install with the same
+    # key recognises (and reuses) the existing mirror bot.
+    for key in ("id", "botId"):
+        value = bot.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def _is_mirror_code(code: object) -> bool:
+    # the base code, or a suffix variant assigned when the base was taken
+    if not isinstance(code, str):
+        return False
+    if code == BOT_CODE:
+        return True
+    prefix = f"{BOT_CODE}_"
+    return code.startswith(prefix) and code[len(prefix):].isdigit()
+
+
+def find_existing_bot(api_key: str, base_url: str) -> tuple[str, int] | None:
+    """Return (code, botId) of a mirror bot owned by this key, or None.
+
+    A second install reusing the same API key hits this path and adopts the
+    existing bot (base code first, then the lowest suffix variant) instead of
+    registering a duplicate.
+    """
+    candidates: list[tuple[str, int]] = []
+    for bot in list_bots(api_key, base_url):
+        bot_id = _bot_id(bot)
+        code = bot.get("code")
+        if bot_id is not None and _is_mirror_code(code):
+            candidates.append((str(code), bot_id))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda cb: (0 if cb[0] == BOT_CODE else 1, len(cb[0]), cb[0]))
+    return candidates[0]
 
 
 def print_result(status, action, bot_id, bot_token, message):
@@ -150,11 +192,13 @@ def main():
                 sys.exit(0)
             # 404/403 or any other answer — fall through to discovery/registration.
 
-        # Step 2: discover a bot with our code owned by this key.
-        for bot in list_bots(api_key, base_url):
-            if bot.get("code") == BOT_CODE and isinstance(bot.get("botId"), int):
-                print_result("ok", "existing", bot["botId"], "", f"Найден существующий бот Vibe (код: {BOT_CODE})")
-                sys.exit(0)
+        # Step 2: reuse a mirror bot already owned by this key (base code or
+        # a _2.._6 suffix) — this is what lets a second server adopt the bot.
+        existing = find_existing_bot(api_key, base_url)
+        if existing is not None:
+            code, bot_id = existing
+            print_result("ok", "existing", bot_id, "", f"Найден существующий бот Vibe (код: {code})")
+            sys.exit(0)
 
         # Step 3: register a new supervisor bot.
         outcome = try_register(api_key, base_url, bot_name)

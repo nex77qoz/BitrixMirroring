@@ -36,8 +36,9 @@ class _VibeStub(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self._record("GET")
         routes = self.scenario.get("get", {})
-        if self.path in routes:
-            status, payload = routes[self.path]
+        path = urllib.parse.urlparse(self.path).path
+        if path in routes:
+            status, payload = routes[path]
             self._send(status, payload)
             return
         self._send(404, {"success": False, "error": {"code": "BOT_NOT_FOUND", "message": "no"}})
@@ -85,7 +86,7 @@ class RegisterBotVibeTest(unittest.TestCase):
         # botId is platform-assigned and passed through unchanged).
         fields, requests = self._run(
             {
-                "get": {"/v1/bots": (200, {"success": True, "data": {"items": []}})},
+                "get": {"/v1/bots": (200, {"success": True, "data": {"bots": []}})},
                 "post": (201, {"success": True, "data": {"botId": 42}}),
             },
             [],
@@ -112,9 +113,11 @@ class RegisterBotVibeTest(unittest.TestCase):
         self.assertEqual(fields["bot_id"], "42")
         self.assertEqual([r for r in requests if r["method"] == "POST"], [])
 
-    def test_discovers_bot_by_code_from_list(self) -> None:
+    def test_reuses_existing_bot_from_list(self) -> None:
+        # GET /v1/bots names the numeric id "id" (not "botId"); a second install
+        # with the same key must adopt the existing bot, not re-register it.
         fields, requests = self._run(
-            {"get": {"/v1/bots": (200, {"success": True, "data": {"items": [{"botId": 55, "code": "tg_mirror_bot_v2"}]}})}},
+            {"get": {"/v1/bots": (200, {"success": True, "data": {"bots": [{"id": 55, "code": "tg_mirror_bot_v2"}]}})}},
             ["", "Telegram Mirror"],
         )
         self.assertEqual(fields["status"], "ok")
@@ -122,10 +125,31 @@ class RegisterBotVibeTest(unittest.TestCase):
         self.assertEqual(fields["bot_id"], "55")
         self.assertEqual([r for r in requests if r["method"] == "POST"], [])
 
+    def test_reuses_suffixed_bot_when_base_was_taken(self) -> None:
+        # server #1 got a suffix code (base was foreign-held); server #2 adopts it
+        fields, requests = self._run(
+            {"get": {"/v1/bots": (200, {"success": True, "data": {"bots": [{"id": 61, "code": "tg_mirror_bot_v2_2"}]}})}},
+            ["", "Telegram Mirror"],
+        )
+        self.assertEqual(fields["action"], "existing")
+        self.assertEqual(fields["bot_id"], "61")
+        self.assertEqual([r for r in requests if r["method"] == "POST"], [])
+
+    def test_prefers_base_code_over_suffix_variant(self) -> None:
+        fields, _ = self._run(
+            {"get": {"/v1/bots": (200, {"success": True, "data": {"bots": [
+                {"id": 61, "code": "tg_mirror_bot_v2_2"},
+                {"id": 42, "code": "tg_mirror_bot_v2"},
+            ]}})}},
+            ["", "Telegram Mirror"],
+        )
+        self.assertEqual(fields["action"], "existing")
+        self.assertEqual(fields["bot_id"], "42")
+
     def test_409_with_bot_id_reports_foreign_owner(self) -> None:
         fields, _ = self._run(
             {
-                "get": {"/v1/bots": (200, {"success": True, "data": {"items": []}})},
+                "get": {"/v1/bots": (200, {"success": True, "data": {"bots": []}})},
                 "post": (409, {"success": False, "error": {"code": "BOT_ALREADY_EXISTS", "message": "exists"}, "data": {"botId": 99, "code": "tg_mirror_bot_v2"}}),
             },
             ["", "Telegram Mirror"],
@@ -137,7 +161,7 @@ class RegisterBotVibeTest(unittest.TestCase):
     def test_readonly_key_error_is_reported_with_hint(self) -> None:
         fields, _ = self._run(
             {
-                "get": {"/v1/bots": (200, {"success": True, "data": {"items": []}})},
+                "get": {"/v1/bots": (200, {"success": True, "data": {"bots": []}})},
                 "post": (403, {"success": False, "error": {"code": "WRITE_BLOCKED_READONLY_KEY", "message": "read-only"}}),
             },
             ["", "Telegram Mirror"],
@@ -148,7 +172,7 @@ class RegisterBotVibeTest(unittest.TestCase):
 
     def test_stdout_contract_keys_are_present(self) -> None:
         fields, _ = self._run(
-            {"get": {"/v1/bots/42": (200, {"success": True, "data": {"botId": 42}})}},
+            {"get": {"/v1/bots/42": (200, {"success": True, "data": {"id": 42, "code": "tg_mirror_bot_v2"}})}},
             ["42"],
         )
         self.assertEqual(set(fields), {"status", "action", "bot_id", "bot_token", "message"})

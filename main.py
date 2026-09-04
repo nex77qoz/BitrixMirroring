@@ -9,6 +9,7 @@ import os
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from telegram import Update
 from telegram.ext import (
     AIORateLimiter,
@@ -105,8 +106,8 @@ def _build_application(settings: Settings, bitrix: BitrixClient, mirror: MirrorS
 def _build_http_app(settings: Settings, application: Application, mirror: MirrorService) -> FastAPI:
     app = FastAPI()
 
-    @app.get("/health")
-    async def health() -> dict[str, object]:
+    @app.get("/health", response_model=None)
+    async def health() -> dict[str, object] | JSONResponse:
         webhook_status = application.bot_data.get("telegram_webhook_status", {})
         checks: dict[str, object] = {}
 
@@ -128,13 +129,18 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
         else:
             checks["bitrix_event_fetcher_alive"] = "disabled"
 
-        return {
-            "ok": True,
+        fetcher_status = checks.get("bitrix_event_fetcher_alive")
+        healthy = checks.get("db") == "ok" and (fetcher_status is True or fetcher_status == "disabled")
+        response = {
+            "ok": healthy,
             "telegram_webhook_enabled": settings.telegram_webhook_enabled,
             "forwarding_enabled": mirror.is_forwarding_enabled(),
             "telegram_webhook_status": webhook_status,
             "checks": checks,
         }
+        if not healthy:
+            return JSONResponse(status_code=503, content=response)
+        return response
 
     def _verify_internal_secret(request: Request) -> None:
         expected_secret = settings.mirror_internal_webhook_secret or ""

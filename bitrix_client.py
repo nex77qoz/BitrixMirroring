@@ -174,7 +174,10 @@ class BitrixClient:
                 data = cast(dict[str, Any], response.json())
                 if 'error' in data:
                     error_code = str(data.get('error') or '')
-                    if error_code.upper() in {'QUERY_LIMIT_EXCEEDED', 'TEMPORARY_ERROR'}:
+                    if error_code.upper() in {
+                        'QUERY_LIMIT_EXCEEDED', 'TEMPORARY_ERROR',
+                        'OPERATION_TIME_LIMIT', 'OVERLOAD_LIMIT',
+                    }:
                         raise RuntimeError(f'Temporary Bitrix error: {error_code}')
                     raise RuntimeError(f"Bitrix error: {data['error']} | {data.get('error_description', '')}")
                 return data

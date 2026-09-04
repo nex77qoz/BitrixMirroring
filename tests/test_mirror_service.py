@@ -164,22 +164,21 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(throttling_sleeps), 2)
                 self.assertAlmostEqual(throttling_sleeps[0], 0.2)
                 self.assertAlmostEqual(throttling_sleeps[1], 0.2)
-            with patch('asyncio.create_task') as mock_create_task, patch.object(self.service, 'resolve_mapping_for_telegram_message', return_value=make_mapping()):
-                mock_create_task.return_value = AsyncMock()
+            with patch.object(self.service, 'resolve_mapping_for_telegram_message', return_value=make_mapping()):
                 chat_id_overflow = 9999
-                max_size = self.service.settings.bitrix_send_queue_maxsize
-                for i in range(max_size + 5):
-                    msg = make_message(chat_id=chat_id_overflow, message_id=100 + i)
-                    await self.service.enqueue_telegram_message(msg)
-                self.assertEqual(self.service._channel_queues[chat_id_overflow].qsize(), max_size)
-                chat_id_other = 8888
-                msg_other = make_message(chat_id=chat_id_other, message_id=9999)
-                await self.service.enqueue_telegram_message(msg_other)
-                self.assertEqual(self.service._channel_queues[chat_id_other].qsize(), 1)
+                overflow_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+                overflow_queue.put_nowait(make_message(chat_id=chat_id_overflow, message_id=100))
+                self.service._channel_queues[chat_id_overflow] = overflow_queue
+                blocked_put = asyncio.create_task(self.service.enqueue_telegram_message(make_message(chat_id=chat_id_overflow, message_id=101)))
+                await asyncio.sleep(0)
+                self.assertFalse(blocked_put.done())
+                overflow_queue.get_nowait()
+                overflow_queue.task_done()
+                await blocked_put
+                self.assertEqual(overflow_queue.qsize(), 1)
         finally:
             loop.time = original_time
             self.service._channel_workers.pop(9999, None)
-            self.service._channel_workers.pop(8888, None)
             await self.service.stop()
 
     async def test_reload_mappings_cancels_obsolete_workers(self) -> None:
@@ -266,6 +265,52 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.state_store.upsert_link.assert_awaited_once()
         self.bitrix.get_recent_messages.assert_not_awaited()
         self.bitrix.get_messages_after.assert_not_awaited()
+
+    async def test_message_add_splits_long_text_for_telegram(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(return_value=make_message())))
+
+        await self.service._handle_bitrix_event(make_bitrix_event(text='x' * 5000))
+
+        calls = self.service._application.bot.send_message.await_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(len(call.kwargs['text']) <= 4096 for call in calls))
+        self.assertTrue(all(call.kwargs['parse_mode'] is None for call in calls))
+
+    async def test_worker_splits_long_text_for_bitrix_and_links_first_part(self) -> None:
+        mapping = self.service.settings.chat_mappings[0]
+        queue: asyncio.Queue = asyncio.Queue()
+        self.service._channel_queues[mapping.tg_chat_id] = queue
+        self.service._forwarding_enabled = True
+        self.bitrix.send_message = AsyncMock(side_effect=[501, 502])
+        await queue.put(make_message(chat_id=mapping.tg_chat_id, text='x' * 20_100))
+        worker = asyncio.create_task(self.service._per_channel_worker(mapping.tg_chat_id))
+
+        await queue.join()
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+        calls = self.bitrix.send_message.await_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(len(call.args[0]) <= 20_000 for call in calls))
+        self.assertEqual(self.state_store.upsert_link.await_args.kwargs['bitrix_message_id'], 501)
+
+    async def test_worker_retries_in_place_when_queue_is_full(self) -> None:
+        mapping = self.service.settings.chat_mappings[0]
+        queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+        self.service._channel_queues[mapping.tg_chat_id] = queue
+        self.service._forwarding_enabled = True
+        self.bitrix.send_message = AsyncMock(side_effect=[RuntimeError('temporary'), 501, 502])
+        await queue.put(make_message(chat_id=mapping.tg_chat_id, message_id=1, text='first'))
+        await queue.put(make_message(chat_id=mapping.tg_chat_id, message_id=2, text='second'))
+        worker = asyncio.create_task(self.service._per_channel_worker(mapping.tg_chat_id))
+
+        await asyncio.wait_for(queue.join(), timeout=2)
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+        sent_texts = [call.args[0] for call in self.bitrix.send_message.await_args_list]
+        self.assertEqual(sent_texts[0], sent_texts[1])
+        self.assertNotEqual(sent_texts[1], sent_texts[2])
 
     async def test_message_add_is_idempotent_when_link_exists(self) -> None:
         self.state_store.get_link_by_bitrix_message.return_value = make_link(origin=MirrorOrigin.BITRIX)

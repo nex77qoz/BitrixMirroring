@@ -36,7 +36,7 @@ exclude = ["graphify-out/", "install.sh.bak"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
-disable_error_code = ["method-assign", "arg-type", "assignment"]
+disable_error_code = ["method-assign", "arg-type", "assignment", "union-attr"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

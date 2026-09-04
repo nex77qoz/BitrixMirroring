@@ -23,6 +23,11 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
         self.client._call = AsyncMock(side_effect=RuntimeError("Bitrix error: REACTION_ALREADY_SET"))
         await self.client.set_message_like(10, liked=True)
 
+    def test_documented_transient_errors_are_retryable(self) -> None:
+        for code in ("OPERATION_TIME_LIMIT", "OVERLOAD_LIMIT"):
+            with self.subTest(code=code):
+                self.assertTrue(self.client._is_retryable_exception(RuntimeError(f"Temporary Bitrix error: {code}")))
+
     async def test_update_message_accepts_v2_nested_success_result(self) -> None:
         self.client._call = AsyncMock(return_value={"result": {"result": True}})
 

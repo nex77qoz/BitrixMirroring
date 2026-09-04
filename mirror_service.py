@@ -8,7 +8,7 @@ import logging
 import re
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from telegram import Message, ReactionTypeEmoji
 from telegram.error import BadRequest, ChatMigrated
@@ -28,6 +28,9 @@ from models import (
 from settings import ChatMapping, Settings
 
 logger = logging.getLogger('tg-bitrix-mirror')
+_BITRIX_MESSAGE_LIMIT = 20_000
+_TELEGRAM_MESSAGE_LIMIT = 4_096
+_TELEGRAM_CAPTION_LIMIT = 1_024
 _BBCODE_PATTERNS: list[tuple[re.Pattern[str], str]] = [(re.compile('\\[b\\](.*?)\\[/b\\]', re.DOTALL | re.IGNORECASE), '<b>\\1</b>'), (re.compile('\\[i\\](.*?)\\[/i\\]', re.DOTALL | re.IGNORECASE), '<i>\\1</i>'), (re.compile('\\[u\\](.*?)\\[/u\\]', re.DOTALL | re.IGNORECASE), '<u>\\1</u>'), (re.compile('\\[s\\](.*?)\\[/s\\]', re.DOTALL | re.IGNORECASE), '<s>\\1</s>'), (re.compile('\\[code\\](.*?)\\[/code\\]', re.DOTALL | re.IGNORECASE), '<code>\\1</code>'), (re.compile('\\[quote\\](.*?)\\[/quote\\]', re.DOTALL | re.IGNORECASE), '<blockquote>\\1</blockquote>'), (re.compile('\\[url\\](.*?)\\[/url\\]', re.DOTALL | re.IGNORECASE), '<a href="\\1">\\1</a>'), (re.compile('\\[url=([^\\]]+)\\](.*?)\\[/url\\]', re.DOTALL | re.IGNORECASE), '<a href="\\1">\\2</a>'), (re.compile('\\[color=[^\\]]+\\](.*?)\\[/color\\]', re.DOTALL | re.IGNORECASE), '\\1')]
 
 def _bbcode_to_html(text: str) -> str:
@@ -282,10 +285,8 @@ class MirrorService:
             self._channel_queues[chat_id] = asyncio.Queue(maxsize=self.settings.bitrix_send_queue_maxsize)
             self._channel_workers[chat_id] = asyncio.create_task(self._per_channel_worker(chat_id), name=f'channel-worker-{chat_id}')
         queue = self._channel_queues[chat_id]
-        if queue.full():
-            logger.warning('Queue full for chat_id=%s, dropping message=%s', chat_id, message.message_id)
-            return
-        queue.put_nowait(message)
+        # Backpressure keeps the update in Telegram's webhook retry path instead of dropping it.
+        await queue.put(message)
 
     async def _handle_bitrix_event(self, event: BitrixBotEvent) -> None:
         handlers = {'ONIMBOTV2MESSAGEADD': self._handle_bitrix_message_add, 'ONIMBOTV2MESSAGEUPDATE': self._handle_bitrix_message_update, 'ONIMBOTV2MESSAGEDELETE': self._handle_bitrix_message_delete, 'ONIMBOTV2REACTIONCHANGE': self._handle_bitrix_reaction_change, 'ONIMBOTV2JOINCHAT': self._handle_bitrix_join_chat}
@@ -572,9 +573,14 @@ class MirrorService:
         queue = self._channel_queues[chat_id]
         min_interval = 0.2
         last_send_time = 0.0
+        retry_message: Message | None = None
         while not self._stop_event.is_set():
             try:
-                message = await queue.get()
+                if retry_message is None:
+                    message = await queue.get()
+                else:
+                    message = retry_message
+                    retry_message = None
             except asyncio.CancelledError:
                 break
             mapping = None
@@ -599,17 +605,26 @@ class MirrorService:
                         reply_link = await self.state_store.get_link_by_telegram_message(telegram_chat_id=message.chat_id, telegram_message_id=message.reply_to_message.message_id)
                         if reply_link is not None:
                             reply_bitrix_id = reply_link.bitrix_message_id
+                rendered = self.render_telegram_message(message)
+                parts = [rendered[i:i + _BITRIX_MESSAGE_LIMIT] for i in range(0, len(rendered), _BITRIX_MESSAGE_LIMIT)] or ['']
+                bitrix_message_ids: list[int] = []
                 if self._has_uploadable_file(message):
-                    bitrix_message_id = await self._forward_telegram_file_to_bitrix(message, dialog_id=dialog_id, reply_id=reply_bitrix_id)
-                else:
-                    bitrix_message_id = await self.bitrix.send_message(self.render_telegram_message(message), dialog_id=dialog_id, reply_id=reply_bitrix_id)
-                await self.state_store.upsert_link(telegram_chat_id=message.chat_id, telegram_message_id=message.message_id, bitrix_message_id=bitrix_message_id, origin=MirrorOrigin.TELEGRAM, telegram_message_date_unix=int(message.date.timestamp()) if message.date else None, bitrix_author_id=None, last_seen_bitrix_revision='telegram-origin', telegram_message_thread_id=message.message_thread_id)
+                    bitrix_message_ids.append(await self._forward_telegram_file_to_bitrix(message, dialog_id=dialog_id, reply_id=reply_bitrix_id, caption=parts.pop(0)))
+                    reply_bitrix_id = None
+                for part in parts:
+                    bitrix_message_ids.append(await self.bitrix.send_message(part, dialog_id=dialog_id, reply_id=reply_bitrix_id))
+                    reply_bitrix_id = None
+                await self.state_store.upsert_link(telegram_chat_id=message.chat_id, telegram_message_id=message.message_id, bitrix_message_id=bitrix_message_ids[0], origin=MirrorOrigin.TELEGRAM, telegram_message_date_unix=int(message.date.timestamp()) if message.date else None, bitrix_author_id=None, last_seen_bitrix_revision='telegram-origin', telegram_message_thread_id=message.message_thread_id)
+                self._tg_forward_dead_letters.pop(chat_id, None)
             except Exception:
                 dead_count = self._tg_forward_dead_letters.get(chat_id, 0) + 1
                 self._tg_forward_dead_letters[chat_id] = dead_count
-                logger.exception('Failed to mirror Telegram message %s to Bitrix (chat=%s, dialog=%s, dead_letter_count=%d)', message.message_id, chat_id, mapping.bitrix_dialog_id if mapping else 'unknown', dead_count)
+                logger.exception('Failed to mirror Telegram message %s to Bitrix (chat=%s, dialog=%s, retry_count=%d)', message.message_id, chat_id, mapping.bitrix_dialog_id if mapping else 'unknown', dead_count)
+                await asyncio.sleep(min(self.settings.bitrix_retry_base_delay_seconds * 2 ** min(dead_count - 1, 10), self.settings.bitrix_retry_max_delay_seconds))
+                retry_message = message
             finally:
-                queue.task_done()
+                if retry_message is None:
+                    queue.task_done()
     async def _should_forward_bitrix_message(self, dialog_id: str, bitrix_message: BitrixMessage) -> bool:
         if self.settings.bitrix_bot_id and bitrix_message.author_id == self.settings.bitrix_bot_id:
             logger.debug('Ignoring Bitrix message %s from our own bot (author_id=%s)', bitrix_message.message_id, bitrix_message.author_id)
@@ -648,9 +663,9 @@ class MirrorService:
     def _has_uploadable_file(self, message: Message) -> bool:
         return bool(message.photo or message.document or message.video or message.audio)
 
-    async def _forward_telegram_file_to_bitrix(self, message: Message, *, dialog_id: str, reply_id: int | None=None) -> int:
+    async def _forward_telegram_file_to_bitrix(self, message: Message, *, dialog_id: str, reply_id: int | None=None, caption: str | None=None) -> int:
         if message.photo:
-            file_source = message.photo[-1]
+            file_source: Any = message.photo[-1]
             original_name = None
             fallback_name = f'photo_{message.message_id}.jpg'
         elif message.document:
@@ -674,38 +689,60 @@ class MirrorService:
             return await self.bitrix.send_message(self.render_telegram_message(message) + '\n\n[Файл слишком большой для пересылки]', dialog_id=dialog_id, reply_id=reply_id)
         file_path_name = telegram_file.file_path.rsplit('/', 1)[-1] if telegram_file.file_path else None
         filename = original_name or file_path_name or fallback_name
-        return await self.bitrix.send_photo(caption=self.render_telegram_message(message), filename=filename, content=bytes(file_bytes), dialog_id=dialog_id)
+        return await self.bitrix.send_photo(caption=caption if caption is not None else self.render_telegram_message(message), filename=filename, content=bytes(file_bytes), dialog_id=dialog_id)
 
     async def _forward_bitrix_message(self, application: Application, snapshot: BitrixDialogSnapshot, bitrix_message: BitrixMessage, sender_name: str, *, tg_chat_id: int, message_thread_id: int | None=None, reply_to_message_id: int | None=None) -> Message:
 
-        async def _send_with_thread_fallback(send_callable):
+        async def _send_with_thread_fallback(send_callable: Any, requested_reply_id: int | None=reply_to_message_id) -> Message:
             try:
-                return await send_callable(message_thread_id, reply_to_message_id)
+                return cast(Message, await send_callable(message_thread_id, requested_reply_id))
             except BadRequest as exc:
                 if message_thread_id is None or 'Message thread not found' not in str(exc):
                     raise
                 logger.warning('Telegram thread_id=%s not found for Bitrix message %s in chat %s; falling back to main feed', message_thread_id, bitrix_message.message_id, tg_chat_id)
-                return await send_callable(None, None)
+                return cast(Message, await send_callable(None, None))
         rendered = self.render_bitrix_message(bitrix_message, sender_name=sender_name)
+        async def send_text_parts(text: str, *, first_reply_id: int | None = reply_to_message_id) -> Message:
+            parse_mode: str | None = 'HTML'
+            if len(text) > _TELEGRAM_MESSAGE_LIMIT:
+                text = html.unescape(re.sub(r'<[^>]+>', '', text))
+                parse_mode = None
+            parts = [text[i:i + _TELEGRAM_MESSAGE_LIMIT] for i in range(0, len(text), _TELEGRAM_MESSAGE_LIMIT)] or ['']
+            first: Message | None = None
+            current_reply_id = first_reply_id
+            for part in parts:
+                sent = await _send_with_thread_fallback(lambda thread_id, reply_id, part=part: application.bot.send_message(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, text=part, parse_mode=parse_mode, disable_web_page_preview=self.settings.disable_link_preview), current_reply_id)
+                if first is None:
+                    first = sent
+                current_reply_id = None
+            assert first is not None
+            return first
         attachment = self._select_bitrix_file(snapshot, bitrix_message)
         if attachment is None or not attachment.url_download:
-            return await _send_with_thread_fallback(lambda thread_id, reply_id: application.bot.send_message(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, text=rendered, parse_mode='HTML', disable_web_page_preview=self.settings.disable_link_preview))
+            return await send_text_parts(rendered)
         try:
             file_bytes = await self.bitrix.download_file_by_id(attachment.file_id, fallback_url=attachment.url_download)
             if len(file_bytes) > self.settings.max_file_size_bytes:
                 logger.warning('Bitrix file too large (%s bytes > %s max), sending text only for message %s', len(file_bytes), self.settings.max_file_size_bytes, bitrix_message.message_id)
-                return await _send_with_thread_fallback(lambda thread_id, reply_id: application.bot.send_message(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, text=rendered + '\n\n[Файл слишком большой для пересылки]', parse_mode='HTML', disable_web_page_preview=self.settings.disable_link_preview))
-            if attachment.is_image:
-                return await _send_with_thread_fallback(lambda thread_id, reply_id: application.bot.send_photo(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, photo=BytesIO(file_bytes), filename=attachment.name, caption=rendered or None, parse_mode='HTML'))
-            elif attachment.file_type == 'video' or (attachment.mime_type or '').startswith('video/'):
-                return await _send_with_thread_fallback(lambda thread_id, reply_id: application.bot.send_video(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, video=BytesIO(file_bytes), filename=attachment.name, caption=rendered or None, parse_mode='HTML'))
-            elif attachment.file_type == 'audio' or (attachment.mime_type or '').startswith('audio/'):
-                return await _send_with_thread_fallback(lambda thread_id, reply_id: application.bot.send_audio(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, audio=BytesIO(file_bytes), filename=attachment.name, caption=rendered or None, parse_mode='HTML'))
+                return await send_text_parts(rendered + '\n\n[Файл слишком большой для пересылки]')
+            if len(rendered) > _TELEGRAM_CAPTION_LIMIT:
+                send_caption = None
             else:
-                return await _send_with_thread_fallback(lambda thread_id, reply_id: application.bot.send_document(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, document=BytesIO(file_bytes), filename=attachment.name, caption=rendered or None, parse_mode='HTML'))
+                send_caption = rendered or None
+            if attachment.is_image:
+                sent = await _send_with_thread_fallback(lambda thread_id, reply_id: application.bot.send_photo(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, photo=BytesIO(file_bytes), filename=attachment.name, caption=send_caption, parse_mode='HTML'))
+            elif attachment.file_type == 'video' or (attachment.mime_type or '').startswith('video/'):
+                sent = await _send_with_thread_fallback(lambda thread_id, reply_id: application.bot.send_video(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, video=BytesIO(file_bytes), filename=attachment.name, caption=send_caption, parse_mode='HTML'))
+            elif attachment.file_type == 'audio' or (attachment.mime_type or '').startswith('audio/'):
+                sent = await _send_with_thread_fallback(lambda thread_id, reply_id: application.bot.send_audio(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, audio=BytesIO(file_bytes), filename=attachment.name, caption=send_caption, parse_mode='HTML'))
+            else:
+                sent = await _send_with_thread_fallback(lambda thread_id, reply_id: application.bot.send_document(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, document=BytesIO(file_bytes), filename=attachment.name, caption=send_caption, parse_mode='HTML'))
+            if send_caption is None:
+                await send_text_parts(rendered, first_reply_id=None)
+            return sent
         except Exception:
             logger.exception('Failed to forward Bitrix file for message %s, falling back to text', bitrix_message.message_id)
-            return await _send_with_thread_fallback(lambda thread_id, reply_id: application.bot.send_message(chat_id=tg_chat_id, message_thread_id=thread_id, reply_to_message_id=reply_id, text=rendered, parse_mode='HTML', disable_web_page_preview=self.settings.disable_link_preview))
+            return await send_text_parts(rendered)
 
     def _select_bitrix_file(self, snapshot: BitrixDialogSnapshot, bitrix_message: BitrixMessage) -> BitrixFile | None:
         for file_id in bitrix_message.file_ids:

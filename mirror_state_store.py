@@ -1,18 +1,26 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import ParamSpec, TypeVar
 
 from models import MessageMirrorLink, MirrorOrigin
 from settings import ChatMapping, _parse_topic_ids
 
 logger = logging.getLogger('tg-bitrix-mirror')
+_P = ParamSpec('_P')
+_T = TypeVar('_T')
+
+
+async def _run_sync(function: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
+    # ponytail: synchronous SQLite is sufficient for this low-throughput bot;
+    # move to one dedicated DB worker if measured lock waits affect the event loop.
+    return function(*args, **kwargs)
 
 class MirrorStateStore:
 
@@ -22,47 +30,47 @@ class MirrorStateStore:
         self._conn_lock = threading.Lock()
 
     async def initialize(self) -> None:
-        await asyncio.to_thread(self._initialize_sync)
+        await _run_sync(self._initialize_sync)
 
     async def upsert_link(self, *, telegram_chat_id: int, telegram_message_id: int, bitrix_message_id: int, origin: MirrorOrigin, telegram_message_date_unix: int | None, bitrix_author_id: int | None, last_seen_bitrix_revision: str, telegram_message_thread_id: int | None=None) -> None:
-        await asyncio.to_thread(self._upsert_link_sync, telegram_chat_id, telegram_message_id, bitrix_message_id, origin, telegram_message_date_unix, bitrix_author_id, last_seen_bitrix_revision, telegram_message_thread_id)
+        await _run_sync(self._upsert_link_sync, telegram_chat_id, telegram_message_id, bitrix_message_id, origin, telegram_message_date_unix, bitrix_author_id, last_seen_bitrix_revision, telegram_message_thread_id)
 
     async def get_link_by_telegram_message(self, *, telegram_chat_id: int, telegram_message_id: int) -> MessageMirrorLink | None:
-        return await asyncio.to_thread(self._get_link_by_telegram_message_sync, telegram_chat_id, telegram_message_id)
+        return await _run_sync(self._get_link_by_telegram_message_sync, telegram_chat_id, telegram_message_id)
 
     async def get_link_by_bitrix_message(self, *, bitrix_message_id: int) -> MessageMirrorLink | None:
-        return await asyncio.to_thread(self._get_link_by_bitrix_message_sync, bitrix_message_id)
+        return await _run_sync(self._get_link_by_bitrix_message_sync, bitrix_message_id)
 
     async def delete_link_by_bitrix_message(self, *, bitrix_message_id: int) -> None:
-        await asyncio.to_thread(self._delete_link_by_bitrix_message_sync, bitrix_message_id)
+        await _run_sync(self._delete_link_by_bitrix_message_sync, bitrix_message_id)
 
     async def delete_links_by_telegram_chat(self, *, telegram_chat_id: int) -> None:
-        await asyncio.to_thread(self._delete_links_by_telegram_chat_sync, telegram_chat_id)
+        await _run_sync(self._delete_links_by_telegram_chat_sync, telegram_chat_id)
 
     async def update_reaction_state(self, *, bitrix_message_id: int, bitrix_liked_by_bot: bool, last_seen_bitrix_likes: str) -> None:
-        await asyncio.to_thread(self._update_reaction_state_sync, bitrix_message_id, bitrix_liked_by_bot, last_seen_bitrix_likes)
+        await _run_sync(self._update_reaction_state_sync, bitrix_message_id, bitrix_liked_by_bot, last_seen_bitrix_likes)
 
     async def save_topic_name(self, tg_chat_id: int, topic_id: int, name: str) -> None:
-        await asyncio.to_thread(self._save_topic_name_sync, tg_chat_id, topic_id, name)
+        await _run_sync(self._save_topic_name_sync, tg_chat_id, topic_id, name)
 
     async def load_topic_names(self) -> dict[tuple[int, int], str]:
-        return await asyncio.to_thread(self._load_topic_names_sync)
+        return await _run_sync(self._load_topic_names_sync)
 
     async def get_forwarding_enabled(self) -> bool:
-        return await asyncio.to_thread(self._get_forwarding_enabled_sync)
+        return await _run_sync(self._get_forwarding_enabled_sync)
 
     async def set_forwarding_enabled(self, enabled: bool) -> None:
-        await asyncio.to_thread(self._set_forwarding_enabled_sync, enabled)
+        await _run_sync(self._set_forwarding_enabled_sync, enabled)
 
     async def load_bitrix_event_offset(self, bot_id: int) -> int | None:
-        return await asyncio.to_thread(self._load_bitrix_event_offset_sync, bot_id)
+        return await _run_sync(self._load_bitrix_event_offset_sync, bot_id)
 
     async def save_bitrix_event_offset(self, bot_id: int, offset: int) -> None:
-        await asyncio.to_thread(self._save_bitrix_event_offset_sync, bot_id, offset)
+        await _run_sync(self._save_bitrix_event_offset_sync, bot_id, offset)
 
     async def cleanup_old_links(self, max_age_seconds: int=7 * 24 * 3600) -> int:
         """Delete message_links older than max_age_seconds. Returns count of deleted rows."""
-        return await asyncio.to_thread(self._cleanup_old_links_sync, max_age_seconds)
+        return await _run_sync(self._cleanup_old_links_sync, max_age_seconds)
 
     def _initialize_sync(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -249,7 +257,7 @@ class MirrorStateStore:
             connection.commit()
 
     async def is_admin(self, tg_user_id: int) -> bool:
-        return await asyncio.to_thread(self._is_admin_sync, tg_user_id)
+        return await _run_sync(self._is_admin_sync, tg_user_id)
 
     def _is_admin_sync(self, tg_user_id: int) -> bool:
         with self._connect() as connection:
@@ -257,7 +265,7 @@ class MirrorStateStore:
         return row is not None
 
     async def save_pending_connection(self, bitrix_dialog_id: str, token: str, expires_at_unix: int) -> None:
-        await asyncio.to_thread(self._save_pending_connection_sync, bitrix_dialog_id, token, expires_at_unix)
+        await _run_sync(self._save_pending_connection_sync, bitrix_dialog_id, token, expires_at_unix)
 
     def _save_pending_connection_sync(self, bitrix_dialog_id: str, token: str, expires_at_unix: int) -> None:
         now = int(time.time())
@@ -267,7 +275,7 @@ class MirrorStateStore:
             connection.commit()
 
     async def verify_and_consume_token(self, bitrix_dialog_id: str, token: str) -> bool:
-        return await asyncio.to_thread(self._verify_and_consume_token_sync, bitrix_dialog_id, token)
+        return await _run_sync(self._verify_and_consume_token_sync, bitrix_dialog_id, token)
 
     def _verify_and_consume_token_sync(self, bitrix_dialog_id: str, token: str) -> bool:
         now = int(time.time())
@@ -284,7 +292,7 @@ class MirrorStateStore:
             return True
 
     async def load_all_chat_mappings(self) -> tuple[ChatMapping, ...]:
-        return await asyncio.to_thread(self._load_all_chat_mappings_sync)
+        return await _run_sync(self._load_all_chat_mappings_sync)
 
     def _load_all_chat_mappings_sync(self) -> tuple[ChatMapping, ...]:
         with self._connect() as connection:
@@ -295,7 +303,7 @@ class MirrorStateStore:
         return tuple(ChatMapping(mapping_id=int(row[0]), tg_chat_id=int(row[1]), bitrix_dialog_id=str(row[2]), topic_ids=_parse_topic_ids(str(row[3]) if row[3] else ''), label=str(row[4]) if row[4] is not None else '') for row in rows)
 
     async def add_chat_mapping(self, tg_chat_id: int, bitrix_dialog_id: str, topic_ids: list[int], label: str) -> int:
-        return await asyncio.to_thread(self._add_chat_mapping_sync, tg_chat_id, bitrix_dialog_id, topic_ids, label)
+        return await _run_sync(self._add_chat_mapping_sync, tg_chat_id, bitrix_dialog_id, topic_ids, label)
 
     def _add_chat_mapping_sync(self, tg_chat_id: int, bitrix_dialog_id: str, topic_ids: list[int], label: str) -> int:
         topic_ids_str = ','.join(str(t) for t in topic_ids)
@@ -312,7 +320,7 @@ class MirrorStateStore:
                 raise ValueError(f'Bitrix dialog {bitrix_dialog_id} уже привязан к другому маппингу') from exc
 
     async def update_chat_mapping_topic_ids(self, mapping_id: int, topic_ids: list[int]) -> None:
-        await asyncio.to_thread(self._update_chat_mapping_topic_ids_sync, mapping_id, topic_ids)
+        await _run_sync(self._update_chat_mapping_topic_ids_sync, mapping_id, topic_ids)
 
     def _update_chat_mapping_topic_ids_sync(self, mapping_id: int, topic_ids: list[int]) -> None:
         topic_ids_str = ','.join(str(t) for t in topic_ids)
@@ -321,7 +329,7 @@ class MirrorStateStore:
             connection.commit()
 
     async def remove_chat_mapping(self, mapping_id: int) -> bool:
-        return await asyncio.to_thread(self._remove_chat_mapping_sync, mapping_id)
+        return await _run_sync(self._remove_chat_mapping_sync, mapping_id)
 
     def _remove_chat_mapping_sync(self, mapping_id: int) -> bool:
         with self._connect() as connection:

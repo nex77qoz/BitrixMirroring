@@ -187,8 +187,8 @@ class Settings:
     def from_env() -> Settings:
         telegram_bot_token = _read_env("TELEGRAM_BOT_TOKEN")
         bitrix_webhook_base = _read_env("BITRIX_WEBHOOK_BASE").rstrip("/")
-        if not bitrix_webhook_base.startswith(("http://", "https://")):
-            raise ValueError("BITRIX_WEBHOOK_BASE must start with http:// or https://")
+        if not bitrix_webhook_base.startswith("https://"):
+            raise ValueError("BITRIX_WEBHOOK_BASE must use https://")
 
         bitrix_bot_id = _parse_int("BITRIX_BOT_ID", minimum=1)
         bitrix_bot_client_id = _read_env("BITRIX_BOT_CLIENT_ID")

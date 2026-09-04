@@ -51,6 +51,19 @@ async def test_health_exposes_runtime_flags(http_context) -> None:
 
 
 @pytest.mark.asyncio
+async def test_health_returns_503_when_db_is_unavailable(http_context) -> None:
+    settings, application, mirror = http_context
+    mirror.state_store = AsyncMock()
+    mirror.state_store.load_bitrix_event_offset = AsyncMock(side_effect=RuntimeError("db down"))
+    mirror._bitrix_event_task = SimpleNamespace(done=Mock(return_value=False))
+
+    response = await request(_build_http_app(settings, application, mirror), "GET", "/health")
+
+    assert response.status_code == 503
+    assert response.json()["ok"] is False
+
+
+@pytest.mark.asyncio
 async def test_forwarding_status_requires_secret(http_context) -> None:
     settings, application, mirror = http_context
     response = await request(_build_http_app(settings, application, mirror), "GET", "/internal/forwarding")

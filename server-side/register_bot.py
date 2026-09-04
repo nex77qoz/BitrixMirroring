@@ -4,6 +4,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any, cast
 
 
 def registration_token() -> tuple[str, Path]:
@@ -19,20 +20,20 @@ def registration_token() -> tuple[str, Path]:
     token_path.chmod(0o600)
     return token, token_path
 
-def call_rest(webhook_url, method, payload):
+def call_rest(webhook_url: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
     url = f"{webhook_url.rstrip('/')}/{method}"
-    req = urllib.request.Request(
+    req = urllib.request.Request(  # noqa: S310 - URL is validated as HTTPS by caller
         url,
         data=json.dumps(payload).encode('utf-8'),
         headers={'Content-Type': 'application/json'},
         method='POST'
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as res:
-            return json.loads(res.read().decode('utf-8'))
+        with urllib.request.urlopen(req, timeout=15) as res:  # noqa: S310 - HTTPS-only webhook
+            return cast(dict[str, Any], json.loads(res.read().decode('utf-8')))
     except urllib.error.HTTPError as e:
         try:
-            return json.loads(e.read().decode('utf-8'))
+            return cast(dict[str, Any], json.loads(e.read().decode('utf-8')))
         except Exception:
             return {"error": "HTTP_ERROR", "error_description": str(e)}
     except Exception as e:
@@ -71,8 +72,8 @@ def main():
             if "result" in res and "error" not in res:
                 print_result("ok", "none", bot_id_int, existing_bot_token, "Бот успешно проверен и уже работает на API 2.0")
                 sys.exit(0)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"Не удалось проверить существующего бота: {exc}", file=sys.stderr)  # noqa: RUF001
 
     # Step 2: Register a new bot. The list method requires botToken with webhook auth,
     # which is unavailable during first installation.
@@ -80,7 +81,7 @@ def main():
 
     # Step 3: Register using imbot.v2.Bot.register (trying candidate codes in sequence)
     new_token, _token_path = registration_token()
-    reg_res = None
+    reg_res: dict[str, Any] = {}
     registered_code = None
 
     for code in candidate_codes:
@@ -112,15 +113,17 @@ def main():
     result_data = reg_res.get("result")
     new_bot_id = None
     if isinstance(result_data, dict):
-        new_bot_id = result_data.get("bot", {}).get("id")
-    elif isinstance(result_data, (int, str)):
+        bot_data = result_data.get("bot")
+        if isinstance(bot_data, dict):
+            new_bot_id = bot_data.get("id")
+    elif isinstance(result_data, int | str):
         new_bot_id = result_data
 
-    if new_bot_id is None or not isinstance(new_bot_id, (int, str)):
+    if new_bot_id is None or not isinstance(new_bot_id, int | str):
         print_error(f"Некорректный ID нового бота в ответе: {reg_res}")
         sys.exit(1)
 
-    print_result("ok", "registered", int(new_bot_id), new_token, f"Бот успешно зарегистрирован с Chatbot API 2.0 (код: {registered_code})")
+    print_result("ok", "registered", int(new_bot_id), new_token, f"Бот успешно зарегистрирован c Chatbot API 2.0 (код: {registered_code})")
 
 if __name__ == "__main__":
     main()

@@ -32,7 +32,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Бот запущен.\n"
         "Команда /whereami покажет chat_id текущего чата и thread_id темы."
     )
-    _bot_reply_ids.setdefault(update.effective_chat.id, []).append(sent.message_id)
+    if update.effective_chat:
+        _bot_reply_ids.setdefault(update.effective_chat.id, []).append(sent.message_id)
 
 
 async def on_private_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

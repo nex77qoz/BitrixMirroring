@@ -38,3 +38,13 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.bitrix_webhook_base, "https://example.bitrix24.ru/rest/1/token")
         self.assertTrue(settings.telegram_webhook_enabled)
         self.assertEqual(settings.telegram_webhook_path, "/telegram/webhook")
+
+    def test_from_env_rejects_insecure_bitrix_webhook(self) -> None:
+        with patch.dict(os.environ, {
+            "TELEGRAM_BOT_TOKEN": "token",
+            "BITRIX_WEBHOOK_BASE": "http://example.bitrix24.ru/rest/1/token",
+            "BITRIX_BOT_ID": "12",
+            "BITRIX_BOT_CLIENT_ID": "client-token",
+        }, clear=True):
+            with self.assertRaisesRegex(ValueError, "https"):
+                Settings.from_env()

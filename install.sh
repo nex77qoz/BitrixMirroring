@@ -389,8 +389,11 @@ step_create_service_user() {
     local sudoers_file="/etc/sudoers.d/bitrix-bot-services"
     mkdir -p "$(dirname "$sudoers_file")"
     cat > "$sudoers_file" << EOF
-# Allow $SVC_USER to restart bot services and view logs (used by monitoring dashboard)
-${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-monitor, /usr/bin/journalctl --no-pager -u bitrix-telegram-mirror, /usr/bin/journalctl --no-pager -u bitrix-monitor
+# Allow $SVC_USER to restart bot services and view logs (used by monitoring dashboard).
+# The journalctl spec MUST mirror monitor_app._get_journal argv exactly
+# ("journalctl -u <unit> -n<lines> --no-pager --output=short-iso"); only the
+# -n<lines> count is wildcarded. Keep the two in sync or sudo will deny the call.
+${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-monitor, /usr/bin/journalctl -u bitrix-telegram-mirror -n* --no-pager --output=short-iso, /usr/bin/journalctl -u bitrix-monitor -n* --no-pager --output=short-iso
 EOF
     visudo -c -f "$sudoers_file" || { print_error "Некорректный синтаксис sudoers-файла"; return 1; }
     chmod 440 "$sudoers_file"
@@ -1213,9 +1216,13 @@ WantedBy=multi-user.target
 EOF
 
     # 2 — monitoring dashboard
+    # NOTE: intentionally omits NoNewPrivileges and uses ProtectSystem=full (not
+    # strict). This dashboard escalates via `sudo -n` (journalctl + systemctl
+    # restart, gated by /etc/sudoers.d/${SVC_USER}-services). NoNewPrivileges
+    # blocks ALL setuid (incl. sudo); strict makes /run read-only so sudo cannot
+    # create its timestamp dir. The mirror unit below keeps both — it never calls sudo.
     local _hardening_sidecar="
-NoNewPrivileges=yes
-ProtectSystem=strict
+ProtectSystem=full
 ProtectHome=yes
 ReadWritePaths=${INSTALL_DIR} /tmp
 PrivateTmp=yes

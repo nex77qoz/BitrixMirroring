@@ -17,8 +17,9 @@ StartLimitIntervalSec=60
 StandardOutput=journal
 StandardError=journal
 
-NoNewPrivileges=yes
-ProtectSystem=strict
+# NOTE: no NoNewPrivileges and ProtectSystem=full (not strict) are required —
+# the dashboard escalates via `sudo -n` (journalctl + systemctl restart).
+ProtectSystem=full
 ProtectHome=yes
 ReadWritePaths=/opt/bitrix-bot /tmp
 PrivateTmp=yes

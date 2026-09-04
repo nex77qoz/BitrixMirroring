@@ -6,6 +6,7 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -330,3 +331,59 @@ async def test_import_env_written_false_on_path_error(client, fresh_db, monkeypa
     assert data["ok"] is True
     assert data["env_written"] is False
     assert "env_error" in data
+
+
+def _capture_journal_cmd(service: str, lines: int) -> list[str]:
+    """Return the argv monitor_app._get_journal passes to subprocess.run."""
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, *a, **k):
+        captured["cmd"] = list(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    real = monitor_app.subprocess.run
+    monitor_app.subprocess.run = fake_run
+    try:
+        monitor_app._get_journal(service, lines=lines)
+    finally:
+        monitor_app.subprocess.run = real
+    return captured["cmd"]
+
+
+def _journal_sudoers_glob(argv: list[str]) -> str:
+    args = argv[argv.index("journalctl") + 1:]
+    globbed = ["-n*" if tok.startswith("-n") and tok[2:].isdigit() else tok for tok in args]
+    return "/usr/bin/journalctl " + " ".join(globbed)
+
+
+def test_sudoers_journalctl_rule_matches_app_invocation():
+    # The sudoers command must be an exact (per-word) match of the argv the app
+    # builds, else sudo denies the call. Only the -n<lines> count is variable.
+    source = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
+    for svc in ("bitrix-telegram-mirror", "bitrix-monitor"):
+        expected = _journal_sudoers_glob(_capture_journal_cmd(svc, 60))
+        assert expected in source, f"sudoers missing rule matching monitor argv: {expected}"
+
+
+def test_monitor_unit_hardening_allows_sudo():
+    unit = (Path(__file__).parents[1] / "server-side" / "bitrix-monitor.service").read_text(encoding="utf-8")
+    # NoNewPrivileges blocks sudo entirely; ProtectSystem=strict makes /run
+    # read-only so sudo cannot write its timestamp dir. Both must be absent as
+    # directives (the explanatory prose may mention them).
+    assert "NoNewPrivileges=" not in unit
+    assert "ProtectSystem=full" in unit
+    assert "ProtectSystem=strict" not in unit
+    # the installer must generate the same relaxed unit
+    installer = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
+    sidecar = installer[installer.index("_hardening_sidecar"):]
+    sidecar = sidecar[: sidecar.index('cat > /etc/systemd/system/bitrix-monitor')]
+    assert "NoNewPrivileges=" not in sidecar
+    assert "ProtectSystem=full" in sidecar
+    assert "ProtectSystem=strict" not in sidecar
+
+
+def test_mirror_unit_keeps_no_new_privileges():
+    # the mirror process never calls sudo, so its strict hardening stays
+    unit = (Path(__file__).parents[1] / "server-side" / "bitrix-telegram-mirror.service").read_text(encoding="utf-8")
+    assert "NoNewPrivileges=yes" in unit
+    assert "ProtectSystem=strict" in unit

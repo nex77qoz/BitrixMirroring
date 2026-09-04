@@ -22,6 +22,7 @@ def http_context():
         is_forwarding_enabled=Mock(return_value=True),
         set_forwarding_enabled=AsyncMock(return_value=False),
         schedule_bitrix_dialog_sync=AsyncMock(),
+        reload_mappings=AsyncMock(),
     )
     return settings, application, mirror
 
@@ -86,6 +87,29 @@ async def test_forwarding_toggle_calls_mirror(http_context) -> None:
     assert response.json()["forwarding_enabled"] is False
     mirror.set_forwarding_enabled.assert_awaited_once_with(False)
 
+
+@pytest.mark.asyncio
+async def test_mappings_reload_requires_secret(http_context) -> None:
+    settings, application, mirror = http_context
+    response = await request(
+        _build_http_app(settings, application, mirror), "POST", "/internal/mappings/reload"
+    )
+    assert response.status_code == 403
+    mirror.reload_mappings.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mappings_reload_calls_mirror(http_context) -> None:
+    settings, application, mirror = http_context
+    response = await request(
+        _build_http_app(settings, application, mirror),
+        "POST",
+        "/internal/mappings/reload",
+        headers={"X-Internal-Webhook-Secret": settings.mirror_internal_webhook_secret},
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    mirror.reload_mappings.assert_awaited_once()
 
 @pytest.mark.asyncio
 async def test_telegram_webhook_rejects_missing_secret(http_context) -> None:

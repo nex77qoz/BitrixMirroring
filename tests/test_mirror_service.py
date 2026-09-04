@@ -343,13 +343,23 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         await self.service._handle_bitrix_event(make_bitrix_event(dialog_id='chat999'))
         self.service._application.bot.send_message.assert_not_awaited()
 
-    async def test_tg_connect_saves_token_and_replies_in_bitrix(self) -> None:
-        event = make_bitrix_event(text='/tg_connect')
+    async def test_tg_connect_saves_token_and_captures_chat_title(self) -> None:
+        event = make_bitrix_event(text='/tg_connect', chat_name='Рабочий чат')
         await self.service._handle_bitrix_event(event)
         self.state_store.save_pending_connection.assert_awaited_once()
+        args = self.state_store.save_pending_connection.await_args.args
+        self.assertEqual(args[0], 'chat42')          # dialog_id
+        self.assertEqual(args[3], 'Рабочий чат')      # captured Bitrix chat title
         self.bitrix.send_message.assert_awaited_once()
         self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
         self.service._application.bot.send_message.assert_not_awaited()
+
+    async def test_tg_connect_without_chat_name_stores_empty_title(self) -> None:
+        # private chats carry no group name; the flow must still store '' and succeed
+        event = make_bitrix_event(text='/tg_connect')
+        await self.service._handle_bitrix_event(event)
+        args = self.state_store.save_pending_connection.await_args.args
+        self.assertEqual(args[3], '')
 
     async def test_join_chat_greets_personal_dialog_only(self) -> None:
         # personal 1:1 dialog: numeric dialogId, chat.type != "chat"

@@ -103,15 +103,19 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_pending_connections_flow(self):
         token = 'testtoken123'
         expires_at = int(time.time()) + 600
-        await self.store.save_pending_connection('chat123', token, expires_at)
-        is_valid = await self.store.verify_and_consume_token('chat123', token)
-        self.assertTrue(is_valid)
-        is_valid_again = await self.store.verify_and_consume_token('chat123', token)
-        self.assertFalse(is_valid_again)
+        await self.store.save_pending_connection('chat123', token, expires_at, 'Рабочий чат')
+        # A valid token returns the stored Bitrix chat title.
+        self.assertEqual(await self.store.verify_and_consume_token('chat123', token), 'Рабочий чат')
+        # The token is consumed: a second call is invalid (None), not an empty title.
+        self.assertIsNone(await self.store.verify_and_consume_token('chat123', token))
+        # A valid token with no captured title returns '' (not None) — callers
+        # distinguish success from failure by identity, never by truthiness.
+        notitled = 'notitled123'
+        await self.store.save_pending_connection('chat123', notitled, int(time.time()) + 600)
+        self.assertEqual(await self.store.verify_and_consume_token('chat123', notitled), '')
         expired_token = 'expired456'
-        await self.store.save_pending_connection('chat123', expired_token, int(time.time()) - 10)
-        is_expired_valid = await self.store.verify_and_consume_token('chat123', expired_token)
-        self.assertFalse(is_expired_valid)
+        await self.store.save_pending_connection('chat123', expired_token, int(time.time()) - 10, 'x')
+        self.assertIsNone(await self.store.verify_and_consume_token('chat123', expired_token))
 
     async def test_cleanup_preserves_recently_updated_links(self) -> None:
         """Links updated recently must survive cleanup even if created long ago (#5)."""
@@ -139,12 +143,14 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(link, 'Deleted link must be absent')
 
     async def test_concurrent_token_consumption_is_atomic(self) -> None:
-        """Two simultaneous calls must return exactly one True."""
+        """Two simultaneous calls must yield exactly one non-None (title) result."""
         token = 'racetoken'
         expires_at = int(time.time()) + 600
-        await self.store.save_pending_connection('chat42', token, expires_at)
+        await self.store.save_pending_connection('chat42', token, expires_at, 'Race Chat')
         results = await asyncio.gather(self.store.verify_and_consume_token('chat42', token), self.store.verify_and_consume_token('chat42', token))
-        self.assertEqual(sum(results), 1, 'Exactly one concurrent call should consume the token')
+        consumed = [r for r in results if r is not None]
+        self.assertEqual(len(consumed), 1, 'Exactly one concurrent call should consume the token')
+        self.assertEqual(consumed, ['Race Chat'])
 
     async def test_initialize_deduplicates_existing_mappings(self) -> None:
         db_path = os.path.join(self.tempdir.name, 'state_migration.sqlite3')
@@ -165,6 +171,28 @@ class MirrorStateStoreTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(m.label, 'first, second')
         with self.assertRaises(ValueError):
             await store.add_chat_mapping(-100456, 'chat999', [], 'third')
+
+    async def test_initialize_adds_chat_title_to_legacy_pending_table(self) -> None:
+        # A pre-migration deployment has pending_connections without chat_title.
+        # Upgrading must add the column (so new titles store) AND keep existing
+        # unexpired tokens valid (they consume with an empty title, not None).
+        db_path = os.path.join(self.tempdir.name, 'pending_migration.sqlite3')
+        future = int(time.time()) + 600
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute('\n                CREATE TABLE pending_connections (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    bitrix_dialog_id TEXT NOT NULL,\n                    token TEXT NOT NULL UNIQUE,\n                    expires_at_unix INTEGER NOT NULL,\n                    created_at_unix INTEGER NOT NULL\n                )\n                ')
+            conn.execute(
+                'INSERT INTO pending_connections (bitrix_dialog_id, token, expires_at_unix, created_at_unix)'
+                " VALUES ('chat55', 'legacytoken', ?, ?)",
+                (future, int(time.time())),
+            )
+            conn.commit()
+        store = MirrorStateStore(db_path)
+        await store.initialize()
+        # Legacy token still valid; no captured title yet -> '' (not None).
+        self.assertEqual(await store.verify_and_consume_token('chat55', 'legacytoken'), '')
+        # New saves persist and return the title through the migrated column.
+        await store.save_pending_connection('chat66', 'newtoken', future, 'Новый чат')
+        self.assertEqual(await store.verify_and_consume_token('chat66', 'newtoken'), 'Новый чат')
 
     async def test_bitrix_event_offset_is_scoped_by_bot_id(self) -> None:
         self.assertIsNone(await self.store.load_bitrix_event_offset(7))

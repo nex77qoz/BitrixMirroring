@@ -246,7 +246,7 @@ class HandlersTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_cmd_connect_token_success_bypasses_admin(self) -> None:
         from handlers import cmd_connect
         self.mirror.is_admin = AsyncMock(return_value=False)
-        self.mirror.state_store.verify_and_consume_token = AsyncMock(return_value=True)
+        self.mirror.state_store.verify_and_consume_token = AsyncMock(return_value="Рабочий чат")
         msg = SimpleNamespace(
             chat_id=-100123,
             message_thread_id=None,
@@ -262,7 +262,7 @@ class HandlersTestCase(unittest.IsolatedAsyncioTestCase):
         await cmd_connect(update, self.context)
 
         self.mirror.state_store.verify_and_consume_token.assert_awaited_once_with("chat42", "valid_token_123")
-        self.mirror.connect_mapping.assert_awaited_once_with(-100123, "chat42", None, "")
+        self.mirror.connect_mapping.assert_awaited_once_with(-100123, "chat42", None, "Рабочий чат")
         self.mirror.bitrix.send_message.assert_awaited_once_with("Связка установлена", dialog_id="chat42")
         msg.reply_text.assert_awaited_once()
         self.mirror.is_admin.assert_not_called()
@@ -270,7 +270,7 @@ class HandlersTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_cmd_connect_token_invalid_fails(self) -> None:
         from handlers import cmd_connect
         self.mirror.is_admin = AsyncMock(return_value=False)
-        self.mirror.state_store.verify_and_consume_token = AsyncMock(return_value=False)
+        self.mirror.state_store.verify_and_consume_token = AsyncMock(return_value=None)
         msg = SimpleNamespace(
             chat_id=-100123,
             message_thread_id=None,

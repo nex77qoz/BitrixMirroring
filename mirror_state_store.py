@@ -155,7 +155,10 @@ class MirrorStateStore:
             connection.execute('\n                CREATE TABLE IF NOT EXISTS topic_names (\n                    tg_chat_id INTEGER NOT NULL,\n                    topic_id   INTEGER NOT NULL,\n                    name       TEXT NOT NULL,\n                    PRIMARY KEY (tg_chat_id, topic_id)\n                )\n                ')
             connection.execute('\n                CREATE TABLE IF NOT EXISTS runtime_settings (\n                    key        TEXT PRIMARY KEY,\n                    value      TEXT NOT NULL,\n                    updated_at_unix INTEGER NOT NULL\n                )\n                ')
             connection.execute('\n                CREATE TABLE IF NOT EXISTS telegram_admins (\n                    tg_user_id   INTEGER PRIMARY KEY,\n                    added_at_unix INTEGER NOT NULL\n                )\n                ')
-            connection.execute('\n                CREATE TABLE IF NOT EXISTS pending_connections (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    bitrix_dialog_id TEXT NOT NULL,\n                    token TEXT NOT NULL UNIQUE,\n                    expires_at_unix INTEGER NOT NULL,\n                    created_at_unix INTEGER NOT NULL\n                )\n            ')
+            connection.execute('\n                CREATE TABLE IF NOT EXISTS pending_connections (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    bitrix_dialog_id TEXT NOT NULL,\n                    token TEXT NOT NULL UNIQUE,\n                    expires_at_unix INTEGER NOT NULL,\n                    created_at_unix INTEGER NOT NULL,\n                    chat_title TEXT DEFAULT \'\'\n                )\n            ')
+            pending_columns = {row[1] for row in connection.execute('PRAGMA table_info(pending_connections)').fetchall()}
+            if 'chat_title' not in pending_columns:
+                connection.execute("ALTER TABLE pending_connections ADD COLUMN chat_title TEXT DEFAULT ''")
             connection.execute('CREATE INDEX IF NOT EXISTS idx_pending_connections_token ON pending_connections(token)')
             connection.execute('CREATE INDEX IF NOT EXISTS idx_pending_connections_expires ON pending_connections(expires_at_unix)')
             connection.commit()
@@ -264,32 +267,34 @@ class MirrorStateStore:
             row = connection.execute('SELECT 1 FROM telegram_admins WHERE tg_user_id = ?', (tg_user_id,)).fetchone()
         return row is not None
 
-    async def save_pending_connection(self, bitrix_dialog_id: str, token: str, expires_at_unix: int) -> None:
-        await _run_sync(self._save_pending_connection_sync, bitrix_dialog_id, token, expires_at_unix)
+    async def save_pending_connection(self, bitrix_dialog_id: str, token: str, expires_at_unix: int, chat_title: str = "") -> None:
+        await _run_sync(self._save_pending_connection_sync, bitrix_dialog_id, token, expires_at_unix, chat_title)
 
-    def _save_pending_connection_sync(self, bitrix_dialog_id: str, token: str, expires_at_unix: int) -> None:
+    def _save_pending_connection_sync(self, bitrix_dialog_id: str, token: str, expires_at_unix: int, chat_title: str) -> None:
         now = int(time.time())
         with self._connect() as connection:
             connection.execute('DELETE FROM pending_connections WHERE expires_at_unix < ?', (now,))
-            connection.execute('INSERT INTO pending_connections (bitrix_dialog_id, token, expires_at_unix, created_at_unix) VALUES (?, ?, ?, ?)', (bitrix_dialog_id, token, expires_at_unix, now))
+            connection.execute('INSERT INTO pending_connections (bitrix_dialog_id, token, expires_at_unix, created_at_unix, chat_title) VALUES (?, ?, ?, ?, ?)', (bitrix_dialog_id, token, expires_at_unix, now, chat_title))
             connection.commit()
 
-    async def verify_and_consume_token(self, bitrix_dialog_id: str, token: str) -> bool:
+    async def verify_and_consume_token(self, bitrix_dialog_id: str, token: str) -> str | None:
         return await _run_sync(self._verify_and_consume_token_sync, bitrix_dialog_id, token)
 
-    def _verify_and_consume_token_sync(self, bitrix_dialog_id: str, token: str) -> bool:
+    def _verify_and_consume_token_sync(self, bitrix_dialog_id: str, token: str) -> str | None:
         now = int(time.time())
         with self._connect() as connection:
             connection.execute('BEGIN EXCLUSIVE')
-            row = connection.execute('SELECT id, bitrix_dialog_id FROM pending_connections WHERE token = ? AND expires_at_unix >= ?', (token, now)).fetchone()
+            row = connection.execute('SELECT bitrix_dialog_id, chat_title FROM pending_connections WHERE token = ? AND expires_at_unix >= ?', (token, now)).fetchone()
             if row is None:
-                return False
-            db_dialog_id = row[1]
-            if db_dialog_id != bitrix_dialog_id:
-                return False
+                connection.rollback()
+                return None
+            if row[0] != bitrix_dialog_id:
+                connection.rollback()
+                return None
+            chat_title = str(row[1] or "")
             connection.execute('DELETE FROM pending_connections WHERE token = ?', (token,))
             connection.commit()
-            return True
+            return chat_title
 
     async def load_all_chat_mappings(self) -> tuple[ChatMapping, ...]:
         return await _run_sync(self._load_all_chat_mappings_sync)

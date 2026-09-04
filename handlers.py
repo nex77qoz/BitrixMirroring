@@ -346,6 +346,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     mirror: MirrorService = context.application.bot_data["mirror_service"]
     args = context.args or []
+    label = ""
 
     if len(args) == 2:
         # Token-based flow for self-service connection (no admin check required!)
@@ -357,11 +358,15 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
             return
 
-        is_valid = await mirror.state_store.verify_and_consume_token(bitrix_dialog_id, token)
-        if not is_valid:
+        # Returns the stored Bitrix chat title on success, None on an invalid or
+        # expired token. An empty string means "valid token, no title captured",
+        # so the check must be `is None`, not falsiness.
+        chat_title = await mirror.state_store.verify_and_consume_token(bitrix_dialog_id, token)
+        if chat_title is None:
             sent = await msg.reply_text("⚠️ Неверный, использованный или просроченный токен подключения.")
             _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
             return
+        label = chat_title
 
     elif len(args) == 1:
         # Traditional admin-only connection flow
@@ -384,12 +389,11 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     is_forum = getattr(chat, "is_forum", False)
     topic_id = msg.message_thread_id if is_forum else None
     try:
-        await mirror.connect_mapping(chat.id, bitrix_dialog_id, topic_id, "")
+        await mirror.connect_mapping(chat.id, bitrix_dialog_id, topic_id, label)
     except ValueError as exc:
         sent = await msg.reply_text(f"⚠️ {exc}")
         _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
         return
-
     try:
         await mirror.bitrix.send_message("Связка установлена", dialog_id=bitrix_dialog_id)
     except Exception:

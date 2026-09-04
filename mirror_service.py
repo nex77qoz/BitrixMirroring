@@ -323,8 +323,10 @@ class MirrorService:
             import time
             token = secrets.token_hex(4)
             expires_at = int(time.time()) + 600
+            raw_title = chat.get('name')
+            chat_title = str(raw_title).strip() if isinstance(raw_title, str) else ''
             try:
-                await self.state_store.save_pending_connection(dialog_id, token, expires_at)
+                await self.state_store.save_pending_connection(dialog_id, token, expires_at, chat_title)
                 reply = f'🔑 Одноразовый токен сгенерирован.\nОтправьте следующую команду в вашей Telegram-группе в течение 10 минут:\n\n/connect {dialog_id} {token}'
             except Exception:
                 logger.exception('Failed to create pending connection token')

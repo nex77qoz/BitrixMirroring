@@ -116,7 +116,11 @@ def make_bitrix_event(
     message_id: int = 789,
     text: str = "hello",
     author_id: int = 41,
+    chat_name: str | None = None,
 ) -> BitrixBotEvent:
+    chat: dict[str, object] = {"id": 42, "dialogId": dialog_id}
+    if chat_name is not None:
+        chat["name"] = chat_name
     return BitrixBotEvent(
         event_id=event_id,
         event_type=event_type,
@@ -129,7 +133,7 @@ def make_bitrix_event(
                 "text": text,
                 "params": {},
             },
-            "chat": {"id": 42, "dialogId": dialog_id},
+            "chat": chat,
             "user": {"id": author_id, "firstName": "Ivan", "lastName": "Petrov"},
         },
     )

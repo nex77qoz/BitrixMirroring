@@ -163,6 +163,12 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
             raise HTTPException(status_code=400, detail="enabled must be a boolean")
         return {"ok": True, "forwarding_enabled": await mirror.set_forwarding_enabled(enabled)}
 
+    @app.post("/internal/mappings/reload")
+    async def reload_mappings(request: Request) -> dict[str, object]:
+        _verify_internal_secret(request)
+        await mirror.reload_mappings()
+        return {"ok": True}
+
     @app.post(settings.telegram_webhook_path)
     async def telegram_webhook(request: Request) -> dict[str, object]:
         if not settings.telegram_webhook_enabled:

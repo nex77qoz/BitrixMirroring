@@ -19,6 +19,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -737,6 +738,181 @@ def api_delete_mapping(mapping_id: int, _: str = Depends(_check_auth)):
         conn.close()
 
 
+_MAPPING_DIALOG_ID_RE = re.compile(r"^(chat\d+|sg\d+|\d+)$")
+
+
+def _notify_mirror_mappings_reload() -> tuple[bool, str | None]:
+    """Ask the running mirror process to reload mappings from the DB.
+
+    Best-effort: the mappings are already committed to SQLite, so if the mirror
+    is unreachable the caller simply restarts the service instead of losing data.
+    """
+    if not MIRROR_INTERNAL_WEBHOOK_SECRET:
+        return (False, "MIRROR_INTERNAL_WEBHOOK_SECRET не настроен — перезапустите Mirror вручную")
+    url = f"http://{MIRROR_HTTP_HOST}:{MIRROR_HTTP_PORT}/internal/mappings/reload"
+    try:
+        response = httpx.post(
+            url,
+            headers={"X-Internal-Webhook-Secret": MIRROR_INTERNAL_WEBHOOK_SECRET},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return (True, None)
+    except Exception as exc:  # surfaced to the UI, not fatal to the import
+        return (False, str(exc))
+
+
+@app.get("/monitor/api/mappings/export")
+def api_export_mappings(_: str = Depends(_check_auth)) -> Response:
+    conn = _db_connect()
+    try:
+        rows = conn.execute(
+            "SELECT tg_chat_id, bitrix_dialog_id, label, topic_ids "
+            "FROM chat_mappings ORDER BY created_at_unix, id"
+        ).fetchall()
+    finally:
+        conn.close()
+    mappings = []
+    for r in rows:
+        raw = str(r["topic_ids"] or "")
+        topic_ids = [int(t) for t in raw.split(",") if t.strip().lstrip("-").isdigit()]
+        mappings.append({
+            "tg_chat_id": int(r["tg_chat_id"]),
+            "bitrix_dialog_id": str(r["bitrix_dialog_id"]),
+            "label": str(r["label"] or ""),
+            "topic_ids": topic_ids,
+        })
+    payload = {
+        "kind": "bitrix-bot-mappings",
+        "version": "1",
+        "exported_at": int(time.time()),
+        "mappings": mappings,
+    }
+    date_str = datetime.date.today().isoformat()
+    filename = f"bitrix-bot-mappings-{date_str}.json"
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/monitor/api/mappings/import")
+async def api_import_mappings(
+    file: UploadFile = File(...),
+    mode: str = Query("merge"),
+    _: str = Depends(_check_auth),
+) -> dict:
+    if mode not in ("merge", "replace"):
+        raise HTTPException(status_code=400, detail="mode должен быть merge или replace")
+    content = await file.read()
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Невалидный JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Ожидается JSON-объект")
+    if payload.get("kind") != "bitrix-bot-mappings":
+        raise HTTPException(status_code=400, detail="Это не файл связок (нет поля kind)")
+    raw_mappings = payload.get("mappings")
+    if not isinstance(raw_mappings, list):
+        raise HTTPException(status_code=400, detail='Отсутствует или невалидное поле "mappings"')
+
+    conn = _db_connect()
+    added = updated = skipped = 0
+    errors: list[dict] = []
+    try:
+        if mode == "replace":
+            conn.execute("DELETE FROM chat_mappings")
+        for entry in raw_mappings:
+            if not isinstance(entry, dict):
+                skipped += 1
+                errors.append({"entry": str(entry)[:64], "reason": "не объект"})
+                continue
+            dialog_id = str(entry.get("bitrix_dialog_id", "")).strip()
+            if not _MAPPING_DIALOG_ID_RE.match(dialog_id):
+                skipped += 1
+                errors.append({"bitrix_dialog_id": dialog_id[:64], "reason": "неверный формат Dialog ID"})
+                continue
+            raw_tg = entry.get("tg_chat_id")
+            if raw_tg is None:
+                skipped += 1
+                errors.append({"bitrix_dialog_id": dialog_id, "reason": "неверный tg_chat_id"})
+                continue
+            try:
+                tg_chat_id = int(raw_tg)
+            except (TypeError, ValueError):
+                skipped += 1
+                errors.append({"bitrix_dialog_id": dialog_id, "reason": "неверный tg_chat_id"})
+                continue
+            label = str(entry.get("label") or "").strip()
+            raw_topics = entry.get("topic_ids") or []
+            if not isinstance(raw_topics, list):
+                raw_topics = []
+            try:
+                topic_ids = _normalize_topic_ids([int(t) for t in raw_topics])
+            except (TypeError, ValueError):
+                topic_ids = []
+            topic_ids_str = ",".join(str(t) for t in topic_ids)
+
+            existing = conn.execute(
+                "SELECT tg_chat_id FROM chat_mappings WHERE bitrix_dialog_id = ?",
+                (dialog_id,),
+            ).fetchone()
+            if existing is not None:
+                if int(existing["tg_chat_id"]) != tg_chat_id:
+                    skipped += 1
+                    errors.append({
+                        "bitrix_dialog_id": dialog_id,
+                        "reason": f"уже привязан к TG {int(existing['tg_chat_id'])}",
+                    })
+                    continue
+                conn.execute(
+                    "UPDATE chat_mappings SET label = ?, topic_ids = ? WHERE bitrix_dialog_id = ?",
+                    (label, topic_ids_str, dialog_id),
+                )
+                updated += 1
+                continue
+            try:
+                _validate_mapping_conflicts(
+                    conn, tg_chat_id=tg_chat_id, bitrix_dialog_id=dialog_id, topic_ids=topic_ids
+                )
+            except HTTPException as exc:
+                skipped += 1
+                errors.append({"bitrix_dialog_id": dialog_id, "reason": str(exc.detail)})
+                continue
+            conn.execute(
+                "INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) "
+                "VALUES (?,?,?,?,?)",
+                (tg_chat_id, dialog_id, label, int(time.time()), topic_ids_str),
+            )
+            added += 1
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка импорта: {exc}") from exc
+    finally:
+        conn.close()
+
+    reloaded = False
+    reload_error: str | None = None
+    if added or updated:
+        reloaded, reload_error = _notify_mirror_mappings_reload()
+    result: dict = {
+        "ok": True,
+        "mode": mode,
+        "added": added,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "reloaded": reloaded,
+    }
+    if reload_error:
+        result["reload_error"] = reload_error
+    return result
+
+
 @app.get("/monitor/api/admins")
 def api_get_admins(_: str = Depends(_check_auth)):
     conn = _db_connect()
@@ -1179,10 +1355,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       <!-- DB mappings (managed here) -->
       <div class="bg-white rounded-xl shadow overflow-hidden">
-        <div class="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
+        <div class="px-5 py-3 border-b border-gray-100 flex items-center gap-2 flex-wrap">
           <span class="font-medium text-gray-700 text-sm">Из базы данных</span>
           <span class="text-xs text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">можно редактировать</span>
+          <div class="ml-auto flex items-center gap-2">
+            <button onclick="exportMappings()" id="exportMappingsBtn"
+                    class="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
+              ⬇ Экспорт связок
+            </button>
+            <label class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer">
+              ⬆ Импорт связок
+              <input type="file" id="importMappingsFile" accept=".json,application/json" class="hidden" onchange="importMappings(this)">
+            </label>
+          </div>
         </div>
+        <p id="importMappingsMsg" class="hidden px-5 py-2 text-xs"></p>
         <table class="min-w-full text-sm">
           <thead class="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
             <tr>
@@ -1696,6 +1883,73 @@ async function loadMappings() {
     if (!r.ok) return;
     renderDbMappings(await r.json());
   } catch (_) {}
+}
+
+async function exportMappings() {
+  const btn = document.getElementById('exportMappingsBtn');
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = 'Загрузка…';
+  try {
+    const r = await apiFetch('/monitor/api/mappings/export');
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      alert('Ошибка: ' + (e.detail || r.status));
+      return;
+    }
+    const blob = await r.blob();
+    const cd = r.headers.get('content-disposition') || '';
+    const match = cd.match(/filename="?([^"]+)"?/);
+    const filename = (match && match[1]) ? match[1] : 'bitrix-bot-mappings.json';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert('Ошибка: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+}
+
+function showImportMsg(msg, type) {
+  const el = document.getElementById('importMappingsMsg');
+  el.textContent = msg;
+  el.className = 'px-5 py-2 text-xs ' + (type === 'error' ? 'text-red-600' : (type === 'warn' ? 'text-amber-700' : 'text-green-700'));
+}
+
+async function importMappings(input) {
+  if (!input.files || !input.files[0]) return;
+  input.disabled = true;
+  showImportMsg('Импорт связок…', 'warn');
+  try {
+    const formData = new FormData();
+    formData.append('file', input.files[0]);
+    const r = await fetch('/monitor/api/mappings/import?mode=merge', {
+      method: 'POST',
+      headers: { 'Authorization': AUTH_HEADER },
+      body: formData,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showImportMsg('Ошибка: ' + (data.detail || r.status), 'error');
+      return;
+    }
+    let msg = 'Импорт завершён: добавлено ' + data.added + ', обновлено ' + data.updated + ', пропущено ' + data.skipped + '.';
+    msg += data.reloaded ? ' Привязки применены на лету.' : ' Перезапустите сервис Mirror.';
+    if (data.reload_error) msg += ' (' + data.reload_error + ')';
+    const bad = (data.errors && data.errors.length) ? data.errors.length : 0;
+    if (bad) msg += ' Проблемных записей: ' + bad + '.';
+    showImportMsg(msg, bad ? 'warn' : 'ok');
+    loadMappings();
+  } catch (err) {
+    showImportMsg('Ошибка: ' + err.message, 'error');
+  } finally {
+    input.disabled = false;
+    input.value = '';
+  }
 }
 
 function renderDbMappings(mappings) {

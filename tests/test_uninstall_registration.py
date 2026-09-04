@@ -8,13 +8,13 @@ import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 REGISTER_BOT = Path(__file__).parents[1] / "server-side" / "register_bot.py"
 
 
 class _VibeStub(BaseHTTPRequestHandler):
-    scenario: ClassVar[dict[str, object]] = {}
+    scenario: ClassVar[dict[str, Any]] = {}
     requests: ClassVar[list[dict[str, object]]] = []
 
     def _send(self, status: int, payload: dict[str, object]) -> None:
@@ -35,10 +35,9 @@ class _VibeStub(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._record("GET")
-        scenario = self.scenario
-        assert isinstance(scenario, dict)
-        if self.path in scenario.get("get", {}):
-            status, payload = scenario["get"][self.path]  # type: ignore[index]
+        routes = self.scenario.get("get", {})
+        if self.path in routes:
+            status, payload = routes[self.path]
             self._send(status, payload)
             return
         self._send(404, {"success": False, "error": {"code": "BOT_NOT_FOUND", "message": "no"}})
@@ -47,10 +46,8 @@ class _VibeStub(BaseHTTPRequestHandler):
         raw = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
         body = json.loads(raw or b"{}")
         self._record("POST", body)
-        scenario = self.scenario
-        assert isinstance(scenario, dict)
-        status, payload = scenario.get("post", (500, {"success": False, "error": {"code": "?"}}))  # type: ignore[assignment]
-        self._send(status, payload)  # type: ignore[arg-type]
+        status, payload = self.scenario.get("post", (500, {"success": False, "error": {"code": "?"}}))
+        self._send(status, payload)
 
     def log_message(self, *args: object) -> None:
         pass

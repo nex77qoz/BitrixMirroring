@@ -260,7 +260,7 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
             await client.get_file_meta(9)
 
     async def test_download_file_by_id_re_resolves_single_use_url_each_attempt(self) -> None:
-        resolve_fail = (422, {"success": False, "error": {"code": "BITRIX_ERROR", "message": "nope"}}, {})
+        resolve_fail: tuple[int, dict[str, Any], dict[str, str]] = (422, {"success": False, "error": {"code": "BITRIX_ERROR", "message": "nope"}}, {})
         client, requests = make_client([
             resolve_fail,
             resolve_fail,

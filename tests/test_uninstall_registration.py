@@ -82,13 +82,16 @@ class RegisterBotVibeTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
-    def test_registers_new_supervisor_bot_when_id_not_found(self) -> None:
+    def test_registers_new_supervisor_bot_with_default_name(self) -> None:
+        # No name argument -> register_bot falls back to the product default,
+        # which must be "Telegram Mirror V2" (bot code stays tg_mirror_bot_v2;
+        # botId is platform-assigned and passed through unchanged).
         fields, requests = self._run(
             {
                 "get": {"/v1/bots": (200, {"success": True, "data": {"items": []}})},
                 "post": (201, {"success": True, "data": {"botId": 42}}),
             },
-            ["", "Telegram Mirror"],
+            [],
         )
         self.assertEqual(fields["status"], "ok")
         self.assertEqual(fields["action"], "registered")
@@ -99,7 +102,7 @@ class RegisterBotVibeTest(unittest.TestCase):
         self.assertEqual(post["api_key"], "vibe_api_test")
         self.assertEqual(
             post["body"],
-            {"code": "tg_mirror_bot_v2", "name": "Telegram Mirror", "type": "supervisor", "eventMode": "fetch"},
+            {"code": "tg_mirror_bot_v2", "name": "Telegram Mirror V2", "type": "supervisor", "eventMode": "fetch"},
         )
 
     def test_keeps_existing_bot_id_under_this_key(self) -> None:

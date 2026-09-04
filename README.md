@@ -144,7 +144,7 @@ cp env.example .env
 Бот регистрируется один раз через Vibe API (команда `POST /v1/bots` с `type=supervisor`, `eventMode=fetch`) — скриптом `server-side/register_bot.py` или автоматически установщиком:
 
 ```bash
-python3 server-side/register_bot.py "$VIBE_API_KEY" "" "Telegram Mirror"
+python3 server-side/register_bot.py "$VIBE_API_KEY" "" "Telegram Mirror V2"
 ```
 
 Полученный `bot_id` нужно записать в `BITRIX_BOT_ID`, а бота добавить во все зеркалируемые чаты Битрикс24.

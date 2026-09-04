@@ -64,7 +64,7 @@ Installer автоматически:
 Скриптом (формат stdout совместим с installer):
 
 ```bash
-python3 server-side/register_bot.py "$VIBE_API_KEY" "" "Telegram Mirror"
+python3 server-side/register_bot.py "$VIBE_API_KEY" "" "Telegram Mirror V2"
 ```
 
 или напрямую запросом к Vibe API:
@@ -73,7 +73,7 @@ python3 server-side/register_bot.py "$VIBE_API_KEY" "" "Telegram Mirror"
 curl -X POST https://vibecode.bitrix24.tech/v1/bots \
   -H "X-Api-Key: $VIBE_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"code": "tg_mirror_bot_v2", "name": "Telegram Mirror", "type": "supervisor", "eventMode": "fetch"}'
+  -d '{"code": "tg_mirror_bot_v2", "name": "Telegram Mirror V2", "type": "supervisor", "eventMode": "fetch"}'
 ```
 
 Сохраните `data.botId` в `BITRIX_BOT_ID` в `.env`. Повторный вызов с тем же

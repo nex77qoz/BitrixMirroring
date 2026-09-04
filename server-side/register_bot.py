@@ -136,7 +136,7 @@ def main():
     api_key = sys.argv[1].strip()
     base_url = (os.environ.get("VIBE_BASE_URL", "") or DEFAULT_BASE_URL).strip().rstrip("/") or DEFAULT_BASE_URL
     existing_bot_id = sys.argv[2].strip() if len(sys.argv) > 2 and sys.argv[2].strip() else None
-    bot_name = sys.argv[3].strip() if len(sys.argv) > 3 and sys.argv[3].strip() else "Telegram Mirror"
+    bot_name = sys.argv[3].strip() if len(sys.argv) > 3 and sys.argv[3].strip() else "Telegram Mirror V2"
 
     try:
         # Step 1: a bot id was supplied — check it is registered under this key.

@@ -688,7 +688,7 @@ step_collect_config() {
     # Domain
     ask_input DOMAIN "Домен сервера (например: bot.example.com)"
     APP_DOMAIN="$DOMAIN"
-    ask_input BITRIX_BOT_NAME "Название бота в Bitrix24" "Telegram Mirror"
+    ask_input BITRIX_BOT_NAME "Название бота в Bitrix24" "Telegram Mirror V2"
     TELEGRAM_WEBHOOK_PUBLIC_URL="https://${DOMAIN}"
     TELEGRAM_WEBHOOK_PATH="/telegram/webhook"
     print_info "В режиме eventMode=fetch поле handler_url при регистрации не требуется."
@@ -1730,7 +1730,7 @@ print_summary() {
         echo -e "  (заголовок ${BOLD}X-Api-Key: <VIBE_API_KEY>${RESET}, ключ — чтение+запись, скоупы imbot, disk):"
         echo -e "    ${CYAN}{"
         echo -e "      \"code\": \"tg_mirror_bot_v2\","
-        echo -e "      \"name\": \"${BITRIX_BOT_NAME:-Telegram Mirror}\","
+        echo -e "      \"name\": \"${BITRIX_BOT_NAME:-Telegram Mirror V2}\","
         echo -e "      \"type\": \"supervisor\","
         echo -e "      \"eventMode\": \"fetch\""
         echo -e "    }${RESET}"

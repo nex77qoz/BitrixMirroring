@@ -1258,14 +1258,12 @@ WantedBy=multi-user.target
 EOF
 
     # 2 — monitoring dashboard
-    # NOTE: intentionally omits NoNewPrivileges and uses ProtectSystem=full (not
-    # strict). This dashboard escalates via `sudo -n` (journalctl + systemctl
-    # restart, gated by /etc/sudoers.d/${SVC_USER}-services). NoNewPrivileges
-    # blocks ALL setuid (incl. sudo); strict makes /run read-only so sudo cannot
-    # create its timestamp dir. The mirror unit below keeps both — it never calls sudo.
+    # The monitor reads journald through systemd-journal. Its sudoers entry is
+    # retained only for the explicitly allowlisted service restart commands.
     local _hardening_sidecar="
 ProtectSystem=full
 ProtectHome=yes
+SupplementaryGroups=systemd-journal
 ReadWritePaths=${INSTALL_DIR} /tmp
 PrivateTmp=yes
 MemoryMax=256M

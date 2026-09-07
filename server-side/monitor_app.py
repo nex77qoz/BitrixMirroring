@@ -281,8 +281,6 @@ def _get_journal(service: str, lines: int = 50, errors_only: bool = False) -> li
     try:
         fetch_lines = 1000 if errors_only else lines
         cmd = [
-            "sudo",
-            "-n",
             "journalctl",
             "-u",
             service,

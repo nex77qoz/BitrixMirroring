@@ -15,7 +15,14 @@ def test_installer_dispatch(tmp_path, choice, flag):
             patch('tui.os.geteuid', return_value=0):
         tui.run_action(choice, tmp_path)
     script = tui.Path(tui.__file__).resolve().parent / 'install.sh' if choice == '1' else tmp_path / 'install.sh'
-    run.assert_called_once_with(['bash', str(script), *flag], check=True)
+    if choice == '3':
+        assert [call.args[0] for call in run.call_args_list] == [
+            ['git', '-C', str(tmp_path), 'fetch', '--all', '--prune'],
+            ['git', '-C', str(tmp_path), 'pull', '--ff-only'],
+            ['bash', str(script), *flag],
+        ]
+    else:
+        run.assert_called_once_with(['bash', str(script), *flag], check=True)
 
 
 def test_installer_dispatch_uses_sudo_for_non_root(tmp_path):
@@ -25,6 +32,18 @@ def test_installer_dispatch_uses_sudo_for_non_root(tmp_path):
         tui.run_action('1', tmp_path)
     script = tui.Path(tui.__file__).resolve().parent / 'install.sh'
     run.assert_called_once_with(['sudo', 'bash', str(script)], check=True)
+
+
+def test_update_fetches_and_pulls_before_running_installer(tmp_path):
+    (tmp_path / 'install.sh').touch()
+    with patch('builtins.input', return_value='yes'), patch('tui.subprocess.run') as run, \
+            patch('tui.os.geteuid', return_value=1000), patch('tui.shutil.which', return_value='/usr/bin/sudo'):
+        tui.run_action('3', tmp_path)
+    assert [call.args[0] for call in run.call_args_list] == [
+        ['sudo', 'git', '-C', str(tmp_path), 'fetch', '--all', '--prune'],
+        ['sudo', 'git', '-C', str(tmp_path), 'pull', '--ff-only'],
+        ['sudo', 'bash', str(tmp_path / 'install.sh'), '--update'],
+    ]
 
 
 def test_read_views_do_not_execute_config_or_modify_database(tmp_path, capsys):

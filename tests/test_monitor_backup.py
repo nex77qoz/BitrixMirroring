@@ -387,6 +387,8 @@ def test_monitor_unit_hardening_allows_sudo():
     assert "NoNewPrivileges=" not in sidecar
     assert "ProtectSystem=full" in sidecar
     assert "ProtectSystem=strict" not in sidecar
+    assert "SupplementaryGroups=systemd-journal" in unit
+    assert "SupplementaryGroups=systemd-journal" in sidecar
 
 
 def test_dashboard_keeps_app_hidden_until_basic_auth():

@@ -17,6 +17,7 @@ StartLimitBurst=5
 StartLimitIntervalSec=60
 StandardOutput=journal
 StandardError=journal
+NoNewPrivileges=no
 
 # The monitor reads journald through systemd-journal; sudo is only used for
 # the explicitly allowlisted service restart commands.

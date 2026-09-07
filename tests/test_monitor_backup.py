@@ -374,17 +374,16 @@ def test_sudoers_journalctl_rule_matches_app_invocation():
 
 def test_monitor_unit_hardening_allows_sudo():
     unit = (Path(__file__).parents[1] / "server-side" / "bitrix-monitor.service").read_text(encoding="utf-8")
-    # NoNewPrivileges blocks sudo entirely; ProtectSystem=strict makes /run
-    # read-only so sudo cannot write its timestamp dir. Both must be absent as
-    # directives (the explanatory prose may mention them).
-    assert "NoNewPrivileges=" not in unit
+    # sudo cannot elevate when NoNewPrivileges is enabled. ProtectSystem=full
+    # still permits sudo to use its runtime state.
+    assert "NoNewPrivileges=no" in unit
     assert "ProtectSystem=full" in unit
     assert "ProtectSystem=strict" not in unit
     # the installer must generate the same relaxed unit
     installer = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
     sidecar = installer[installer.index("_hardening_sidecar"):]
     sidecar = sidecar[: sidecar.index('cat > /etc/systemd/system/bitrix-monitor')]
-    assert "NoNewPrivileges=" not in sidecar
+    assert "NoNewPrivileges=no" in sidecar
     assert "ProtectSystem=full" in sidecar
     assert "ProtectSystem=strict" not in sidecar
     assert "SupplementaryGroups=systemd-journal" in unit

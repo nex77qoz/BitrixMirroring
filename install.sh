@@ -1284,6 +1284,7 @@ EOF
     # The monitor reads journald through systemd-journal. Its sudoers entry is
     # retained only for the explicitly allowlisted service restart commands.
     local _hardening_sidecar="
+NoNewPrivileges=no
 ProtectSystem=full
 ProtectHome=yes
 SupplementaryGroups=systemd-journal

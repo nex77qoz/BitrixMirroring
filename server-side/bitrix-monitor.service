@@ -26,11 +26,6 @@ ProtectHome=yes
 ReadWritePaths=/opt/bitrix-bot /tmp
 PrivateTmp=yes
 MemoryMax=256M
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictNamespaces=yes
-LockPersonality=yes
 UMask=027
 
 [Install]

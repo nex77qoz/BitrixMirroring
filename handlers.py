@@ -15,7 +15,7 @@ logger = logging.getLogger("tg-bitrix-mirror")
 _bot_reply_ids: dict[int, list[int]] = {}
 
 _ADMIN_CALLBACK_PREFIX = "admin:"
-_SERVICE_NAMES = ("bitrix-bot", "bitrix-monitor", "bitrix-telegram-mirror")
+_SERVICE_NAMES = ("bitrix-monitor", "bitrix-telegram-mirror")
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

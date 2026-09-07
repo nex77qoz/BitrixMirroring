@@ -397,8 +397,13 @@ def test_dashboard_keeps_app_hidden_until_basic_auth():
     assert 'cdn.tailwindcss.com' not in monitor_app.DASHBOARD_HTML
 
 
-def test_mirror_unit_keeps_no_new_privileges():
-    # the mirror process never calls sudo, so its strict hardening stays
+def test_mirror_unit_allows_sudo_restart():
+    # the mirror process calls sudo -n systemctl restart via the admin panel
+    # (handlers._restart_bot_services), so NoNewPrivileges and seccomp-based
+    # options must stay off or setuid sudo is blocked by NO_NEW_PRIVS.
     unit = (Path(__file__).parents[1] / "server-side" / "bitrix-telegram-mirror.service").read_text(encoding="utf-8")
-    assert "NoNewPrivileges=yes" in unit
+    assert "NoNewPrivileges=yes" not in unit
     assert "ProtectSystem=strict" in unit
+    for seccomp_opt in ("ProtectKernelModules=yes", "RestrictNamespaces=yes", "LockPersonality=yes",
+                        "ProtectKernelTunables=yes", "ProtectControlGroups=yes"):
+        assert seccomp_opt not in unit

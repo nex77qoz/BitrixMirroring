@@ -1243,17 +1243,12 @@ step_create_services() {
 
     # 1 — main mirror process
     local _hardening_mirror="
-NoNewPrivileges=yes
+NoNewPrivileges=no
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=${INSTALL_DIR} /tmp
 PrivateTmp=yes
 MemoryMax=512M
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictNamespaces=yes
-LockPersonality=yes
 UMask=027"
     cat > /etc/systemd/system/bitrix-telegram-mirror.service << EOF
 [Unit]
@@ -1291,11 +1286,6 @@ SupplementaryGroups=systemd-journal
 ReadWritePaths=${INSTALL_DIR} /tmp
 PrivateTmp=yes
 MemoryMax=256M
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictNamespaces=yes
-LockPersonality=yes
 UMask=027"
     cat > /etc/systemd/system/bitrix-monitor.service << EOF
 [Unit]

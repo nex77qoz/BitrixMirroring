@@ -17,17 +17,12 @@ StartLimitIntervalSec=60
 StandardOutput=journal
 StandardError=journal
 
-NoNewPrivileges=yes
+NoNewPrivileges=no
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/opt/bitrix-bot /tmp
 PrivateTmp=yes
 MemoryMax=512M
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictNamespaces=yes
-LockPersonality=yes
 UMask=027
 
 [Install]

@@ -893,7 +893,6 @@ VIBE_BASE_URL=$(env_escape "${VIBE_BASE_URL:-$VIBE_BASE_URL_DEFAULT}")
 BITRIX_BOT_NAME=$(env_escape "${BITRIX_BOT_NAME}")
 BITRIX_BOT_ID=$(env_escape "${BITRIX_BOT_ID}")
 
-# Мгновенный Bitrix -> Telegram bridge
 # Форматирование
 PREFIX_WITH_CHAT_TITLE=true
 PREFIX_WITH_SENDER=true

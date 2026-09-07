@@ -1362,13 +1362,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </section>
 
-    <section>
-      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Bitrix Bridge</h2>
-      <div id="bitrixBridgeCard" class="bg-white rounded-xl shadow p-5">
-        <div class="text-sm text-gray-400">Загрузка…</div>
-      </div>
-    </section>
-
     <!-- ── Database Stats ────────────────────────────────────────────────── -->
     <section>
       <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">База данных</h2>
@@ -1570,7 +1563,6 @@ async function loadStatus() {
     const data = await r.json();
     renderForwarding(data.forwarding || {});
     renderServices(data.services || {});
-    renderBitrixBridge(data.bitrix_bridge || {});
     renderTelegramWebhook(data.telegram_webhook || {});
     renderStats(data.db || {});
     const t = new Date(data.ts * 1000).toLocaleTimeString();
@@ -1636,64 +1628,6 @@ async function toggleForwarding(enabled) {
   } finally {
     if (btn) btn.disabled = false;
   }
-}
-
-function renderBitrixBridge(info) {
-  const el = document.getElementById('bitrixBridgeCard');
-  const enabled = !!info.enabled;
-  const reachable = !!info.reachable;
-  const verified = !!info.verified;
-  const badge = !enabled
-    ? 'bg-gray-100 text-gray-600'
-    : verified
-      ? 'bg-green-100 text-green-800'
-      : reachable
-        ? 'bg-amber-100 text-amber-800'
-        : 'bg-red-100 text-red-800';
-  const badgeLabel = !enabled
-    ? 'Disabled'
-    : verified
-      ? 'Bridge OK'
-      : reachable
-        ? 'Config mismatch'
-        : 'Unreachable';
-  const error = info.error || '—';
-  const healthUrl = info.health_url || '—';
-  const eventUrl = info.expected_event_url || '—';
-  const mainEnabled = info.mirror_bridge_enabled ? 'true' : 'false';
-  const reachableText = reachable ? 'yes' : 'no';
-
-  el.innerHTML = `
-    <div class="flex items-start justify-between gap-4 mb-4">
-      <div>
-        <p class="text-xs text-gray-500 uppercase tracking-wide font-medium">Mode</p>
-        <p class="font-semibold text-gray-800 mt-0.5">${enabled ? 'bridge' : 'disabled'}</p>
-      </div>
-      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${badge}">${escHtml(badgeLabel)}</span>
-    </div>
-    <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm text-gray-600">
-      <div>
-        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Main health URL</dt>
-        <dd class="font-mono break-all text-xs">${escHtml(healthUrl)}</dd>
-      </div>
-      <div>
-        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Forward target</dt>
-        <dd class="font-mono break-all text-xs">${escHtml(eventUrl)}</dd>
-      </div>
-      <div>
-        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Reachable</dt>
-        <dd>${escHtml(reachableText)}</dd>
-      </div>
-      <div>
-        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Bridge enabled in main</dt>
-        <dd>${escHtml(mainEnabled)}</dd>
-      </div>
-      <div class="md:col-span-2">
-        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Last error</dt>
-        <dd class="break-all text-xs">${escHtml(error)}</dd>
-      </div>
-    </dl>
-  `;
 }
 
 function renderTelegramWebhook(info) {

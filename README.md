@@ -254,8 +254,7 @@ export MONITOR_PASSWORD='change-me'
 
 Monitoring dashboard также показывает:
 
-- отдельную карточку Telegram webhook: expected URL, actual URL, pending updates и последнюю ошибку Telegram API;
-- отдельную карточку Bitrix bridge: статус обратной совместимости локального обработчика.
+- отдельную карточку Telegram webhook: expected URL, actual URL, pending updates и последнюю ошибку Telegram API.
 
 ### Производительность
 

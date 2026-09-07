@@ -58,6 +58,7 @@ class MirrorService:
         self._cursor_locks: dict[str, asyncio.Lock] = {}
         self._channel_queues: dict[int, asyncio.Queue[Message]] = {}
         self._channel_workers: dict[int, asyncio.Task] = {}
+        self._channel_worker_busy: set[int] = set()
         self._tg_to_mappings: dict[int, list[ChatMapping]] = {}
         for mapping in settings.chat_mappings:
             self._tg_to_mappings.setdefault(mapping.tg_chat_id, []).append(mapping)
@@ -261,15 +262,19 @@ class MirrorService:
             except asyncio.CancelledError:
                 pass
         self._bitrix_on_demand_tasks.clear()
-        for worker in self._channel_workers.values():
-            worker.cancel()
-        for worker in self._channel_workers.values():
+        workers = list(self._channel_workers.items())
+        for chat_id, worker in workers:
+            queue = self._channel_queues.get(chat_id)
+            if not worker.done() and chat_id not in self._channel_worker_busy and (queue is None or queue.empty()):
+                worker.cancel()
+        for _, worker in workers:
             try:
                 await worker
             except asyncio.CancelledError:
                 pass
         self._channel_workers.clear()
         self._channel_queues.clear()
+        self._channel_worker_busy.clear()
         self._application = None
 
     async def enqueue_telegram_message(self, message: Message) -> None:
@@ -450,7 +455,7 @@ class MirrorService:
         if self._application is None:
             return
         if link.bitrix_liked_by_bot and self.settings.bitrix_bot_id == user_id:
-            await self.state_store.update_reaction_state(bitrix_message_id=message_id, bitrix_liked_by_bot=False, last_seen_bitrix_likes=link.last_seen_bitrix_likes)
+            logger.debug('Ignoring own Bitrix like echo for message %s', message_id)
             return
         likes_set = set()
         if link.last_seen_bitrix_likes:
@@ -599,7 +604,7 @@ class MirrorService:
         min_interval = 0.2
         last_send_time = 0.0
         retry_message: Message | None = None
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() or retry_message is not None or not queue.empty():
             try:
                 if retry_message is None:
                     message = await queue.get()
@@ -608,6 +613,7 @@ class MirrorService:
                     retry_message = None
             except asyncio.CancelledError:
                 break
+            self._channel_worker_busy.add(chat_id)
             mapping = None
             try:
                 if not self._forwarding_enabled:
@@ -621,6 +627,12 @@ class MirrorService:
                 last_send_time = now
                 mapping = self.resolve_mapping_for_telegram_message(message)
                 if mapping is None:
+                    continue
+                if await self.state_store.get_link_by_telegram_message(
+                    telegram_chat_id=message.chat_id,
+                    telegram_message_id=message.message_id,
+                ) is not None:
+                    logger.info('Skipping duplicate Telegram message %s in chat %s', message.message_id, chat_id)
                     continue
                 dialog_id = mapping.bitrix_dialog_id
                 reply_bitrix_id: int | None = None
@@ -648,6 +660,7 @@ class MirrorService:
                 await asyncio.sleep(min(self.settings.bitrix_retry_base_delay_seconds * 2 ** min(dead_count - 1, 10), self.settings.bitrix_retry_max_delay_seconds))
                 retry_message = message
             finally:
+                self._channel_worker_busy.discard(chat_id)
                 if retry_message is None:
                     queue.task_done()
     async def _should_forward_bitrix_message(self, dialog_id: str, bitrix_message: BitrixMessage) -> bool:
@@ -707,8 +720,16 @@ class MirrorService:
             fallback_name = f'audio_{message.message_id}.ogg'
         else:
             raise ValueError('No uploadable file attachment found in message')
-        telegram_file = await file_source.get_file()
-        file_bytes = await telegram_file.download_as_bytearray()
+        try:
+            telegram_file = await file_source.get_file()
+            file_bytes = await telegram_file.download_as_bytearray()
+        except BadRequest as exc:
+            logger.warning('Telegram file cannot be downloaded for message %s: %s', message.message_id, exc)
+            return await self.bitrix.send_message(
+                self.render_telegram_message(message) + '\n\n[Файл недоступен для пересылки]',
+                dialog_id=dialog_id,
+                reply_id=reply_id,
+            )
         cap = min(self.settings.max_file_size_bytes, self.settings.bitrix_max_upload_file_bytes)
         if len(file_bytes) > cap:
             logger.warning('Telegram file too large (%s bytes > %s max), skipping upload for message %s', len(file_bytes), cap, message.message_id)
@@ -744,7 +765,7 @@ class MirrorService:
             assert first is not None
             return first
         attachment = self._select_bitrix_file(snapshot, bitrix_message)
-        if attachment is None or not attachment.url_download:
+        if attachment is None:
             return await send_text_parts(rendered)
         try:
             file_bytes = await self.bitrix.download_file_by_id(attachment.file_id, fallback_url=attachment.url_download)

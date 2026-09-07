@@ -67,6 +67,22 @@ notify_telegram_admins_about_bitrix_bot
         self.assertNotIn("Токен", sent)
         self.assertNotIn("BOT_TOKEN", extract_function("notify_telegram_admins_about_bitrix_bot").replace("TELEGRAM_BOT_TOKEN", ""))
 
+    def test_env_loader_does_not_execute_command_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker = Path(tmpdir) / "executed"
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text(f'VIBE_API_KEY="$(touch {marker})"\n', encoding="utf-8")
+            script = "\n".join((
+                "set -euo pipefail",
+                self.prologue,
+                f"load_env_file {env_file}",
+                'printf "%s" "$VIBE_API_KEY"',
+            ))
+            result = run_bash(script)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, f"$(touch {marker})")
+            self.assertFalse(marker.exists())
+
 
 class UnregisterBitrixBotTest(unittest.TestCase):
     def setUp(self) -> None:

@@ -52,6 +52,10 @@ DB_PATH = (
 )
 
 _ENV_FILE_PATH = Path(__file__).resolve().parent.parent / ".env"
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MAX_BACKUP_BYTES = 10 * 1024 * 1024
+_MAX_BACKUP_ENV_KEYS = 128
+_MAX_BACKUP_ROWS = 100_000
 
 MONITOR_USERNAME = os.getenv("MONITOR_USERNAME", "admin")
 MONITOR_PASSWORD = os.getenv("MONITOR_PASSWORD", "")
@@ -466,10 +470,13 @@ def _write_env_file(env: dict[str, str]) -> None:
     ]
     # Write all keys from the backup, preserving existing values for redacted secrets
     for key, val in env.items():
-        # Skip keys that are not valid identifiers or contain newlines
-        if not key or "\n" in key or "\r" in key:
-            continue
+        if not isinstance(key, str) or not _ENV_KEY_RE.fullmatch(key):
+            raise ValueError(f"Недопустимое имя переменной окружения: {key!r}")
+        if len(env) > _MAX_BACKUP_ENV_KEYS:
+            raise ValueError("Слишком много переменных окружения в бэкапе")
         str_val = str(val)
+        if len(str_val) > _MAX_BACKUP_BYTES or "\x00" in str_val:
+            raise ValueError(f"Недопустимое значение переменной {key}")
         if str_val == "***REDACTED***":
             # Preserve the existing value from current .env
             if key in existing_env:
@@ -1003,7 +1010,17 @@ async def api_import_backup(
     file: UploadFile = File(...),
     _: str = Depends(_check_auth),
 ) -> dict:
-    content = await file.read()
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(min(1024 * 1024, _MAX_BACKUP_BYTES + 1 - total))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _MAX_BACKUP_BYTES:
+            raise HTTPException(status_code=413, detail="Файл бэкапа слишком большой")
+        chunks.append(chunk)
+    content = b"".join(chunks)
     try:
         payload = json.loads(content)
     except json.JSONDecodeError as exc:
@@ -1019,6 +1036,18 @@ async def api_import_backup(
         raise HTTPException(status_code=400, detail='Отсутствует или невалидное поле "env"')
     if not isinstance(payload.get("db"), dict):
         raise HTTPException(status_code=400, detail='Отсутствует или невалидное поле "db"')
+    if len(payload["env"]) > _MAX_BACKUP_ENV_KEYS:
+        raise HTTPException(status_code=400, detail="Слишком много переменных окружения")
+    for key, value in payload["env"].items():
+        if not isinstance(key, str) or not _ENV_KEY_RE.fullmatch(key):
+            raise HTTPException(status_code=400, detail=f"Недопустимое имя переменной окружения: {key!r}")
+        if not isinstance(value, str) or len(value) > _MAX_BACKUP_BYTES or "\x00" in value:
+            raise HTTPException(status_code=400, detail=f"Недопустимое значение переменной {key}")
+    for table, rows in payload["db"].items():
+        if table not in _BACKUP_TABLES or not isinstance(rows, list) or len(rows) > _MAX_BACKUP_ROWS:
+            raise HTTPException(status_code=400, detail=f"Невалидные данные таблицы {table}")
+        if any(not isinstance(row, dict) for row in rows):
+            raise HTTPException(status_code=400, detail=f"Невалидная строка таблицы {table}")
 
     try:
         counts = _restore_db_from_backup(payload["db"])
@@ -1084,8 +1113,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Монитор Bitrix Bot</title>
-  <script src="https://cdn.tailwindcss.com"></script>
   <style>
+    /* Self-hosted baseline: the monitor must work without executable CDN assets. */
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f3f4f6; color: #111827; font-family: system-ui, sans-serif; }
+    button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
     [x-cloak] { display: none !important; }
     .log-pre { white-space: pre-wrap; word-break: break-all; }
     details > summary { list-style: none; }

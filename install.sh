@@ -180,9 +180,40 @@ ask_secret() {
 
 env_escape() {
     local value="$1"
-    value=${value//\\/\\\\}
-    value=${value//\"/\\\"}
-    printf '"%s"' "$value"
+    # Single-quoted shell values cannot execute substitutions; represent an
+    # embedded apostrophe with the standard shell quote boundary sequence.
+    value=${value//\'/\'"'"\'}
+    printf "'%s'" "$value"
+}
+
+load_env_file() {
+    local file="$1" key value
+    [[ -f "$file" ]] || return 1
+    while IFS=$'\t' read -r key value; do
+        [[ -n "$key" ]] || continue
+        export "$key=$value"
+    done < <(python3 - "$file" <<'PY'
+import shlex, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    for raw in stream:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if not key or not (key[0].isalpha() or key[0] == "_") or not all(c.isalnum() or c == "_" for c in key):
+            continue
+        try:
+            parsed = shlex.split(value, comments=True, posix=True)
+        except ValueError:
+            continue
+        print(key + "\t" + (parsed[0] if parsed else ""))
+PY
+    )
 }
 
 load_installer_env() {
@@ -191,10 +222,10 @@ load_installer_env() {
         exit 1
     fi
 
-    set -a
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    set +a
+    load_env_file "$ENV_FILE" || {
+        print_error "Не удалось разобрать файл конфигурации: $ENV_FILE"
+        exit 1
+    }
 
     DOMAIN="${APP_DOMAIN:-${DOMAIN:-}}"
     if [[ -z "$DOMAIN" && -f "$NGINX_CONF" ]]; then
@@ -218,30 +249,33 @@ run_cmd() {
 }
 
 unregister_bitrix_bot() {
-    [[ -f "$ENV_FILE" ]] || { print_warn "Конфигурация Bitrix не найдена — бот не удалён из Bitrix24"; return 0; }
+    [[ -f "$ENV_FILE" ]] || { print_warn "Конфигурация Bitrix не найдена — бот не удалён из Bitrix24"; return "${1:-0}"; }
 
     local vibe_api_key vibe_base bot_id response
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
+    load_env_file "$ENV_FILE" || {
+        print_warn "Не удалось разобрать конфигурацию Bitrix"
+        return "${1:-0}"
+    }
     vibe_api_key="${VIBE_API_KEY:-}"
     bot_id="${BITRIX_BOT_ID:-}"
     vibe_base="${VIBE_BASE_URL:-$VIBE_BASE_URL_DEFAULT}"
 
     if [[ -z "$vibe_api_key" || -z "$bot_id" ]]; then
         print_warn "VIBE_API_KEY или BITRIX_BOT_ID не заданы — бот не удалён из Bitrix24"
-        return 0
+        return "${1:-0}"
     fi
 
-    response=$(curl --silent --show-error --location --request DELETE \
+    response=$(curl --silent --show-error --max-time 30 --fail-with-body --request DELETE \
         --header "X-Api-Key: ${vibe_api_key}" \
         --header 'Accept: application/json' \
         "${vibe_base%/}/bots/${bot_id}" 2>&1) || {
         print_warn "Не удалось удалить бота из Bitrix24: $response"
-        return 0
+        return "${1:-0}"
     }
 
     if ! python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("success") is True else 1)' <<< "$response" 2>/dev/null; then
         print_warn "Bitrix24 не удалил бота: $response"
+        return "${1:-0}"
     else
         print_ok "Бот удалён из Bitrix24 (DELETE /v1/bots/${bot_id})"
     fi
@@ -597,9 +631,8 @@ PYEOF
         return 0
     fi
 
-    # Source exported env vars
-    # shellcheck disable=SC1090
-    source "$tmp_env_sh"
+    # Parse exported env vars without executing backup contents.
+    load_env_file "$tmp_env_sh"
     rm -f "$tmp_env_sh"
     for _secret_var in TELEGRAM_BOT_TOKEN VIBE_API_KEY MONITOR_PASSWORD TELEGRAM_WEBHOOK_SECRET; do
         if [[ "${!_secret_var:-}" == "***REDACTED***" ]]; then
@@ -1874,7 +1907,10 @@ do_uninstall() {
     fi
 
     print_step "Удаление бота"
-    unregister_bitrix_bot
+    if [[ -f "$ENV_FILE" ]] && ! unregister_bitrix_bot 1; then
+        print_error "Удаление остановлено: регистрация бота в Bitrix24 не подтверждена"
+        return 1
+    fi
 
     for svc in "${SERVICES[@]}"; do
         systemctl stop "$svc" 2>/dev/null || true
@@ -1898,6 +1934,9 @@ do_uninstall() {
     # Remove logrotate config
     rm -f /etc/logrotate.d/bitrix-bot
     print_ok "Logrotate: конфиг бота удалён"
+
+    rm -f "/etc/sudoers.d/${SVC_USER}-services"
+    print_ok "Sudoers-правило удалено"
 
     # Remove file cache
     rm -rf "$FILE_CACHE_DIR"
@@ -1975,6 +2014,10 @@ main() {
                 action="uninstall"
                 shift
                 ;;
+            --unregister-bot)
+                action="unregister-bot"
+                shift
+                ;;
             -c|--config|--config-file)
                 if [[ -n "${2-}" ]]; then
                     CONFIG_FILE_PATH="$2"
@@ -1985,13 +2028,24 @@ main() {
                 fi
                 ;;
             *)
-                echo "Использование: $0 [--update | --uninstall | -c <путь_к_конфигу>]"
+                echo "Использование: $0 [--update | --uninstall | --unregister-bot | -c <путь_к_конфигу>]"
                 exit 1
                 ;;
         esac
     done
 
     case "$action" in
+        unregister-bot)
+            check_root
+            echo "Удаление регистрации отключит обмен с Bitrix24. Локальные данные сохранятся."
+            echo -n "Для подтверждения введите yes: "
+            read -r confirm
+            if [[ "$confirm" == "yes" ]]; then
+                unregister_bitrix_bot 1
+            else
+                echo "Отменено."
+            fi
+            ;;
         update)
             do_update
             ;;

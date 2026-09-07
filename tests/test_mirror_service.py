@@ -21,6 +21,7 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.bitrix = AsyncMock()
         self.state_store = AsyncMock()
         self.state_store.get_link_by_bitrix_message.return_value = None
+        self.state_store.get_link_by_telegram_message.return_value = None
         self.service = MirrorService(settings, self.bitrix, self.state_store)
 
     async def test_resolve_mapping_prefers_matching_topic(self) -> None:
@@ -470,11 +471,11 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.service._application.bot.send_photo.assert_awaited_once()
 
     async def test_message_add_without_files_falls_back_to_placeholder(self) -> None:
-        # get_file_meta returns None -> anonymous placeholder with no download
-        # URL -> the file is NOT fetched, message forwards as plain text.
+        # get_file_meta returns None -> download is still resolved by file ID.
         self.service._application = SimpleNamespace(bot=SimpleNamespace(
             send_message=AsyncMock(return_value=make_message()),
             send_photo=AsyncMock(),
+            send_document=AsyncMock(return_value=make_message()),
         ))
         self.bitrix.download_file_by_id = AsyncMock(return_value=b'fake-image-bytes')
         self.bitrix.get_file_meta = AsyncMock(return_value=None)
@@ -484,9 +485,8 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         await self.service._handle_bitrix_event(event)
 
         self.bitrix.get_file_meta.assert_awaited_once_with(9)
-        self.bitrix.download_file_by_id.assert_not_awaited()
-        self.service._application.bot.send_photo.assert_not_awaited()
-        self.service._application.bot.send_message.assert_awaited_once()
+        self.bitrix.download_file_by_id.assert_awaited_once_with(9, fallback_url=None)
+        self.service._application.bot.send_document.assert_awaited_once()
 
     async def test_fetch_cycle_advances_after_each_successful_event(self) -> None:
         self.state_store.load_bitrix_event_offset.return_value = 100

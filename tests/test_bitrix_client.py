@@ -37,6 +37,21 @@ def ok(data: dict[str, Any]) -> tuple[int, dict[str, Any], dict[str, str]]:
 
 
 class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_file_download_never_sends_vibe_api_key_to_download_host(self) -> None:
+        client, _ = make_client([ok({})])
+        self.addAsyncCleanup(client.close)
+        await client._download_client.aclose()
+        seen: list[httpx.Request] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, content=b"file")
+
+        client._download_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        self.assertEqual(await client.download_file("https://files.example.test/object"), b"file")
+        self.assertIsNone(seen[0].headers.get("X-Api-Key"))
+
     async def test_send_message_posts_vibe_envelope_and_returns_id(self) -> None:
         client, requests = make_client([ok({"id": 321, "uuidMap": []})])
         self.addAsyncCleanup(client.close)

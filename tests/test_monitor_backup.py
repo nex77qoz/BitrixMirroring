@@ -121,8 +121,8 @@ class MonitorBackupClient:
         file_obj.seek(0)
 
         class Upload:
-            async def read(self):
-                return file_obj.read()
+            async def read(self, size: int = -1):
+                return file_obj.read(size)
 
         try:
             payload = await monitor_app.api_import_backup(Upload(), "admin")
@@ -238,6 +238,13 @@ async def test_import_missing_db_field(client):
     bad = {"version": "1", "env": {}}
     r = await _upload(client, bad)
     assert r.status_code == 400
+
+
+async def test_import_rejects_invalid_env_key(client):
+    bad = {**_MINIMAL_BACKUP, "env": {"BAD-KEY": "value"}}
+    r = await _upload(client, bad)
+    assert r.status_code == 400
+    assert "имя переменной" in r.json()["detail"]
 
 
 async def test_import_restores_tables(client, fresh_db):

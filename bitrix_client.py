@@ -30,12 +30,18 @@ class BitrixClient:
             proxy=settings.socks5_proxy_url,
             headers={'X-Api-Key': settings.vibe_api_key, 'Accept': 'application/json'},
         )
+        self._download_client = httpx.AsyncClient(
+            timeout=settings.request_timeout_seconds,
+            proxy=settings.socks5_proxy_url,
+            headers={'Accept': 'application/octet-stream'},
+        )
         self._request_semaphore = asyncio.Semaphore(settings.bitrix_max_concurrent_requests)
         self._rate_last_request: float = 0.0
         self._rate_min_interval: float = 1.0 / max(settings.bitrix_max_concurrent_requests, 1)
 
     async def close(self) -> None:
         await self._client.aclose()
+        await self._download_client.aclose()
 
     async def send_message(self, text: str, *, dialog_id: str, reply_id: int | None=None) -> int:
         fields: dict[str, Any] = {'message': text, 'system': False, 'urlPreview': not self.settings.disable_link_preview}
@@ -107,7 +113,7 @@ class BitrixClient:
         for attempt in range(1, self.settings.bitrix_retry_attempts + 1):
             try:
                 async with self._request_semaphore:
-                    response = await self._client.get(url)
+                    response = await self._download_client.get(url)
                 response.raise_for_status()
                 return response.content
             except httpx.HTTPStatusError as exc:

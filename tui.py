@@ -2,7 +2,9 @@
 """Terminal menu for the standard /opt/bitrix-bot installation."""
 
 import argparse
+import os
 import shlex
+import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -59,7 +61,12 @@ def run_action(choice: str, directory: Path) -> None:
                 print('Отменено.')
                 return
         flag = {'1': [], '2': ['--uninstall'], '3': ['--update'], '7': ['--unregister-bot']}[choice]
-        subprocess.run(['bash', str(script), *flag], check=True)
+        command = ['bash', str(script), *flag]
+        if os.geteuid() != 0:
+            if shutil.which('sudo') is None:
+                raise OSError('Для этого действия нужен root или установленный sudo.')
+            command.insert(0, 'sudo')
+        subprocess.run(command, check=True)
     elif choice == '4':
         result = subprocess.run(['systemctl', '--no-pager', '--full', 'status', *SERVICES], check=False)
         if result.returncode:

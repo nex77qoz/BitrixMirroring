@@ -187,6 +187,14 @@ class InstallRegistrationWiringTest(unittest.TestCase):
         self.assertNotIn("BITRIX_WEBHOOK_BASE", source)
         self.assertNotIn("BITRIX_BOT_CLIENT_ID", source)
 
+    def test_uninstall_can_keep_bot_for_reuse_on_next_install(self) -> None:
+        source = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
+        uninstall = source[source.index("do_uninstall() {"):]
+        self.assertIn("Удалить созданного бота в Bitrix24?", uninstall)
+        self.assertIn("Бот Bitrix24 сохранён", uninstall)
+        self.assertIn("используйте тот же VIBE_API_KEY", uninstall)
+        self.assertNotIn('source "$ENV_FILE"', source)
+
     def test_manual_registration_hint_uses_vibe_payload(self) -> None:
         source = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
         summary = source[source.index("print_summary()") :]

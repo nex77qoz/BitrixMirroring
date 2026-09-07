@@ -689,10 +689,10 @@ step_collect_config() {
         read -r reuse_env
         if [[ -z "$reuse_env" || "${reuse_env,,}" == "y" || "${reuse_env,,}" == "да" ]]; then
             print_info "Загрузка параметров из $ENV_FILE..."
-            set -a
-            # shellcheck disable=SC1090
-            source "$ENV_FILE"
-            set +a
+            load_env_file "$ENV_FILE" || {
+                print_error "Не удалось разобрать файл конфигурации: $ENV_FILE"
+                exit 1
+            }
             DOMAIN="${APP_DOMAIN:-${DOMAIN:-}}"
             print_ok "Параметры успешно загружены."
         else
@@ -1907,9 +1907,16 @@ do_uninstall() {
     fi
 
     print_step "Удаление бота"
-    if [[ -f "$ENV_FILE" ]] && ! unregister_bitrix_bot 1; then
-        print_error "Удаление остановлено: регистрация бота в Bitrix24 не подтверждена"
-        return 1
+    local remove_bitrix_bot="y"
+    echo -en "${YELLOW}Удалить созданного бота в Bitrix24? (Y/n): ${RESET}"
+    read -r remove_bitrix_bot
+    if [[ -z "$remove_bitrix_bot" || "${remove_bitrix_bot,,}" == "y" || "${remove_bitrix_bot,,}" == "да" ]]; then
+        if [[ -f "$ENV_FILE" ]] && ! unregister_bitrix_bot 1; then
+            print_error "Удаление остановлено: регистрация бота в Bitrix24 не подтверждена"
+            return 1
+        fi
+    else
+        print_info "Бот Bitrix24 сохранён. При следующей установке используйте тот же VIBE_API_KEY — существующий бот будет подхвачен автоматически."
     fi
 
     for svc in "${SERVICES[@]}"; do

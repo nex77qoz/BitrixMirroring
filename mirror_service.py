@@ -153,6 +153,17 @@ class MirrorService:
     async def is_admin(self, tg_user_id: int) -> bool:
         return await self.state_store.is_admin(tg_user_id)
 
+    async def get_statistics(self) -> dict[str, int | bool]:
+        stats = await self.state_store.get_statistics()
+        stats.update({
+            "forwarding_enabled": self._forwarding_enabled,
+            "active_workers": len(self._channel_workers),
+            "queued_messages": sum(queue.qsize() for queue in self._channel_queues.values()),
+            "poll_errors": self._poll_error_count,
+            "telegram_dead_letters": sum(self._tg_forward_dead_letters.values()),
+        })
+        return stats
+
     async def reload_mappings(self) -> None:
         mappings = await self.state_store.load_all_chat_mappings()
         self.settings = dataclasses.replace(self.settings, chat_mappings=mappings)

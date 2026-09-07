@@ -70,6 +70,10 @@ async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
+    if action == "stats":
+        await query.edit_message_text(_render_statistics(await mirror.get_statistics()), reply_markup=_admin_panel_markup(mirror))
+        return
+
     if action == "forwarding:off":
         await mirror.set_forwarding_enabled(False)
         await query.edit_message_text(
@@ -106,6 +110,7 @@ def _admin_panel_markup(mirror: MirrorService) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("Проверить маппинги", callback_data="admin:mappings")],
+            [InlineKeyboardButton("Статистика", callback_data="admin:stats")],
             [InlineKeyboardButton(forwarding_text, callback_data=forwarding_action)],
             [InlineKeyboardButton("Перезагрузить службы", callback_data="admin:restart")],
         ]
@@ -125,6 +130,18 @@ def _render_mappings(mirror: MirrorService) -> str:
             f"#{mapping.mapping_id}{label}: TG {mapping.tg_chat_id} topics {topics} -> Bitrix {mapping.bitrix_dialog_id}"
         )
     return "\n".join(lines)
+
+
+def _render_statistics(stats: dict[str, object]) -> str:
+    return (
+        "Статистика зеркалирования:\n"
+        f"Маппингов: {stats.get('mappings', 0)}\n"
+        f"Связей сообщений: {stats.get('message_links', 0)}\n"
+        f"Активных обработчиков: {stats.get('active_workers', 0)}\n"
+        f"В очереди: {stats.get('queued_messages', 0)}\n"
+        f"Ошибок опроса Bitrix: {stats.get('poll_errors', 0)}\n"
+        f"Ошибок Telegram→Bitrix: {stats.get('telegram_dead_letters', 0)}"
+    )
 
 
 def _schedule_service_restart(context: ContextTypes.DEFAULT_TYPE) -> None:

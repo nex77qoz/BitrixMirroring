@@ -262,6 +262,16 @@ class MirrorStateStore:
     async def is_admin(self, tg_user_id: int) -> bool:
         return await _run_sync(self._is_admin_sync, tg_user_id)
 
+    async def get_statistics(self) -> dict[str, int]:
+        return await _run_sync(self._get_statistics_sync)
+
+    def _get_statistics_sync(self) -> dict[str, int]:
+        with self._connect() as connection:
+            links = connection.execute("SELECT COUNT(*) FROM message_links").fetchone()[0]
+            mappings = connection.execute("SELECT COUNT(*) FROM chat_mappings").fetchone()[0]
+            admins = connection.execute("SELECT COUNT(*) FROM telegram_admins").fetchone()[0]
+        return {"message_links": int(links), "mappings": int(mappings), "admins": int(admins)}
+
     def _is_admin_sync(self, tg_user_id: int) -> bool:
         with self._connect() as connection:
             row = connection.execute('SELECT 1 FROM telegram_admins WHERE tg_user_id = ?', (tg_user_id,)).fetchone()

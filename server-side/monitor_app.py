@@ -719,6 +719,9 @@ def api_add_mapping(body: MappingCreate, _: str = Depends(_check_auth)):
             ),
         )
         conn.commit()
+        _notify_telegram_admins_about_mapping(
+            body.tg_chat_id, body.bitrix_dialog_id.strip(), topic_ids, body.label.strip()
+        )
         return {"ok": True}
     except HTTPException:
         raise
@@ -744,6 +747,33 @@ def api_delete_mapping(mapping_id: int, _: str = Depends(_check_auth)):
 
 
 _MAPPING_DIALOG_ID_RE = re.compile(r"^(chat\d+|sg\d+|\d+)$")
+
+
+def _notify_telegram_admins_about_mapping(
+    tg_chat_id: int, bitrix_dialog_id: str, topic_ids: list[int], label: str
+) -> None:
+    """Best-effort notification for mappings created outside Telegram."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    conn = _db_connect()
+    try:
+        admin_ids = [int(row[0]) for row in conn.execute(
+            "SELECT tg_user_id FROM telegram_admins"
+        ).fetchall()]
+    finally:
+        conn.close()
+    topics = ", ".join(str(value) for value in topic_ids) or "все"
+    suffix = f" ({label})" if label else ""
+    message = f"✅ Добавлен маппинг{suffix}: TG {tg_chat_id}, topics {topics} → Bitrix {bitrix_dialog_id}"
+    for admin_id in admin_ids:
+        try:
+            httpx.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": admin_id, "text": message},
+                timeout=10,
+            ).raise_for_status()
+        except Exception:
+            logger.warning("Failed to notify Telegram admin %s about mapping", admin_id, exc_info=True)
 
 
 def _notify_mirror_mappings_reload() -> tuple[bool, str | None]:

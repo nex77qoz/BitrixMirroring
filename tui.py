@@ -73,6 +73,10 @@ def _privileged_command(command: list[str]) -> list[str]:
     return ['sudo', *command]
 
 
+def _git_command(directory: Path, *args: str) -> list[str]:
+    return ['git', '-c', f'safe.directory={directory}', '-C', str(directory), *args]
+
+
 def run_action(choice: str, directory: Path) -> None:
     if choice in {'1', '2', '3', '7'}:
         script = (Path(__file__).resolve().parent if choice == '1' else directory) / 'install.sh'
@@ -84,8 +88,8 @@ def run_action(choice: str, directory: Path) -> None:
                 return
         flag = {'1': [], '2': ['--uninstall'], '3': ['--update'], '7': ['--unregister-bot']}[choice]
         if choice == '3':
-            subprocess.run(_privileged_command(['git', '-C', str(directory), 'fetch', '--all', '--prune']), check=True)
-            subprocess.run(_privileged_command(['git', '-C', str(directory), 'pull', '--ff-only']), check=True)
+            subprocess.run(_privileged_command(_git_command(directory, 'fetch', '--all', '--prune')), check=True)
+            subprocess.run(_privileged_command(_git_command(directory, 'pull', '--ff-only')), check=True)
         subprocess.run(_privileged_command(['bash', str(script), *flag]), check=True)
     elif choice == '4':
         result = subprocess.run(['systemctl', '--no-pager', '--full', 'status', *SERVICES], check=False)

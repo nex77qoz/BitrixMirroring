@@ -332,6 +332,29 @@ step_update_system() {
     print_ok "Система обновлена"
 }
 
+checkout_update_branch() {
+    local branch
+    branch=$(git -C "$INSTALL_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    [[ -n "$branch" ]] && return 0
+
+    branch=$(git -C "$INSTALL_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    branch="${branch#origin/}"
+    if [[ -z "$branch" ]]; then
+        branch=$(git -C "$INSTALL_DIR" for-each-ref --format='%(refname:short)' --sort=-committerdate \
+            refs/remotes/origin/ --contains HEAD 2>/dev/null | grep -v '/HEAD$' | sed -n '1{s#^origin/##;p;}' || true)
+    fi
+    if [[ -z "$branch" || "$branch" == "origin" ]]; then
+        print_error "Не удалось определить ветку для detached HEAD. Укажите ветку вручную и повторите обновление."
+        exit 1
+    fi
+    print_warn "Обнаружен detached HEAD — переключение на ветку origin/$branch"
+    if git -C "$INSTALL_DIR" show-ref --verify --quiet "refs/heads/$branch"; then
+        run_cmd git -C "$INSTALL_DIR" switch "$branch"
+    else
+        run_cmd git -C "$INSTALL_DIR" switch --track -c "$branch" "origin/$branch"
+    fi
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # STEP 2 — Install system packages
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1810,12 +1833,16 @@ do_update() {
         exit 1
     fi
 
-    local current_branch
-    current_branch=$(git -C "$INSTALL_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-    if [[ -z "$current_branch" ]]; then
-        print_error "Установленный репозиторий находится в detached HEAD — обновление остановлено"
+    git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
+    if ! git -C "$INSTALL_DIR" diff --quiet || ! git -C "$INSTALL_DIR" diff --cached --quiet; then
+        print_error "В установленном репозитории есть локальные изменения — сначала сохраните или отмените их"
         exit 1
     fi
+    print_info "Получение информации о ветке репозитория..."
+    run_cmd git -C "$INSTALL_DIR" fetch --all --prune
+    checkout_update_branch
+    local current_branch
+    current_branch=$(git -C "$INSTALL_DIR" symbolic-ref --quiet --short HEAD)
     if ! git -C "$INSTALL_DIR" diff --quiet || ! git -C "$INSTALL_DIR" diff --cached --quiet; then
         print_error "В установленном репозитории есть локальные изменения — сначала сохраните или отмените их"
         exit 1
@@ -1832,7 +1859,6 @@ do_update() {
     done
 
     # ── git pull ───────────────────────────────────────────────────────────────
-    git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
     print_info "Получение обновлений из репозитория..."
     local _pull_output _pull_exit
     _pull_output=$(git -C "$INSTALL_DIR" pull --ff-only 2>&1) || _pull_exit=$?

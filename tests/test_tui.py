@@ -17,8 +17,8 @@ def test_installer_dispatch(tmp_path, choice, flag):
     script = tui.Path(tui.__file__).resolve().parent / 'install.sh' if choice == '1' else tmp_path / 'install.sh'
     if choice == '3':
         assert [call.args[0] for call in run.call_args_list] == [
-            ['git', '-C', str(tmp_path), 'fetch', '--all', '--prune'],
-            ['git', '-C', str(tmp_path), 'pull', '--ff-only'],
+            ['git', '-c', f'safe.directory={tmp_path}', '-C', str(tmp_path), 'fetch', '--all', '--prune'],
+            ['git', '-c', f'safe.directory={tmp_path}', '-C', str(tmp_path), 'pull', '--ff-only'],
             ['bash', str(script), *flag],
         ]
     else:
@@ -40,8 +40,8 @@ def test_update_fetches_and_pulls_before_running_installer(tmp_path):
             patch('tui.os.geteuid', return_value=1000), patch('tui.shutil.which', return_value='/usr/bin/sudo'):
         tui.run_action('3', tmp_path)
     assert [call.args[0] for call in run.call_args_list] == [
-        ['sudo', 'git', '-C', str(tmp_path), 'fetch', '--all', '--prune'],
-        ['sudo', 'git', '-C', str(tmp_path), 'pull', '--ff-only'],
+        ['sudo', 'git', '-c', f'safe.directory={tmp_path}', '-C', str(tmp_path), 'fetch', '--all', '--prune'],
+        ['sudo', 'git', '-c', f'safe.directory={tmp_path}', '-C', str(tmp_path), 'pull', '--ff-only'],
         ['sudo', 'bash', str(tmp_path / 'install.sh'), '--update'],
     ]
 

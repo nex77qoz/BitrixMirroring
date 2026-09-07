@@ -784,10 +784,17 @@ step_collect_config() {
     else
         local expected_webhook_url="https://${DOMAIN}${TELEGRAM_WEBHOOK_PATH:-/telegram/webhook}"
         print_info "Проверка статуса Telegram Webhook через API..."
-        local webhook_info
-        webhook_info=$(curl -s --max-time 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" || echo "")
+        local webhook_info webhook_api_error webhook_http_code webhook_api_description webhook_error_file webhook_curl_exit=0
+        webhook_error_file=$(mktemp)
+        webhook_info=$(curl -sS --max-time 10 -w $'\n__HTTP_CODE__:%{http_code}' \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" 2>"$webhook_error_file") || webhook_curl_exit=$?
+        webhook_http_code=$(sed -n 's/^__HTTP_CODE__:\([0-9][0-9][0-9]\)$/\1/p' <<< "$webhook_info" | tail -n1)
+        webhook_info=$(sed '/^__HTTP_CODE__:[0-9][0-9][0-9]$/d' <<< "$webhook_info")
+        webhook_api_error=$(<"$webhook_error_file")
+        webhook_api_description=$(grep -oP '"description":"\K[^"\\]*(?:\\.[^"\\]*)*' <<< "$webhook_info" | head -n1 || true)
+        rm -f "$webhook_error_file"
 
-        if [[ -n "$webhook_info" ]] && echo "$webhook_info" | grep -q '"ok":true'; then
+        if [[ "$webhook_curl_exit" -eq 0 && -n "$webhook_info" ]] && echo "$webhook_info" | grep -q '"ok":true'; then
             local current_url
             current_url=$(echo "$webhook_info" | grep -oP '"url":"[^"]+"' | head -n1 | cut -d'"' -f4 || echo "")
             if [[ "$current_url" == "$expected_webhook_url" ]]; then
@@ -803,7 +810,9 @@ step_collect_config() {
                 TELEGRAM_WEBHOOK_ALREADY_SET=false
             fi
         else
-            print_warn "Не удалось связаться с Telegram API (проверьте подключение или токен)."
+            webhook_http_code="${webhook_http_code:-000}"
+            webhook_api_error="${webhook_api_error:-${webhook_api_description:-неуспешный ответ API}}"
+            print_warn "Telegram API: GET https://api.telegram.org/bot<скрыт>/getWebhookInfo — HTTP ${webhook_http_code}, curl exit ${webhook_curl_exit}: ${webhook_api_error}"
             TELEGRAM_WEBHOOK_ALREADY_SET=false
         fi
     fi

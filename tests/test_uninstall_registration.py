@@ -226,6 +226,12 @@ class InstallRegistrationWiringTest(unittest.TestCase):
         self.assertIn("eventMode", summary)
         self.assertNotIn("imbot.v2.Bot.register", summary)
 
+    def test_telegram_webhook_check_reports_request_and_transport_details(self) -> None:
+        source = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("GET https://api.telegram.org/bot<скрыт>/getWebhookInfo", source)
+        self.assertIn("HTTP ${webhook_http_code}, curl exit ${webhook_curl_exit}", source)
+        self.assertIn("webhook_api_error", source)
+
 
 if __name__ == "__main__":
     unittest.main()

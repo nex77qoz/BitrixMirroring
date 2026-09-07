@@ -119,6 +119,48 @@ def find_existing_bot(api_key: str, base_url: str) -> tuple[str, int] | None:
     return candidates[0]
 
 
+def validate_bot_ready(api_key: str, base_url: str, bot_id: int) -> tuple[bool, str]:
+    """Verify the API key and bot are usable before writing the install config."""
+    status, envelope = vibe_get(api_key, base_url, "/me")
+    if status != 200 or not envelope.get("success"):
+        code, message = envelope_error(envelope)
+        return False, f"Не удалось проверить API-ключ: {code} | {message}".strip()
+    key_data = envelope_data(envelope)
+    scopes = key_data.get("scopes", key_data.get("scope"))
+    if isinstance(scopes, str):
+        scopes = [part.strip() for part in scopes.replace(",", " ").split()]
+    if not isinstance(scopes, list):
+        return False, "Не удалось подтвердить скоупы API-ключа"
+    if "imbot" not in scopes:
+        return False, "API-ключ не имеет скоупа imbot"
+    access_mode = key_data.get("accessMode")
+    if isinstance(access_mode, str) and access_mode.upper() != "READWRITE":
+        return False, f"API-ключ имеет режим {access_mode}, требуется READWRITE"
+    key_state = key_data.get("status")
+    if isinstance(key_state, str) and key_state.lower() not in {"active", "enabled"}:
+        return False, f"API-ключ неактивен (status={key_state})"
+
+    status, envelope = vibe_get(api_key, base_url, f"/bots/{bot_id}")
+    if status != 200 or not envelope.get("success"):
+        code, message = envelope_error(envelope)
+        return False, f"Бот недоступен: {code} | {message}".strip()
+    data = envelope_data(envelope)
+    bot = data.get("bot") if isinstance(data.get("bot"), dict) else data
+    active_values: list[bool] = []
+    if isinstance(bot, dict) and isinstance(bot.get("active"), bool):
+        active_values.append(bot["active"])
+    users = data.get("users")
+    if isinstance(users, list):
+        for user in users:
+            if isinstance(user, dict) and str(user.get("id")) == str(bot_id) and isinstance(user.get("active"), bool):
+                active_values.append(user["active"])
+    if not active_values:
+        return False, "Не удалось подтвердить активность бота в Bitrix24"
+    if any(value is False for value in active_values):
+        return False, "Бот неактивен в Bitrix24"
+    return True, "API-ключ активен, скоуп imbot присутствует, бот активен"
+
+
 def print_result(status, action, bot_id, bot_token, message):
     print(f"status={status}")
     print(f"action={action}")
@@ -188,7 +230,11 @@ def main():
                 sys.exit(1)
             status, envelope = vibe_get(api_key, base_url, f"/bots/{existing_bot_id}")
             if status == 200 and envelope.get("success"):
-                print_result("ok", "kept", int(existing_bot_id), "", "Бот уже зарегистрирован через Vibe API")
+                ready, message = validate_bot_ready(api_key, base_url, int(existing_bot_id))
+                if not ready:
+                    print_error(message)
+                    sys.exit(1)
+                print_result("ok", "kept", int(existing_bot_id), "", f"Бот уже зарегистрирован через Vibe API; {message}")
                 sys.exit(0)
             # 404/403 or any other answer — fall through to discovery/registration.
 
@@ -197,7 +243,11 @@ def main():
         existing = find_existing_bot(api_key, base_url)
         if existing is not None:
             code, bot_id = existing
-            print_result("ok", "existing", bot_id, "", f"Найден существующий бот Vibe (код: {code})")
+            ready, message = validate_bot_ready(api_key, base_url, bot_id)
+            if not ready:
+                print_error(message)
+                sys.exit(1)
+            print_result("ok", "existing", bot_id, "", f"Найден существующий бот Vibe (код: {code}); {message}")
             sys.exit(0)
 
         # Step 3: register a new supervisor bot.
@@ -211,7 +261,11 @@ def main():
             print_error(f"Ошибка регистрации бота через Vibe API: {err_code} | {err_message}{hint}")
             sys.exit(1)
         registered_code, new_bot_id = outcome
-        print_result("ok", "registered", new_bot_id, "", f"Бот успешно зарегистрирован через Vibe API (код: {registered_code})")
+        ready, message = validate_bot_ready(api_key, base_url, new_bot_id)
+        if not ready:
+            print_error(message)
+            sys.exit(1)
+        print_result("ok", "registered", new_bot_id, "", f"Бот успешно зарегистрирован через Vibe API (код: {registered_code}); {message}")
     except RuntimeError as exc:
         print_error(f"Ошибка обращения к Vibe API: {exc}")
         sys.exit(1)

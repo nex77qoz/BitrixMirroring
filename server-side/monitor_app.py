@@ -1113,10 +1113,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Монитор Bitrix Bot</title>
+  <!-- Pinned static stylesheet restores the utility classes without executing CDN JavaScript. -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" integrity="sha384-HtMZLkYo+pR5/u7zCzXxMJP6QoNnQJt1qkHM0EaOPvGDIzaVZbmYr/TlvUZ/sKAg" crossorigin="anonymous">
   <style>
     /* Self-hosted baseline: the monitor must work without executable CDN assets. */
     * { box-sizing: border-box; }
     body { margin: 0; background: #f3f4f6; color: #111827; font-family: system-ui, sans-serif; }
+    .hidden { display: none !important; }
+    /* Tailwind 2.2 predates the slate palette used by this page. */
+    .bg-slate-100 { background-color: #f1f5f9; }
+    .bg-slate-600 { background-color: #475569; }
+    .bg-slate-700 { background-color: #334155; }
+    .bg-slate-800 { background-color: #1e293b; }
+    .bg-slate-900 { background-color: #0f172a; }
+    .bg-slate-900\\/80 { background-color: rgba(15, 23, 42, .8); }
+    .hover\\:bg-slate-200:hover { background-color: #e2e8f0; }
+    .hover\\:bg-slate-600:hover { background-color: #475569; }
+    .hover\\:bg-slate-700:hover { background-color: #334155; }
+    .text-slate-300 { color: #cbd5e1; }
+    .text-slate-400 { color: #94a3b8; }
+    .text-slate-700 { color: #334155; }
     button, input, select, textarea { font: inherit; }
     button { cursor: pointer; }
     [x-cloak] { display: none !important; }

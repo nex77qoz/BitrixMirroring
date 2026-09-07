@@ -389,6 +389,13 @@ def test_monitor_unit_hardening_allows_sudo():
     assert "ProtectSystem=strict" not in sidecar
 
 
+def test_dashboard_keeps_app_hidden_until_basic_auth():
+    assert ".hidden { display: none !important; }" in monitor_app.DASHBOARD_HTML
+    assert '<div id="app" class="hidden min-h-screen">' in monitor_app.DASHBOARD_HTML
+    assert 'tailwindcss@2.2.19/dist/tailwind.min.css' in monitor_app.DASHBOARD_HTML
+    assert 'cdn.tailwindcss.com' not in monitor_app.DASHBOARD_HTML
+
+
 def test_mirror_unit_keeps_no_new_privileges():
     # the mirror process never calls sudo, so its strict hardening stays
     unit = (Path(__file__).parents[1] / "server-side" / "bitrix-telegram-mirror.service").read_text(encoding="utf-8")

@@ -44,6 +44,17 @@ def test_read_views_do_not_execute_config_or_modify_database(tmp_path, capsys):
     assert before == database.read_bytes()
 
 
+def test_read_config_uses_sudo_when_env_is_not_readable(tmp_path):
+    env_file = tmp_path / '.env'
+    env_file.write_text('BITRIX_BOT_ID="42"\nMIRROR_STATE_DB_PATH=state.sqlite3\n', encoding='utf-8')
+    with patch.object(type(env_file), 'read_text', side_effect=PermissionError), \
+            patch('tui.os.geteuid', return_value=1000), patch('tui.shutil.which', return_value='/usr/bin/sudo'), \
+            patch('tui.subprocess.run') as run:
+        run.return_value.stdout = 'BITRIX_BOT_ID="42"\nMIRROR_STATE_DB_PATH=state.sqlite3\n'
+        assert tui.read_config(tmp_path) == {'BITRIX_BOT_ID': '42', 'MIRROR_STATE_DB_PATH': 'state.sqlite3'}
+    run.assert_called_once_with(['sudo', 'cat', str(env_file)], capture_output=True, text=True, check=True)
+
+
 def test_missing_database_is_not_created(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         tui.show_mappings(tmp_path, {})

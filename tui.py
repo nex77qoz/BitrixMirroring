@@ -26,7 +26,15 @@ Mirroring
 
 def read_config(directory: Path) -> dict[str, str]:
     config = {}
-    for line in (directory / '.env').read_text(encoding='utf-8').splitlines():
+    env_file = directory / '.env'
+    try:
+        lines = env_file.read_text(encoding='utf-8').splitlines()
+    except PermissionError:
+        if os.geteuid() == 0 or shutil.which('sudo') is None:
+            raise
+        result = subprocess.run(['sudo', 'cat', str(env_file)], capture_output=True, text=True, check=True)
+        lines = result.stdout.splitlines()
+    for line in lines:
         key, sep, value = line.partition('=')
         if sep and key.strip() in {'BITRIX_BOT_ID', 'MIRROR_STATE_DB_PATH'}:
             parts = shlex.split(value, comments=True)
@@ -36,19 +44,25 @@ def read_config(directory: Path) -> dict[str, str]:
 
 def show_mappings(directory: Path, config: dict[str, str]) -> None:
     path = directory / (config.get('MIRROR_STATE_DB_PATH') or 'mirror_state.sqlite3')
-    with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as connection:
-        cursor = connection.execute(
-            'SELECT id, tg_chat_id, bitrix_dialog_id, topic_ids, label FROM chat_mappings ORDER BY id'
+    query = 'SELECT id, tg_chat_id, bitrix_dialog_id, topic_ids, label FROM chat_mappings ORDER BY id'
+    try:
+        with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as connection:
+            rows = connection.execute(query).fetchall()
+    except (PermissionError, sqlite3.OperationalError):
+        if not path.is_file() or os.geteuid() == 0 or shutil.which('sudo') is None:
+            raise
+        result = subprocess.run(
+            ['sudo', 'sqlite3', '-readonly', '-separator', '\t', str(path), query],
+            capture_output=True, text=True, check=True,
         )
-        print('ID | Telegram | Bitrix | Темы | Название')
-        count = 0
-        for row in cursor:
-            # Escape control characters from remote chat labels before terminal output.
-            print(' | '.join(ascii(str(value))[1:-1] if not str(value).isprintable() else str(value)
-                             for value in row))
-            count += 1
-        if not count:
-            print('Маппингов нет.')
+        rows = [tuple(line.split('\t')) for line in result.stdout.splitlines() if line]
+    print('ID | Telegram | Bitrix | Темы | Название')
+    for row in rows:
+        # Escape control characters from remote chat labels before terminal output.
+        print(' | '.join(ascii(str(value))[1:-1] if not str(value).isprintable() else str(value)
+                         for value in row))
+    if not rows:
+        print('Маппингов нет.')
 
 
 def run_action(choice: str, directory: Path) -> None:

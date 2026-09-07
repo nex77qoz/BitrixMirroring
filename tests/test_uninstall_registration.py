@@ -41,6 +41,13 @@ class _VibeStub(BaseHTTPRequestHandler):
             status, payload = routes[path]
             self._send(status, payload)
             return
+        if path == "/v1/me":
+            self._send(200, {"success": True, "data": {"scopes": ["imbot", "disk"], "accessMode": "READWRITE", "status": "active"}})
+            return
+        if path.startswith("/v1/bots/"):
+            bot_id = path.rsplit("/", 1)[-1]
+            self._send(200, {"success": True, "data": {"bot": {"id": int(bot_id), "active": True}}})
+            return
         self._send(404, {"success": False, "error": {"code": "BOT_NOT_FOUND", "message": "no"}})
 
     def do_POST(self) -> None:
@@ -105,7 +112,7 @@ class RegisterBotVibeTest(unittest.TestCase):
 
     def test_keeps_existing_bot_id_under_this_key(self) -> None:
         fields, requests = self._run(
-            {"get": {"/v1/bots/42": (200, {"success": True, "data": {"botId": 42}})}},
+            {"get": {"/v1/bots/42": (200, {"success": True, "data": {"botId": 42, "active": True}})}},
             ["42"],
         )
         self.assertEqual(fields["status"], "ok")
@@ -172,10 +179,26 @@ class RegisterBotVibeTest(unittest.TestCase):
 
     def test_stdout_contract_keys_are_present(self) -> None:
         fields, _ = self._run(
-            {"get": {"/v1/bots/42": (200, {"success": True, "data": {"id": 42, "code": "tg_mirror_bot_v2"}})}},
+            {"get": {"/v1/bots/42": (200, {"success": True, "data": {"id": 42, "code": "tg_mirror_bot_v2", "active": True}})}},
             ["42"],
         )
         self.assertEqual(set(fields), {"status", "action", "bot_id", "bot_token", "message"})
+
+    def test_rejects_key_without_imbot_scope(self) -> None:
+        fields, _ = self._run(
+            {"get": {"/v1/bots": (200, {"success": True, "data": {"bots": [{"id": 55, "code": "tg_mirror_bot_v2"}]}}),
+                    "/v1/me": (200, {"success": True, "data": {"scopes": ["disk"], "accessMode": "READWRITE", "status": "active"}})}},
+            ["", "Telegram Mirror"], expect_ok=False,
+        )
+        self.assertIn("imbot", fields["message"])
+
+    def test_rejects_inactive_bot(self) -> None:
+        fields, _ = self._run(
+            {"get": {"/v1/bots": (200, {"success": True, "data": {"bots": [{"id": 55, "code": "tg_mirror_bot_v2"}]}}),
+                    "/v1/bots/55": (200, {"success": True, "data": {"bot": {"id": 55, "active": False}}})}},
+            ["", "Telegram Mirror"], expect_ok=False,
+        )
+        self.assertIn("неактивен", fields["message"])
 
 
 class InstallRegistrationWiringTest(unittest.TestCase):

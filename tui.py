@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Terminal menu for the standard /opt/bitrix-bot installation."""
 
 import argparse

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Mapping
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType
@@ -132,13 +133,13 @@ def _render_mappings(mirror: MirrorService) -> str:
     return "\n".join(lines)
 
 
-def _render_statistics(stats: dict[str, object]) -> str:
+def _render_statistics(stats: Mapping[str, object]) -> str:
     return (
         "Статистика зеркалирования:\n"
         f"Маппингов: {stats.get('mappings', 0)}\n"
         f"Связей сообщений: {stats.get('message_links', 0)}\n"
         f"Активных обработчиков: {stats.get('active_workers', 0)}\n"
-        f"В очереди: {stats.get('queued_messages', 0)}\n"
+        f"В очереди: {stats.get('queued_messages', 0)}\n"  # noqa: RUF001
         f"Ошибок опроса Bitrix: {stats.get('poll_errors', 0)}\n"
         f"Ошибок Telegram→Bitrix: {stats.get('telegram_dead_letters', 0)}"
     )

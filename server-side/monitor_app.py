@@ -1133,6 +1133,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .text-slate-700 { color: #334155; }
     button, input, select, textarea { font: inherit; }
     button { cursor: pointer; }
+    .monitor-btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: .4rem;
+      min-height: 2.5rem; padding: .55rem 1rem; border: 1px solid transparent;
+      border-radius: .65rem; font-size: .875rem; font-weight: 650; line-height: 1;
+      letter-spacing: .01em; transition: transform .15s ease, background-color .15s ease,
+        box-shadow .15s ease, border-color .15s ease; box-shadow: 0 1px 2px rgba(15,23,42,.12);
+    }
+    .monitor-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(15,23,42,.16); }
+    .monitor-btn:focus-visible { outline: 3px solid rgba(14,165,233,.4); outline-offset: 2px; }
+    .monitor-btn:disabled { cursor: not-allowed; opacity: .5; transform: none; box-shadow: none; }
+    .monitor-btn-primary { background: #2563eb; color: #fff; }
+    .monitor-btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+    .monitor-btn-secondary { background: #334155; color: #f8fafc; }
+    .monitor-btn-secondary:hover:not(:disabled) { background: #1e293b; }
+    .monitor-btn-success { background: #059669; color: #fff; }
+    .monitor-btn-success:hover:not(:disabled) { background: #047857; }
+    .monitor-btn-warning { background: #d97706; color: #fff; }
+    .monitor-btn-warning:hover:not(:disabled) { background: #b45309; }
+    .monitor-btn-danger { background: #dc2626; color: #fff; }
+    .monitor-btn-danger:hover:not(:disabled) { background: #b91c1c; }
+    .monitor-btn-ghost { background: #f1f5f9; color: #334155; border-color: #cbd5e1; }
+    .monitor-btn-ghost:hover:not(:disabled) { background: #e2e8f0; }
     [x-cloak] { display: none !important; }
     .log-pre { white-space: pre-wrap; word-break: break-all; }
     details > summary { list-style: none; }
@@ -1173,7 +1195,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
              class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
              placeholder="Пароль">
       <button type="submit"
-              class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-sm transition-colors">
+              class="monitor-btn monitor-btn-primary w-full">
         Войти
       </button>
     </form>
@@ -1225,11 +1247,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
       <div class="flex items-center gap-2">
         <button onclick="loadStatus(); loadMappings(); loadAdmins()"
-                class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg transition-colors">
+                class="monitor-btn monitor-btn-primary">
           ↻ Обновить
         </button>
         <button onclick="doLogout()"
-                class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white text-xs rounded-lg transition-colors">
+                class="monitor-btn monitor-btn-secondary">
           Выйти
         </button>
       </div>
@@ -1245,7 +1267,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="flex flex-col gap-4">
           <div>
             <button onclick="downloadBackup()" id="downloadBackupBtn"
-                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50">
+                    class="monitor-btn monitor-btn-primary">
               ⬇ Скачать резервную копию
             </button>
           </div>
@@ -1255,7 +1277,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <input type="file" id="backupFileInput" accept=".json"
                      class="text-sm text-gray-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200">
               <button onclick="uploadBackup()" id="uploadBackupBtn"
-                      class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50">
+                      class="monitor-btn monitor-btn-warning">
                 Восстановить
               </button>
             </div>
@@ -1306,7 +1328,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                      placeholder="123456789">
             </div>
             <button id="addAdminBtn" onclick="addAdmin()"
-                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50">
+                    class="monitor-btn monitor-btn-primary">
               Добавить
             </button>
           </div>
@@ -1407,7 +1429,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="text-xs text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">можно редактировать</span>
           <div class="ml-auto flex items-center gap-2">
             <button onclick="exportMappings()" id="exportMappingsBtn"
-                    class="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
+                    class="monitor-btn monitor-btn-secondary">
               ⬇ Экспорт связок
             </button>
             <label class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer">
@@ -1461,7 +1483,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                      placeholder="12,34 (пусто = все)">
             </div>
             <button id="addMappingBtn" onclick="addMapping()"
-                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50">
+              class="monitor-btn monitor-btn-primary">
               Добавить
             </button>
           </div>
@@ -1566,9 +1588,6 @@ function renderForwarding(info) {
       ? 'bg-green-100 text-green-800'
       : 'bg-red-100 text-red-800';
   const badgeLabel = !reachable ? 'Mirror недоступен' : enabled ? 'Переадресация включена' : 'Переадресация остановлена';
-  const buttonClass = enabled
-    ? 'bg-red-600 hover:bg-red-700'
-    : 'bg-green-600 hover:bg-green-700';
   const buttonLabel = enabled ? 'Остановить переадресацию' : 'Запустить переадресацию';
   const error = info.error || '';
   el.innerHTML = `
@@ -1586,7 +1605,7 @@ function renderForwarding(info) {
         </p>
       </div>
       <button id="forwardingToggleBtn" onclick="toggleForwarding(${enabled ? 'false' : 'true'})"
-              class="px-4 py-2 ${buttonClass} text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50"
+              class="monitor-btn ${enabled ? 'monitor-btn-danger' : 'monitor-btn-success'}"
               ${reachable ? '' : 'disabled'}>
         ${escHtml(buttonLabel)}
       </button>
@@ -1814,11 +1833,11 @@ function renderServices(services) {
       </dl>
       <div class="flex gap-2 mt-auto">
         <button id="restart-${key}" onclick="restartService('${key}', '${escHtml(svc.service)}')"
-                class="flex-1 px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white text-sm rounded-lg font-medium transition-colors disabled:opacity-50">
+                class="monitor-btn monitor-btn-warning flex-1">
           ↺ Перезапустить
         </button>
         <button id="logsBtn-${key}" onclick="toggleLogs('${key}')"
-                class="flex-1 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm rounded-lg font-medium transition-colors">
+                class="monitor-btn monitor-btn-ghost flex-1">
           📋 Логи
         </button>
       </div>
@@ -1830,7 +1849,7 @@ function renderServices(services) {
               <input type="checkbox" id="errorsOnly-${key}" onchange="refreshLogs('${key}')" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
               Только ошибки
             </label>
-            <button onclick="refreshLogs('${key}')" class="text-xs text-blue-600 hover:underline">Обновить</button>
+            <button onclick="refreshLogs('${key}')" class="monitor-btn monitor-btn-ghost text-xs">Обновить</button>
           </div>
         </div>
         <pre id="logsText-${key}" class="log-pre text-xs bg-slate-900 text-green-400 p-3 rounded-lg overflow-auto max-h-72 font-mono">Загрузка…</pre>
@@ -2019,7 +2038,7 @@ function renderDbMappings(mappings) {
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${topicsLabel}</td>
       <td class="px-5 py-2.5">
         <button data-mapping-id="${m.id}" data-tg-chat-id="${tgChatIdAttr}" data-dialog-id="${dialogIdAttr}"
-                class="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-medium rounded-lg transition-colors">
+                class="monitor-btn monitor-btn-danger">
           Удалить
         </button>
       </td>
@@ -2124,7 +2143,7 @@ function renderAdmins(admins) {
       <td class="px-5 py-2.5 text-sm text-gray-500">${escHtml(addedDate)}</td>
       <td class="px-5 py-2.5">
         <button onclick="deleteAdmin(${a.tg_user_id})"
-                class="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-medium rounded-lg transition-colors">
+                class="monitor-btn monitor-btn-danger">
           Удалить
         </button>
       </td>

@@ -25,8 +25,10 @@ SSL_DIR="/etc/ssl/bitrix-bot"
 SSL_CERT="${SSL_DIR}/cert.pem"
 SSL_KEY="${SSL_DIR}/key.pem"
 FILE_CACHE_DIR="$INSTALL_DIR/file_cache"
+BACKUP_FILE=""    # path to backup JSON (empty = no backup)
+BACKUP_LOADED=false
 
-SERVICES=("bitrix-telegram-mirror" "bitrix-bot" "bitrix-monitor")
+SERVICES=("bitrix-telegram-mirror" "bitrix-monitor")
 
 # Service user (non-root)
 SVC_USER="bitrix-bot"
@@ -46,6 +48,9 @@ MONITOR_ALLOWED_IPS=""
 
 # Python binary used throughout the script
 PYTHON_BIN="python3"
+
+# Vibe API (бот-платформа Битрикс24) базовый URL по умолчанию
+VIBE_BASE_URL_DEFAULT="https://vibecode.bitrix24.tech/v1"
 
 # Resolved script path (avoids /dev/fd/XX when run via pipe)
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")"
@@ -175,9 +180,40 @@ ask_secret() {
 
 env_escape() {
     local value="$1"
-    value=${value//\\/\\\\}
-    value=${value//\"/\\\"}
-    printf '"%s"' "$value"
+    # Single-quoted shell values cannot execute substitutions; represent an
+    # embedded apostrophe with the standard shell quote boundary sequence.
+    value=${value//\'/\'"'"\'}
+    printf "'%s'" "$value"
+}
+
+load_env_file() {
+    local file="$1" key value
+    [[ -f "$file" ]] || return 1
+    while IFS=$'\t' read -r key value; do
+        [[ -n "$key" ]] || continue
+        export "$key=$value"
+    done < <(python3 - "$file" <<'PY'
+import shlex, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    for raw in stream:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if not key or not (key[0].isalpha() or key[0] == "_") or not all(c.isalnum() or c == "_" for c in key):
+            continue
+        try:
+            parsed = shlex.split(value, comments=True, posix=True)
+        except ValueError:
+            continue
+        print(key + "\t" + (parsed[0] if parsed else ""))
+PY
+    )
 }
 
 load_installer_env() {
@@ -186,10 +222,10 @@ load_installer_env() {
         exit 1
     fi
 
-    set -a
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    set +a
+    load_env_file "$ENV_FILE" || {
+        print_error "Не удалось разобрать файл конфигурации: $ENV_FILE"
+        exit 1
+    }
 
     DOMAIN="${APP_DOMAIN:-${DOMAIN:-}}"
     if [[ -z "$DOMAIN" && -f "$NGINX_CONF" ]]; then
@@ -210,6 +246,59 @@ run_cmd() {
         print_info "Подробности: $LOG_FILE"
         exit 1
     fi
+}
+
+unregister_bitrix_bot() {
+    [[ -f "$ENV_FILE" ]] || { print_warn "Конфигурация Bitrix не найдена — бот не удалён из Bitrix24"; return "${1:-0}"; }
+
+    local vibe_api_key vibe_base bot_id response
+    load_env_file "$ENV_FILE" || {
+        print_warn "Не удалось разобрать конфигурацию Bitrix"
+        return "${1:-0}"
+    }
+    vibe_api_key="${VIBE_API_KEY:-}"
+    bot_id="${BITRIX_BOT_ID:-}"
+    vibe_base="${VIBE_BASE_URL:-$VIBE_BASE_URL_DEFAULT}"
+
+    if [[ -z "$vibe_api_key" || -z "$bot_id" ]]; then
+        print_warn "VIBE_API_KEY или BITRIX_BOT_ID не заданы — бот не удалён из Bitrix24"
+        return "${1:-0}"
+    fi
+
+    response=$(curl --silent --show-error --max-time 30 --fail-with-body --request DELETE \
+        --header "X-Api-Key: ${vibe_api_key}" \
+        --header 'Accept: application/json' \
+        "${vibe_base%/}/bots/${bot_id}" 2>&1) || {
+        print_warn "Не удалось удалить бота из Bitrix24: $response"
+        return "${1:-0}"
+    }
+
+    if ! python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("success") is True else 1)' <<< "$response" 2>/dev/null; then
+        print_warn "Bitrix24 не удалил бота: $response"
+        return "${1:-0}"
+    else
+        print_ok "Бот удалён из Bitrix24 (DELETE /v1/bots/${bot_id})"
+    fi
+}
+
+notify_telegram_admins_about_bitrix_bot() {
+    [[ -n "${TG_ADMIN_IDS:-}" ]] || return 0
+
+    local admin_id response message
+    message=$'Зарегистрирован новый бот Bitrix24 через Vibe API.\n\nBot ID: '"${BITRIX_BOT_ID}"
+    IFS=',' read -ra _admin_ids <<< "$TG_ADMIN_IDS"
+    for admin_id in "${_admin_ids[@]}"; do
+        admin_id="${admin_id//[[:space:]]/}"
+        [[ -n "$admin_id" ]] || continue
+        response=$(curl --silent --show-error --max-time 15 \
+            --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${admin_id}" \
+            --data-urlencode "text=${message}" 2>&1) || {
+            print_warn "Не удалось отправить данные бота администратору Telegram $admin_id: $response"
+            continue
+        }
+        [[ "$response" == *'"ok":true'* ]] || print_warn "Telegram не подтвердил отправку администратору $admin_id: $response"
+    done
 }
 
 banner() {
@@ -243,13 +332,36 @@ step_update_system() {
     print_ok "Система обновлена"
 }
 
+checkout_update_branch() {
+    local branch
+    branch=$(git -C "$INSTALL_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    [[ -n "$branch" ]] && return 0
+
+    branch=$(git -C "$INSTALL_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    branch="${branch#origin/}"
+    if [[ -z "$branch" ]]; then
+        branch=$(git -C "$INSTALL_DIR" for-each-ref --format='%(refname:short)' --sort=-committerdate \
+            refs/remotes/origin/ --contains HEAD 2>/dev/null | grep -v '/HEAD$' | sed -n '1{s#^origin/##;p;}' || true)
+    fi
+    if [[ -z "$branch" || "$branch" == "origin" ]]; then
+        print_error "Не удалось определить ветку для detached HEAD. Укажите ветку вручную и повторите обновление."
+        exit 1
+    fi
+    print_warn "Обнаружен detached HEAD — переключение на ветку origin/$branch"
+    if git -C "$INSTALL_DIR" show-ref --verify --quiet "refs/heads/$branch"; then
+        run_cmd git -C "$INSTALL_DIR" switch "$branch"
+    else
+        run_cmd git -C "$INSTALL_DIR" switch --track -c "$branch" "origin/$branch"
+    fi
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # STEP 2 — Install system packages
 # ──────────────────────────────────────────────────────────────────────────────
 step_install_packages() {
     print_step "Установка системных зависимостей"
 
-    local pkgs=(git nginx curl sqlite3 openssl python3 python3-venv python3-dev fail2ban ufw logrotate)
+    local pkgs=(git nginx curl sqlite3 openssl python3 python3-venv python3-dev fail2ban ufw logrotate sudo)
     run_cmd apt-get install -y "${pkgs[@]}"
 
     PYTHON_BIN="python3"
@@ -276,7 +388,17 @@ step_clone_repo() {
         print_info "Репозиторий уже существует — выполняем git pull"
         # Allow root to operate on a directory owned by the service user
         git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
-        run_cmd git -C "$INSTALL_DIR" pull
+        local current_branch
+        current_branch=$(git -C "$INSTALL_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+        if [[ -z "$current_branch" ]]; then
+            print_error "Установленный репозиторий находится в detached HEAD — обновление остановлено"
+            exit 1
+        fi
+        if ! git -C "$INSTALL_DIR" diff --quiet || ! git -C "$INSTALL_DIR" diff --cached --quiet; then
+            print_error "В установленном репозитории есть локальные изменения — сначала сохраните или отмените их"
+            exit 1
+        fi
+        run_cmd git -C "$INSTALL_DIR" pull --ff-only
     else
         print_info "Клонирование из $REPO_URL (ветка: ${REPO_BRANCH:-default})"
         if [[ -n "$REPO_BRANCH" && "$REPO_BRANCH" != "HEAD" ]]; then
@@ -322,10 +444,15 @@ step_create_service_user() {
     # Allow the service user to restart bot services and view logs without a password
     # (required by the monitoring dashboard's restart and log viewer endpoints)
     local sudoers_file="/etc/sudoers.d/bitrix-bot-services"
+    mkdir -p "$(dirname "$sudoers_file")"
     cat > "$sudoers_file" << EOF
-# Allow $SVC_USER to restart bot services and view logs (used by monitoring dashboard)
-${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-bot, /usr/bin/systemctl restart bitrix-monitor, /usr/bin/journalctl -u bitrix-telegram-mirror *, /usr/bin/journalctl -u bitrix-bot *, /usr/bin/journalctl -u bitrix-monitor *
+# Allow $SVC_USER to restart bot services and view logs (used by monitoring dashboard).
+# The journalctl spec MUST mirror monitor_app._get_journal argv exactly
+# ("journalctl -u <unit> -n<lines> --no-pager --output=short-iso"); only the
+# -n<lines> count is wildcarded. Keep the two in sync or sudo will deny the call.
+${SVC_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart bitrix-telegram-mirror, /usr/bin/systemctl restart bitrix-monitor, /usr/bin/journalctl -u bitrix-telegram-mirror -n* --no-pager --output=short-iso, /usr/bin/journalctl -u bitrix-monitor -n* --no-pager --output=short-iso
 EOF
+    visudo -c -f "$sudoers_file" || { print_error "Некорректный синтаксис sudoers-файла"; return 1; }
     chmod 440 "$sudoers_file"
     print_ok "Sudoers-правило создано: $sudoers_file"
 }
@@ -447,46 +574,231 @@ SSHEOF
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# STEP 4d — Restore from backup (optional, runs before config collection)
+# ──────────────────────────────────────────────────────────────────────────────
+step_restore_backup() {
+    print_step "Восстановление из резервной копии"
+
+    if [[ -z "${BACKUP_FILE:-}" ]]; then
+        echo -en "  ${YELLOW}Есть файл резервной копии? (y/N): ${RESET}"
+        read -r has_backup
+        if [[ "${has_backup,,}" != "y" && "${has_backup,,}" != "д" ]]; then
+            print_info "Восстановление пропущено — продолжаем обычную установку"
+            return 0
+        fi
+        ask_input BACKUP_FILE "Путь к файлу резервной копии"
+    fi
+
+    if [[ ! -f "$BACKUP_FILE" ]]; then
+        print_error "Файл не найден: $BACKUP_FILE"
+        print_warn "Продолжаем без восстановления"
+        BACKUP_FILE=""
+        return 0
+    fi
+
+    # Validate structure and extract env vars into a temp shell script
+    local tmp_env_sh
+    tmp_env_sh=$(mktemp /tmp/bitrix-bot-env-XXXXXX.sh) || {
+        print_error "Не удалось создать временный файл"
+        print_warn "Продолжаем без восстановления"
+        BACKUP_FILE=""
+        return 0
+    }
+
+    if ! python3 - "$BACKUP_FILE" "$tmp_env_sh" << 'PYEOF'
+import json, sys, shlex
+
+backup_path, out_path = sys.argv[1], sys.argv[2]
+try:
+    with open(backup_path, encoding="utf-8") as f:
+        data = json.load(f)
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+
+if not isinstance(data, dict):
+    print("ERROR: ожидается JSON-объект", file=sys.stderr)
+    sys.exit(1)
+if data.get("version") != "1":
+    print(f"ERROR: неподдерживаемая версия {data.get('version')!r}", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data.get("env"), dict):
+    print("ERROR: отсутствует поле 'env'", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data.get("db"), dict):
+    print("ERROR: отсутствует поле 'db'", file=sys.stderr)
+    sys.exit(1)
+
+lines = []
+for key, val in data["env"].items():
+    if key and key[0].isalpha() and key.replace("_", "").isalnum():
+        lines.append(f"export {key}={shlex.quote(str(val))}")
+
+with open(out_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+
+# Save DB portion separately
+import os
+if not out_path:
+    print("ERROR: путь к временному файлу пуст", file=sys.stderr)
+    sys.exit(1)
+db_out = os.path.join(os.path.dirname(out_path), "bitrix-bot-db-restore.json")
+with open(db_out, "w", encoding="utf-8") as f:
+    json.dump(data["db"], f, ensure_ascii=False)
+PYEOF
+    then
+        print_error "Не удалось разобрать файл резервной копии"
+        print_warn "Продолжаем без восстановления"
+        rm -f "$tmp_env_sh"
+        BACKUP_FILE=""
+        return 0
+    fi
+
+    # Parse exported env vars without executing backup contents.
+    load_env_file "$tmp_env_sh"
+    rm -f "$tmp_env_sh"
+    for _secret_var in TELEGRAM_BOT_TOKEN VIBE_API_KEY MONITOR_PASSWORD TELEGRAM_WEBHOOK_SECRET; do
+        if [[ "${!_secret_var:-}" == "***REDACTED***" ]]; then
+            unset "$_secret_var"
+            print_warn "Секрет $_secret_var отсутствует в резервной копии — его нужно ввести заново"
+        fi
+    done
+    print_ok "Конфигурация загружена из резервной копии"
+
+    # Handle domain — may differ on new server
+    local backup_domain="${APP_DOMAIN:-${DOMAIN:-}}"
+    if [[ -n "$backup_domain" ]]; then
+        print_info "Домен из резервной копии: ${BOLD}${backup_domain}${RESET}"
+        echo -en "  ${YELLOW}Использовать этот домен? (Y/n): ${RESET}"
+        read -r use_domain
+        if [[ "${use_domain,,}" == "n" || "${use_domain,,}" == "н" ]]; then
+            DOMAIN=""
+            APP_DOMAIN=""
+            ask_input DOMAIN "Новый домен сервера (например: bot.example.com)"
+            APP_DOMAIN="$DOMAIN"
+        else
+            DOMAIN="$backup_domain"
+            APP_DOMAIN="$DOMAIN"
+        fi
+    else
+        ask_input DOMAIN "Домен сервера (например: bot.example.com)"
+        APP_DOMAIN="$DOMAIN"
+    fi
+    TELEGRAM_WEBHOOK_PUBLIC_URL="https://${DOMAIN}"
+    TELEGRAM_WEBHOOK_PATH="${TELEGRAM_WEBHOOK_PATH:-/telegram/webhook}"
+
+    BACKUP_LOADED=true
+    print_ok "База данных будет восстановлена после инициализации"
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 # STEP 5 — Interactive configuration
 # ──────────────────────────────────────────────────────────────────────────────
 step_collect_config() {
     print_step "Сбор конфигурации"
 
+    if [[ "${BACKUP_LOADED:-false}" == "true" ]]; then
+        if [[ -n "${VIBE_API_KEY:-}" && -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${MONITOR_PASSWORD:-}" && -n "${TELEGRAM_WEBHOOK_SECRET:-}" ]]; then
+            print_ok "Конфигурация загружена из резервной копии — пропускаем интерактивный ввод"
+            return 0
+        fi
+        print_info "В резервной копии отсутствуют секреты — запрашиваем их повторно"
+    fi
+
+    if [[ -f "$ENV_FILE" ]]; then
+        print_info "Обнаружен существующий файл конфигурации: $ENV_FILE"
+        local reuse_env=""
+        echo -en "  ${YELLOW}Использовать параметры из существующего .env? [Y/n]: ${RESET}"
+        read -r reuse_env
+        if [[ -z "$reuse_env" || "${reuse_env,,}" == "y" || "${reuse_env,,}" == "да" ]]; then
+            print_info "Загрузка параметров из $ENV_FILE..."
+            load_env_file "$ENV_FILE" || {
+                print_error "Не удалось разобрать файл конфигурации: $ENV_FILE"
+                exit 1
+            }
+            DOMAIN="${APP_DOMAIN:-${DOMAIN:-}}"
+            print_ok "Параметры успешно загружены."
+        else
+            print_info "Параметры будут настроены заново."
+            VIBE_API_KEY=""
+            DOMAIN=""
+            APP_DOMAIN=""
+            BITRIX_BOT_ID=""
+            ACME_EMAIL=""
+            TELEGRAM_BOT_TOKEN=""
+            TELEGRAM_WEBHOOK_SECRET=""
+        fi
+    fi
+
     echo -e "\n${BOLD}  Введите параметры бота (все поля обязательны):${RESET}\n"
 
-    # Bitrix webhook
+    # Vibe API key
     while true; do
-        ask_secret BITRIX_WEBHOOK_BASE "URL вебхука Битрикс (https://company.bitrix24.ru/rest/1/CODE)"
-        if [[ "$BITRIX_WEBHOOK_BASE" == https://* ]]; then
+        ask_secret VIBE_API_KEY "Vibe API ключ (vibe_api_..., READWRITE, скоупы imbot+disk)"
+        if [[ -n "$VIBE_API_KEY" ]]; then
             break
         fi
-        print_error "URL должен начинаться с https://"
         if [[ -n "${CONFIG_FILE_PATH:-}" ]]; then
-            print_error "Недопустимое значение BITRIX_WEBHOOK_BASE в конфигурационном файле."
+            print_error "Недопустимое значение VIBE_API_KEY в конфигурационном файле."
             exit 1
         fi
-        BITRIX_WEBHOOK_BASE=""
     done
 
     # Domain
     ask_input DOMAIN "Домен сервера (например: bot.example.com)"
     APP_DOMAIN="$DOMAIN"
-    BOT_HANDLER_URL="https://${DOMAIN}/bitrix/bot"
+    ask_input BITRIX_BOT_NAME "Название бота в Bitrix24" "Telegram Mirror V2"
     TELEGRAM_WEBHOOK_PUBLIC_URL="https://${DOMAIN}"
     TELEGRAM_WEBHOOK_PATH="/telegram/webhook"
-    print_info "URL обработчика бота: ${BOLD}${BOT_HANDLER_URL}${RESET}"
-    print_info "Укажите этот URL при регистрации бота в Битрикс (поле handler_url)"
+    print_info "В режиме eventMode=fetch поле handler_url при регистрации не требуется."
     print_info "URL Telegram webhook: ${BOLD}${TELEGRAM_WEBHOOK_PUBLIC_URL}${TELEGRAM_WEBHOOK_PATH}${RESET}"
 
-    # Bot IDs
-    ask_input BITRIX_BOT_ID    "ID бота в Битрикс (BOT_ID)"
-    ask_input BITRIX_BOT_CLIENT_ID "Client ID бота в Битрикс (CLIENT_ID)"
+    # Bot IDs (Auto-detect/Register via Vibe API)
+    print_info "Проверка и автоматическая настройка бота Битрикс через Vibe API..."
+    BOT_AUTO_REGISTERED="false"
+    local reg_script="$INSTALL_DIR/server-side/register_bot.py"
+    if [[ -f "$reg_script" ]]; then
+        local tmp_out
+        tmp_out=$(mktemp)
+
+        # We run the python script, redirecting stderr to the install log file to preserve debug info, and stdout to our temp file.
+        if VIBE_BASE_URL="${VIBE_BASE_URL:-$VIBE_BASE_URL_DEFAULT}" python3 "$reg_script" "$VIBE_API_KEY" "${BITRIX_BOT_ID:-}" "$BITRIX_BOT_NAME" > "$tmp_out" 2>> "$LOG_FILE"; then
+            local status bot_id msg
+            status=$(awk -F= '/^status=/ {print $2}' "$tmp_out")
+            bot_id=$(awk -F= '/^bot_id=/ {print $2}' "$tmp_out")
+            msg=$(awk -F= '/^message=/ {print $2}' "$tmp_out")
+
+            if [[ "$status" == "ok" ]]; then
+                BITRIX_BOT_ID="$bot_id"
+                BOT_AUTO_REGISTERED="true"
+                print_ok "$msg (BOT_ID=$BITRIX_BOT_ID)"
+            else
+                print_warn "Автоматическая настройка вернула статус error: $msg"
+                ask_input BITRIX_BOT_ID "ID бота в Битрикс (BOT_ID)"
+            fi
+        else
+            local err_msg
+            err_msg=$(awk -F= '/^message=/ {print $2}' "$tmp_out" 2>/dev/null || echo "")
+            err_msg="${err_msg:-Неизвестная ошибка выполнения скрипта}"
+            print_warn "Автоматическая настройка не удалась: $err_msg"
+            print_info "Подробный лог сохранён в $LOG_FILE"
+            ask_input BITRIX_BOT_ID "ID бота в Битрикс (BOT_ID)"
+        fi
+        rm -f "$tmp_out"
+    else
+        print_warn "Скрипт автонастройки $reg_script не найден. Введите параметры вручную."
+        ask_input BITRIX_BOT_ID "ID бота в Битрикс (BOT_ID)"
+    fi
 
     # Email for SSL certificate (acme.sh)
     ask_input ACME_EMAIL "Email для получения уведомлений от Let's Encrypt"
 
     # Telegram token
     ask_secret TELEGRAM_BOT_TOKEN "Токен Telegram-бота (Bot Token)"
+
+    echo -e "\n${BOLD}  Данные нового бота Bitrix24:${RESET}"
+    echo -e "    BITRIX_BOT_ID: ${CYAN}${BITRIX_BOT_ID}${RESET}"
+    print_info "Добавьте бота (ID=${BITRIX_BOT_ID}) во все зеркалируемые чаты Битрикс24 и перезапустите сервис."
 
     TELEGRAM_WEBHOOK_ENABLED="true"
 
@@ -495,10 +807,17 @@ step_collect_config() {
     else
         local expected_webhook_url="https://${DOMAIN}${TELEGRAM_WEBHOOK_PATH:-/telegram/webhook}"
         print_info "Проверка статуса Telegram Webhook через API..."
-        local webhook_info
-        webhook_info=$(curl -s --max-time 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" || echo "")
+        local webhook_info webhook_api_error webhook_http_code webhook_api_description webhook_error_file webhook_curl_exit=0
+        webhook_error_file=$(mktemp)
+        webhook_info=$(curl -sS --max-time 10 -w $'\n__HTTP_CODE__:%{http_code}' \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" 2>"$webhook_error_file") || webhook_curl_exit=$?
+        webhook_http_code=$(sed -n 's/^__HTTP_CODE__:\([0-9][0-9][0-9]\)$/\1/p' <<< "$webhook_info" | tail -n1)
+        webhook_info=$(sed '/^__HTTP_CODE__:[0-9][0-9][0-9]$/d' <<< "$webhook_info")
+        webhook_api_error=$(<"$webhook_error_file")
+        webhook_api_description=$(grep -oP '"description":"\K[^"\\]*(?:\\.[^"\\]*)*' <<< "$webhook_info" | head -n1 || true)
+        rm -f "$webhook_error_file"
 
-        if [[ -n "$webhook_info" ]] && echo "$webhook_info" | grep -q '"ok":true'; then
+        if [[ "$webhook_curl_exit" -eq 0 && -n "$webhook_info" ]] && echo "$webhook_info" | grep -q '"ok":true'; then
             local current_url
             current_url=$(echo "$webhook_info" | grep -oP '"url":"[^"]+"' | head -n1 | cut -d'"' -f4 || echo "")
             if [[ "$current_url" == "$expected_webhook_url" ]]; then
@@ -514,20 +833,14 @@ step_collect_config() {
                 TELEGRAM_WEBHOOK_ALREADY_SET=false
             fi
         else
-            print_warn "Не удалось связаться с Telegram API (проверьте подключение или токен)."
+            webhook_http_code="${webhook_http_code:-000}"
+            webhook_api_error="${webhook_api_error:-${webhook_api_description:-неуспешный ответ API}}"
+            print_warn "Telegram API: GET https://api.telegram.org/bot<скрыт>/getWebhookInfo — HTTP ${webhook_http_code}, curl exit ${webhook_curl_exit}: ${webhook_api_error}"
             TELEGRAM_WEBHOOK_ALREADY_SET=false
         fi
     fi
 
     ask_secret TELEGRAM_WEBHOOK_SECRET "Секретный токен для Telegram-вебхука"
-
-    BITRIX_WEBHOOK_BRIDGE_ENABLED="true"
-    MIRROR_INTERNAL_WEBHOOK_SECRET="${TELEGRAM_WEBHOOK_SECRET}"
-
-    MIRROR_HTTP_HOST="127.0.0.1"
-    MIRROR_HTTP_PORT="8090"
-    MIRROR_INTERNAL_BASE_URL="http://127.0.0.1:8090"
-    MIRROR_INTERNAL_EVENT_PATH="/internal/bitrix/event"
 
     BITRIX_POLL_INTERVAL_SECONDS_VALUE="60"
 
@@ -547,6 +860,7 @@ step_collect_config() {
     print_info "Можно указать несколько через запятую: 123456789,987654321"
     print_info "Оставьте пустым — добавите позже через панель мониторинга."
     ask_optional TG_ADMIN_IDS "Telegram ID администраторов"
+    notify_telegram_admins_about_bitrix_bot
 
     print_ok "Конфигурация собрана"
 }
@@ -574,19 +888,10 @@ TELEGRAM_WEBHOOK_DROP_PENDING_UPDATES=true
 TELEGRAM_WEBHOOK_STRICT_VERIFY=true
 
 # Bitrix
-BITRIX_WEBHOOK_BASE=$(env_escape "${BITRIX_WEBHOOK_BASE}")
+VIBE_API_KEY=$(env_escape "${VIBE_API_KEY}")
+VIBE_BASE_URL=$(env_escape "${VIBE_BASE_URL:-$VIBE_BASE_URL_DEFAULT}")
+BITRIX_BOT_NAME=$(env_escape "${BITRIX_BOT_NAME}")
 BITRIX_BOT_ID=$(env_escape "${BITRIX_BOT_ID}")
-BITRIX_BOT_CLIENT_ID=$(env_escape "${BITRIX_BOT_CLIENT_ID}")
-
-# Мгновенный Bitrix -> Telegram bridge
-BITRIX_WEBHOOK_BRIDGE_ENABLED=${BITRIX_WEBHOOK_BRIDGE_ENABLED}
-MIRROR_HTTP_HOST=$(env_escape "${MIRROR_HTTP_HOST}")
-MIRROR_HTTP_PORT=${MIRROR_HTTP_PORT}
-MIRROR_INTERNAL_BASE_URL=$(env_escape "${MIRROR_INTERNAL_BASE_URL}")
-MIRROR_INTERNAL_EVENT_PATH=$(env_escape "${MIRROR_INTERNAL_EVENT_PATH}")
-MIRROR_INTERNAL_WEBHOOK_SECRET=$(env_escape "${MIRROR_INTERNAL_WEBHOOK_SECRET:-}")
-MIRROR_INTERNAL_TIMEOUT_SECONDS=10
-BITRIX_FORWARDED_EVENTS=$(env_escape "ONIMBOTMESSAGEADD,ONIMBOTJOINCHAT")
 
 # Форматирование
 PREFIX_WITH_CHAT_TITLE=true
@@ -618,6 +923,7 @@ REQUEST_TIMEOUT_SECONDS=20
 # Лимиты файлов (100 МБ на файл, 10 ГБ кэш)
 MAX_FILE_SIZE_BYTES=104857600
 FILE_CACHE_DIR=$(env_escape "${FILE_CACHE_DIR}")
+BITRIX_MAX_UPLOAD_FILE_BYTES=31457280
 FILE_CACHE_MAX_BYTES=10737418240
 
 # Очистка БД (7 дней)
@@ -635,6 +941,7 @@ EOF
 
     chmod 600 "$ENV_FILE"
     chown "$SVC_USER:$SVC_GROUP" "$ENV_FILE"
+    rm -f "$INSTALL_DIR/.bitrix-registration-token" 2>/dev/null || true
     print_ok ".env создан ($ENV_FILE)"
 }
 
@@ -789,17 +1096,6 @@ server {
     # Upload limit (100 MB)
     client_max_body_size 100m;
 
-    location /bitrix/bot {
-        limit_req zone=webhook burst=50 nodelay;
-        limit_req_status 429;
-
-        proxy_pass http://127.0.0.1:8081/bitrix/bot;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
     location /telegram/webhook {
         limit_req zone=webhook burst=50 nodelay;
         limit_req_status 429;
@@ -876,17 +1172,6 @@ server {
     # Upload limit (100 MB)
     client_max_body_size 100m;
 
-    location /bitrix/bot {
-        limit_req zone=webhook burst=50 nodelay;
-        limit_req_status 429;
-
-        proxy_pass http://127.0.0.1:8081/bitrix/bot;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
     location /telegram/webhook {
         limit_req zone=webhook burst=50 nodelay;
         limit_req_status 429;
@@ -956,10 +1241,20 @@ step_create_services() {
     print_step "Создание systemd-сервисов"
 
     # 1 — main mirror process
+    local _hardening_mirror="
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=${INSTALL_DIR} /tmp
+PrivateTmp=yes
+MemoryMax=512M
+UMask=027"
     cat > /etc/systemd/system/bitrix-telegram-mirror.service << EOF
 [Unit]
 Description=Telegram Bitrix Mirror Bot
 After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 User=${SVC_USER}
@@ -969,39 +1264,34 @@ EnvironmentFile=${ENV_FILE}
 ExecStart=${VENV}/bin/python ${INSTALL_DIR}/main.py
 Restart=always
 RestartSec=3
+StartLimitBurst=5
+StartLimitIntervalSec=60
 StandardOutput=journal
 StandardError=journal
+${_hardening_mirror}
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    # 2 — webhook handler
-    cat > /etc/systemd/system/bitrix-bot.service << EOF
-[Unit]
-Description=Bitrix Bot Webhook Handler
-After=network.target
-
-[Service]
-User=${SVC_USER}
-Group=${SVC_GROUP}
-WorkingDirectory=${INSTALL_DIR}/server-side
-EnvironmentFile=${ENV_FILE}
-ExecStart=${VENV}/bin/uvicorn app:app --host 127.0.0.1 --port 8081
-Restart=always
-RestartSec=3
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # 3 — monitoring dashboard
+    # 2 — monitoring dashboard
+    # The monitor reads journald through systemd-journal. Its sudoers entry is
+    # retained only for the explicitly allowlisted service restart commands.
+    local _hardening_sidecar="
+NoNewPrivileges=no
+ProtectSystem=full
+ProtectHome=yes
+SupplementaryGroups=systemd-journal
+ReadWritePaths=${INSTALL_DIR} /tmp
+PrivateTmp=yes
+MemoryMax=256M
+UMask=027"
     cat > /etc/systemd/system/bitrix-monitor.service << EOF
 [Unit]
 Description=Bitrix Bot Monitoring Dashboard
 After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 User=${SVC_USER}
@@ -1011,8 +1301,11 @@ EnvironmentFile=${ENV_FILE}
 ExecStart=${VENV}/bin/uvicorn monitor_app:app --host 127.0.0.1 --port 8082
 Restart=always
 RestartSec=3
+StartLimitBurst=5
+StartLimitIntervalSec=60
 StandardOutput=journal
 StandardError=journal
+${_hardening_sidecar}
 
 [Install]
 WantedBy=multi-user.target
@@ -1066,6 +1359,7 @@ step_setup_telegram_webhook() {
         echo -e "    ${CYAN}curl -X POST \"https://api.telegram.org/bot<TOKEN>/setWebhook\" \\"
         echo -e "      -H \"Content-Type: application/json\" \\"
         echo -e "      -d '{\"url\": \"${webhook_url}\", \"secret_token\": \"<SECRET>\"}'${RESET}"
+        return 1
     fi
 
     # Verification: send a test request with the secret token
@@ -1082,8 +1376,10 @@ step_setup_telegram_webhook() {
         print_ok "Webhook endpoint принимает запросы с корректным секретом (HTTP 200)"
     elif [[ "$code" == "403" ]]; then
         print_error "Webhook endpoint вернул 403 — проверьте TELEGRAM_WEBHOOK_SECRET в ${ENV_FILE}"
+        return 1
     else
-        print_warn "Webhook endpoint вернул HTTP $code — убедитесь, что сервисы запущены и SSL настроен"
+        print_error "Webhook endpoint вернул HTTP $code — убедитесь, что сервисы запущены и SSL настроен"
+        return 1
     fi
 }
 
@@ -1127,12 +1423,96 @@ CREATE TABLE IF NOT EXISTS telegram_admins (
     tg_user_id INTEGER PRIMARY KEY,
     added_at_unix INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS topic_names (
+    tg_chat_id INTEGER NOT NULL,
+    topic_id   INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    PRIMARY KEY (tg_chat_id, topic_id)
+);
+CREATE TABLE IF NOT EXISTS runtime_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at_unix INTEGER NOT NULL
+);
 SQL
 
     # Ensure permissions for service user
     chown "$SVC_USER:$SVC_GROUP" "$DB_FILE" 2>/dev/null || true
     chmod 660 "$DB_FILE" 2>/dev/null || true
     print_ok "База данных SQLite успешно инициализирована"
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP — Restore DB tables from backup (runs after step_init_db)
+# ──────────────────────────────────────────────────────────────────────────────
+step_restore_db_from_backup() {
+    if [[ "${BACKUP_LOADED:-false}" != "true" ]]; then
+        return 0
+    fi
+
+    print_step "Восстановление базы данных из резервной копии"
+
+    # Find the temp DB file written by step_restore_backup
+    local db_json
+    db_json=$(find /tmp -maxdepth 1 -name "bitrix-bot-db-restore.json" 2>/dev/null | head -n1)
+    if [[ -z "$db_json" || ! -f "$db_json" ]]; then
+        print_warn "Временный файл данных не найден — пропускаем восстановление БД"
+        return 0
+    fi
+
+    python3 - "$DB_FILE" "$db_json" 2>>"$LOG_FILE" << 'PYEOF'
+import json, sqlite3, sys
+
+db_path, json_path = sys.argv[1], sys.argv[2]
+
+with open(json_path, encoding="utf-8") as f:
+    db_data = json.load(f)
+
+TABLES = (
+    "chat_mappings", "cursor_state", "message_links",
+    "topic_names", "telegram_admins", "runtime_settings",
+)
+
+conn = sqlite3.connect(db_path, timeout=30)
+try:
+    conn.execute("BEGIN")
+    for table in TABLES:
+        rows = db_data.get(table) or []
+        conn.execute(f"DELETE FROM {table}")
+        valid_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for row in rows:
+            if not row:
+                continue
+            filtered = {k: v for k, v in row.items() if str(k) in valid_cols}
+            if not filtered:
+                continue
+            cols = ", ".join(str(k) for k in filtered.keys())
+            placeholders = ", ".join("?" * len(filtered))
+            conn.execute(
+                f"INSERT INTO {table} ({cols}) VALUES ({placeholders})",
+                list(filtered.values()),
+            )
+        print(f"{table}: {len(rows)}")
+    conn.execute("COMMIT")
+except Exception as e:
+    conn.execute("ROLLBACK")
+    conn.close()
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+conn.close()
+PYEOF
+
+    local py_exit=$?
+    if [[ $py_exit -ne 0 ]]; then
+        print_error "Ошибка при восстановлении базы данных. Подробности: $LOG_FILE"
+    else
+        print_ok "База данных восстановлена"
+    fi
+
+    rm -f "$db_json"
+
+    chown "$SVC_USER:$SVC_GROUP" "$DB_FILE" 2>/dev/null || true
+    chmod 660 "$DB_FILE" 2>/dev/null || true
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1267,57 +1647,26 @@ step_health_checks() {
         fi
     done
 
-    # Webhook /health endpoint
+    # Main mirror health endpoint (used only when Telegram webhook mode is enabled)
     local code
     local health_body
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8081/health 2>/dev/null || echo "000")
-    if [[ "$code" == "200" ]]; then
-        print_ok "Webhook-сервис отвечает на /health (HTTP $code)"
-    else
-        print_error "Webhook-сервис не отвечает на /health (HTTP $code)"
-        all_ok=false
-    fi
-
-    # Main mirror internal /health endpoint
-    if [[ "${BITRIX_WEBHOOK_BRIDGE_ENABLED:-false}" == "true" || "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
+    if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
         health_body=$(curl -s --max-time 5 http://127.0.0.1:${MIRROR_HTTP_PORT:-8090}/health 2>/dev/null || true)
         code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:${MIRROR_HTTP_PORT:-8090}/health 2>/dev/null || echo "000")
         if [[ "$code" == "200" ]]; then
             print_ok "Main mirror-process отвечает на internal /health (HTTP $code)"
-            if [[ "${BITRIX_WEBHOOK_BRIDGE_ENABLED:-false}" == "true" ]]; then
-                if grep -q '"bitrix_webhook_bridge_enabled":true' <<< "$health_body"; then
-                    print_ok "Bitrix bridge включён в основном процессе"
-                else
-                    print_error "Main health доступен, но Bitrix bridge не включён в основном процессе"
-                    all_ok=false
-                fi
-            fi
-            if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
-                if grep -q '"telegram_webhook_enabled":true' <<< "$health_body"; then
-                    print_ok "Telegram webhook mode включён в основном процессе"
-                else
-                    print_error "Main health доступен, но Telegram webhook mode не включён"
-                    all_ok=false
-                fi
+            if grep -q '"telegram_webhook_enabled":true' <<< "$health_body"; then
+                print_ok "Telegram webhook mode включён в основном процессе"
+            else
+                print_error "Main health доступен, но Telegram webhook mode не включён"
+                all_ok=false
             fi
         else
             print_error "Main mirror-process не отвечает на internal /health (HTTP $code)"
             all_ok=false
         fi
     else
-        print_info "Internal /health проверка пропущена: main process работает в legacy polling mode"
-    fi
-
-    # Webhook /bitrix/bot endpoint
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-        -X POST http://127.0.0.1:8081/bitrix/bot \
-        -H "Content-Type: application/json" \
-        -d '{}' 2>/dev/null || echo "000")
-    if [[ "$code" == "200" || "$code" == "403" ]]; then
-        print_ok "Endpoint /bitrix/bot доступен (HTTP $code)"
-    else
-        print_error "Endpoint /bitrix/bot недоступен (HTTP $code)"
-        all_ok=false
+        print_info "Internal /health проверка пропущена: main process работает в fetch mode"
     fi
 
     # Monitor dashboard (прямое обращение к upstream, минуя nginx)
@@ -1396,13 +1745,17 @@ print_summary() {
     echo -e "    Файловый кэш:  ${CYAN}${FILE_CACHE_DIR}${RESET}"
     echo -e "    Лог установки:  ${CYAN}${LOG_FILE}${RESET}"
     echo -e "    nginx-конфиг:   ${CYAN}${NGINX_CONF}${RESET}"
+    if [[ "${BACKUP_LOADED:-false}" == "true" ]]; then
+        echo ""
+        print_warn "Установка выполнена из резервной копии."
+        print_warn "Проверьте ${ENV_FILE} — нестандартные переменные из бэкапа могут не попасть в шаблон .env"
+    fi
     echo ""
     echo -e "${BOLD}  URL:${RESET}"
     local scheme="https"
     if [[ "$SKIP_SSL" == true ]]; then
         scheme="http"
     fi
-    echo -e "    Обработчик бота:   ${CYAN}${scheme}://${DOMAIN}/bitrix/bot${RESET}"
     if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
         echo -e "    Telegram webhook:  ${CYAN}${scheme}://${DOMAIN}${TELEGRAM_WEBHOOK_PATH}${RESET}"
     fi
@@ -1416,7 +1769,6 @@ print_summary() {
     echo -e "    Ротация логов:         ${CYAN}ежедневно, 7 дней${RESET}"
     echo -e "    Очистка БД:            ${CYAN}записи старше 7 дней${RESET}"
     echo -e "    Лимит файлов:          ${CYAN}100 МБ / файл, 10 ГБ кэш${RESET}"
-    echo -e "    Bitrix bridge:         ${CYAN}${BITRIX_WEBHOOK_BRIDGE_ENABLED:-false}${RESET}"
     echo -e "    Telegram webhook:      ${CYAN}${TELEGRAM_WEBHOOK_ENABLED:-false}${RESET}"
     if [[ -n "$MONITOR_ALLOWED_IPS" ]]; then
         echo -e "    IP мониторинга:        ${CYAN}${MONITOR_ALLOWED_IPS}${RESET}"
@@ -1432,9 +1784,21 @@ print_summary() {
         echo -e "    ${CYAN}journalctl -u ${svc} -f${RESET}"
     done
     echo ""
-    echo -e "${YELLOW}${BOLD}  ⚠  Не забудьте зарегистрировать бота в Битрикс!${RESET}"
-    echo -e "  URL для поля handler_url при вызове imbot.register:"
-    echo -e "    ${CYAN}${scheme}://${DOMAIN}/bitrix/bot${RESET}"
+    if [[ "${BOT_AUTO_REGISTERED:-false}" != "true" ]]; then
+        echo -e "${YELLOW}${BOLD}  ⚠  Не забудьте зарегистрировать бота через Vibe API!${RESET}"
+        echo -e "  Выполните запрос ${BOLD}POST ${VIBE_BASE_URL:-$VIBE_BASE_URL_DEFAULT}/bots${RESET} со следующим JSON-телом"
+        echo -e "  (заголовок ${BOLD}X-Api-Key: <VIBE_API_KEY>${RESET}, ключ — чтение+запись, скоупы imbot, disk):"
+        echo -e "    ${CYAN}{"
+        echo -e "      \"code\": \"tg_mirror_bot_v2\","
+        echo -e "      \"name\": \"${BITRIX_BOT_NAME:-Telegram Mirror V2}\","
+        echo -e "      \"type\": \"supervisor\","
+        echo -e "      \"eventMode\": \"fetch\""
+        echo -e "    }${RESET}"
+        echo -e "  Сохраните полученный ${BOLD}data.botId${RESET} в ${BOLD}BITRIX_BOT_ID${RESET} в вашем .env файле."
+        echo -e "  Или повторно запустите: ${BOLD}python3 ${INSTALL_DIR}/server-side/register_bot.py \"\$VIBE_API_KEY\"${RESET}"
+    else
+        echo -e "${GREEN}${BOLD}  ✓  Бот автоматически проверен / зарегистрирован через Vibe API!${RESET}"
+    fi
     if [[ "${TELEGRAM_WEBHOOK_ENABLED:-false}" == "true" ]]; then
         echo ""
         echo -e "  Telegram webhook будет автоматически зарегистрирован на URL:"
@@ -1459,6 +1823,21 @@ do_update() {
         exit 1
     fi
 
+    git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
+    if ! git -C "$INSTALL_DIR" diff --quiet || ! git -C "$INSTALL_DIR" diff --cached --quiet; then
+        print_error "В установленном репозитории есть локальные изменения — сначала сохраните или отмените их"
+        exit 1
+    fi
+    print_info "Получение информации о ветке репозитория..."
+    run_cmd git -C "$INSTALL_DIR" fetch --all --prune
+    checkout_update_branch
+    local current_branch
+    current_branch=$(git -C "$INSTALL_DIR" symbolic-ref --quiet --short HEAD)
+    if ! git -C "$INSTALL_DIR" diff --quiet || ! git -C "$INSTALL_DIR" diff --cached --quiet; then
+        print_error "В установленном репозитории есть локальные изменения — сначала сохраните или отмените их"
+        exit 1
+    fi
+
     # ── Защита пользовательских данных ────────────────────────────────────────
     # .env и mirror_state.sqlite3 перечислены в .gitignore и не затрагиваются
     # git pull. Выводим явное подтверждение, чтобы было видно что они целы.
@@ -1470,10 +1849,9 @@ do_update() {
     done
 
     # ── git pull ───────────────────────────────────────────────────────────────
-    git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
     print_info "Получение обновлений из репозитория..."
     local _pull_output _pull_exit
-    _pull_output=$(git -C "$INSTALL_DIR" pull 2>&1) || _pull_exit=$?
+    _pull_output=$(git -C "$INSTALL_DIR" pull --ff-only 2>&1) || _pull_exit=$?
     log "CMD: git -C $INSTALL_DIR pull"
     log "OUTPUT: $_pull_output"
     # Show output line-by-line so user can see what happened
@@ -1552,6 +1930,17 @@ do_uninstall() {
     fi
 
     print_step "Удаление бота"
+    local remove_bitrix_bot="y"
+    echo -en "${YELLOW}Удалить созданного бота в Bitrix24? (Y/n): ${RESET}"
+    read -r remove_bitrix_bot
+    if [[ -z "$remove_bitrix_bot" || "${remove_bitrix_bot,,}" == "y" || "${remove_bitrix_bot,,}" == "да" ]]; then
+        if [[ -f "$ENV_FILE" ]] && ! unregister_bitrix_bot 1; then
+            print_error "Удаление остановлено: регистрация бота в Bitrix24 не подтверждена"
+            return 1
+        fi
+    else
+        print_info "Бот Bitrix24 сохранён. При следующей установке используйте тот же VIBE_API_KEY — существующий бот будет подхвачен автоматически."
+    fi
 
     for svc in "${SERVICES[@]}"; do
         systemctl stop "$svc" 2>/dev/null || true
@@ -1575,6 +1964,9 @@ do_uninstall() {
     # Remove logrotate config
     rm -f /etc/logrotate.d/bitrix-bot
     print_ok "Logrotate: конфиг бота удалён"
+
+    rm -f "/etc/sudoers.d/${SVC_USER}-services"
+    print_ok "Sudoers-правило удалено"
 
     # Remove file cache
     rm -rf "$FILE_CACHE_DIR"
@@ -1619,7 +2011,7 @@ load_config_file() {
                 val="${val#\'}"
                 export "$key"="$val"
                 # Скрываем вывод для секретных переменных
-                if [[ "$key" =~ TOKEN|SECRET|PASSWORD|WEBHOOK ]]; then
+                if [[ "$key" =~ TOKEN|SECRET|PASSWORD|WEBHOOK|CLIENT_ID|BOT_ID|CODE ]]; then
                     print_ok "Загружено: $key=********"
                   else
                       print_ok "Загружено: $key=$val"
@@ -1637,6 +2029,7 @@ main() {
     mkdir -p "$(dirname "$LOG_FILE")"
     [[ -f "$LOG_FILE" ]] && mv -f "$LOG_FILE" "${LOG_FILE}.old"
     touch "$LOG_FILE"
+    chmod 600 "$LOG_FILE"
 
     CONFIG_FILE_PATH=""
     local action="install"
@@ -1651,6 +2044,10 @@ main() {
                 action="uninstall"
                 shift
                 ;;
+            --unregister-bot)
+                action="unregister-bot"
+                shift
+                ;;
             -c|--config|--config-file)
                 if [[ -n "${2-}" ]]; then
                     CONFIG_FILE_PATH="$2"
@@ -1661,13 +2058,24 @@ main() {
                 fi
                 ;;
             *)
-                echo "Использование: $0 [--update | --uninstall | -c <путь_к_конфигу>]"
+                echo "Использование: $0 [--update | --uninstall | --unregister-bot | -c <путь_к_конфигу>]"
                 exit 1
                 ;;
         esac
     done
 
     case "$action" in
+        unregister-bot)
+            check_root
+            echo "Удаление регистрации отключит обмен с Bitrix24. Локальные данные сохранятся."
+            echo -n "Для подтверждения введите yes: "
+            read -r confirm
+            if [[ "$confirm" == "yes" ]]; then
+                unregister_bitrix_bot 1
+            else
+                echo "Отменено."
+            fi
+            ;;
         update)
             do_update
             ;;
@@ -1686,18 +2094,26 @@ main() {
             step_python_deps
             step_create_service_user
             step_configure_ssh
+            step_restore_backup
             step_collect_config
             step_write_env
             step_setup_ssl
             step_configure_nginx
-            step_create_services
-            step_setup_telegram_webhook
+            step_create_services --no-start
             step_setup_fail2ban
             step_setup_firewall
             step_setup_logrotate
             step_create_file_cache
             step_init_db
+            step_restore_db_from_backup
             step_setup_admins
+            run_cmd systemctl daemon-reload
+            for svc in "${SERVICES[@]}"; do
+                run_cmd systemctl start "$svc"
+                print_ok "Сервис $svc запущен"
+            done
+            sleep 3
+            step_setup_telegram_webhook || exit 1
             step_health_checks
             print_summary
             ;;

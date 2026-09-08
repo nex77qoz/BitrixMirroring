@@ -2,18 +2,39 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import os
 
+import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from telegram import Update
-from telegram.ext import AIORateLimiter, Application, CallbackQueryHandler, CommandHandler, MessageHandler, MessageReactionHandler, filters
+from telegram.ext import (
+    AIORateLimiter,
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    MessageReactionHandler,
+    filters,
+)
 from telegram.request import HTTPXRequest
-import uvicorn
 
 from bitrix_client import BitrixClient
-from handlers import cmd_clear, cmd_connect, cmd_disconnect, cmd_start, cmd_whereami, on_admin_callback, on_edited_message, on_message, on_message_reaction, on_private_admin_message
+from handlers import (
+    cmd_clear,
+    cmd_connect,
+    cmd_disconnect,
+    cmd_start,
+    cmd_whereami,
+    on_admin_callback,
+    on_edited_message,
+    on_message,
+    on_message_reaction,
+    on_private_admin_message,
+)
 from mirror_service import MirrorService
 from mirror_state_store import MirrorStateStore
 from settings import Settings
@@ -85,23 +106,47 @@ def _build_application(settings: Settings, bitrix: BitrixClient, mirror: MirrorS
 def _build_http_app(settings: Settings, application: Application, mirror: MirrorService) -> FastAPI:
     app = FastAPI()
 
-    @app.get("/health")
-    async def health() -> dict[str, object]:
+    @app.get("/health", response_model=None)
+    async def health() -> dict[str, object] | JSONResponse:
         webhook_status = application.bot_data.get("telegram_webhook_status", {})
-        return {
-            "ok": True,
+        checks: dict[str, object] = {}
+
+        try:
+            state_store = getattr(mirror, "state_store", None)
+            if state_store is not None:
+                await state_store.load_bitrix_event_offset(settings.bitrix_bot_id)
+                checks["db"] = "ok"
+            else:
+                checks["db"] = "no_state_store"
+        except Exception as exc:
+            checks["db"] = {"error": str(exc) or type(exc).__name__}
+
+        bitrix_event_task = getattr(mirror, "_bitrix_event_task", None)
+        if bitrix_event_task is not None:
+            checks["bitrix_event_fetcher_alive"] = not bitrix_event_task.done()
+        elif settings.sync_bitrix_to_telegram:
+            checks["bitrix_event_fetcher_alive"] = "not_started"
+        else:
+            checks["bitrix_event_fetcher_alive"] = "disabled"
+
+        fetcher_status = checks.get("bitrix_event_fetcher_alive")
+        healthy = checks.get("db") == "ok" and (fetcher_status is True or fetcher_status == "disabled")
+        response = {
+            "ok": healthy,
             "telegram_webhook_enabled": settings.telegram_webhook_enabled,
-            "bitrix_webhook_bridge_enabled": settings.bitrix_webhook_bridge_enabled,
             "forwarding_enabled": mirror.is_forwarding_enabled(),
             "telegram_webhook_status": webhook_status,
+            "checks": checks,
         }
+        if not healthy:
+            return JSONResponse(status_code=503, content=response)
+        return response
 
     def _verify_internal_secret(request: Request) -> None:
         expected_secret = settings.mirror_internal_webhook_secret or ""
         if not expected_secret:
-            raise HTTPException(status_code=503, detail="Internal webhook secret is not configured")
-        provided_secret = request.headers.get("X-Internal-Webhook-Secret", "")
-        if expected_secret != provided_secret:
+            raise HTTPException(status_code=503, detail="Internal control secret is not configured")
+        if not hmac.compare_digest(expected_secret, request.headers.get("X-Internal-Webhook-Secret", "")):
             raise HTTPException(status_code=403, detail="Forbidden")
 
     @app.get("/internal/forwarding")
@@ -116,32 +161,13 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
         enabled = payload.get("enabled")
         if not isinstance(enabled, bool):
             raise HTTPException(status_code=400, detail="enabled must be a boolean")
-        current = await mirror.set_forwarding_enabled(enabled)
-        return {"ok": True, "forwarding_enabled": current}
+        return {"ok": True, "forwarding_enabled": await mirror.set_forwarding_enabled(enabled)}
 
-    @app.post(settings.mirror_internal_event_path)
-    async def bitrix_event_bridge(request: Request) -> dict[str, object]:
-        if not settings.bitrix_webhook_bridge_enabled:
-            raise HTTPException(status_code=404, detail="Bitrix webhook bridge is disabled")
-
+    @app.post("/internal/mappings/reload")
+    async def reload_mappings(request: Request) -> dict[str, object]:
         _verify_internal_secret(request)
-
-        payload = await request.json()
-        dialog_id = str(payload.get("dialog_id") or "").strip()
-        if not dialog_id:
-            raise HTTPException(status_code=400, detail="dialog_id is required")
-
-        event_name = str(payload.get("event") or "bitrix-webhook").strip() or "bitrix-webhook"
-
-        message_id_raw = payload.get("message_id")
-        message_id: int | None = int(message_id_raw) if isinstance(message_id_raw, (int, float)) else None
-        reply_id_raw = payload.get("reply_id")
-        reply_id: int | None = int(reply_id_raw) if isinstance(reply_id_raw, (int, float)) else None
-
-        accepted = await mirror.schedule_bitrix_dialog_sync(
-            dialog_id, trigger=event_name, message_id=message_id, reply_id=reply_id,
-        )
-        return {"ok": True, "accepted": accepted}
+        await mirror.reload_mappings()
+        return {"ok": True}
 
     @app.post(settings.telegram_webhook_path)
     async def telegram_webhook(request: Request) -> dict[str, object]:
@@ -149,8 +175,10 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
             raise HTTPException(status_code=404, detail="Telegram webhook is disabled")
 
         expected_secret = settings.telegram_webhook_secret or ""
+        if not expected_secret:
+            raise HTTPException(status_code=503, detail="Telegram webhook secret is not configured")
         provided_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if expected_secret != provided_secret:
+        if not hmac.compare_digest(expected_secret, provided_secret):
             raise HTTPException(status_code=403, detail="Forbidden")
 
         payload = await request.json()
@@ -202,10 +230,9 @@ async def _run_combined_runtime(settings: Settings, bitrix: BitrixClient, mirror
     await application.start()
     await mirror.start(application)
     logger.info(
-        "Combined runtime started. host=%s port=%s bitrix_bridge=%s telegram_webhook=%s",
+        "Combined runtime started. host=%s port=%s telegram_webhook=%s",
         settings.mirror_http_host,
         settings.mirror_http_port,
-        settings.bitrix_webhook_bridge_enabled,
         settings.telegram_webhook_enabled,
     )
 
@@ -267,16 +294,15 @@ def main() -> None:
 
     logger = logging.getLogger("tg-bitrix-mirror")
     logger.info(
-        "Starting bot. chat_mappings=%s proxy=%s tg_to_bitrix=%s bitrix_to_tg=%s tg_webhook=%s bitrix_bridge=%s",
+        "Starting bot. chat_mappings=%s proxy=%s tg_to_bitrix=%s bitrix_to_tg=%s tg_webhook=%s",
         [(m.tg_chat_id, m.bitrix_dialog_id) for m in settings.chat_mappings],
         settings.socks5_proxy_url,
         settings.sync_telegram_to_bitrix,
         settings.sync_bitrix_to_telegram,
         settings.telegram_webhook_enabled,
-        settings.bitrix_webhook_bridge_enabled,
     )
 
-    if settings.telegram_webhook_enabled or settings.bitrix_webhook_bridge_enabled:
+    if settings.telegram_webhook_enabled:
         asyncio.run(_run_combined_runtime(settings, bitrix, mirror))
         return
 

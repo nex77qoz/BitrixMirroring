@@ -2,7 +2,7 @@
 
 Бот и набор сервисов для двустороннего зеркалирования сообщений между **Telegram-группами** и **Битрикс24-чатами**.
 
-Проект решает практическую задачу: сотрудники могут общаться в привычном Telegram-чате, а сообщения, правки, реакции и часть вложений синхронизируются с соответствующим диалогом в Битрикс24. В обратную сторону сервис может работать как через polling, так и через webhook bridge для почти мгновенной доставки из Bitrix в Telegram.
+Проект решает практическую задачу: сотрудники могут общаться в привычном Telegram-чате, а сообщения, правки, реакции и часть вложений синхронизируются с соответствующим диалогом в Битрикс24. Bitrix-сторона работает через **Vibe API (бот-платформу Битрикс24)**: сервис опрашивает события бота через `GET /v1/bots/:botId/events` (Chatbot API 2.0 Fetch Mode) для надёжной последовательной доставки событий из Bitrix в Telegram.
 
 ## Что умеет проект
 
@@ -15,17 +15,16 @@
 - хранить служебное состояние в **SQLite** без сохранения полного текста переписки;
 - автоматически подавлять циклы и повторную доставку уже отражённых сообщений;
 - управлять маппингами чатов через **веб-панель мониторинга**;
-- отдельно запускать **webhook-обработчик Битрикс** и **dashboard мониторинга**.
+- отдельно запускать **dashboard мониторинга**.
 
 ## Состав репозитория
 
-- `main.py` — точка входа основного Telegram-бота, который принимает апдейты через polling и запускает сервис зеркалирования.
-- `mirror_service.py` — основная логика двусторонней синхронизации, очереди отправки, polling Битрикс и подавления дублей.
+- `main.py` — точка входа основного Telegram-бота и HTTP-сервера для health-проверок.
+- `mirror_service.py` — основная логика двусторонней синхронизации, очереди отправки, fetch loop Битрикс и подавления дублей.
 - `bitrix_client.py` — клиент для вызова Битрикс REST API, отправки сообщений, обновлений, лайков и загрузки файлов.
 - `handlers.py` — обработчики Telegram-команд, обычных сообщений, редактирований и реакций.
 - `mirror_state_store.py` — SQLite-хранилище курсоров, связей между сообщениями и состояния реакций.
 - `settings.py` — загрузка и валидация конфигурации из переменных окружения.
-- `server-side/app.py` — FastAPI webhook для событий Битрикс-бота.
 - `server-side/monitor_app.py` — административная web UI для мониторинга и редактирования маппингов.
 - `DEPLOYMENT.md` — подробная инструкция по установке на сервер с `systemd` и `nginx`.
 
@@ -34,12 +33,10 @@
 В типовой схеме используются три независимых процесса:
 
 1. **Mirror service** — основной процесс, который:
-  - получает апдейты Telegram через polling или webhook;
+   - получает апдейты Telegram через polling или webhook;
    - отправляет новые сообщения в Битрикс;
-  - периодически опрашивает Битрикс и возвращает новые сообщения в Telegram;
-  - при включённом bridge принимает внутренние Bitrix webhook-события и немедленно запускает sync для нужного dialog_id.
-2. **Bitrix webhook service** — HTTP endpoint для событий Битрикс-бота.
-3. **Monitoring dashboard** — web-интерфейс для просмотра состояния сервиса, логов и управления связкой чатов.
+   - запускает фоновый fetch loop, опрашивающий события Битрикс через Vibe API (`GET /v1/bots/:botId/events`).
+2. **Monitoring dashboard** — HTTP endpoint и web-интерфейс для просмотра состояния сервиса, логов и управления связкой чатов.
 
 ## Как это работает
 
@@ -58,15 +55,12 @@
 
 ### Битрикс → Telegram
 
-Для каждого настроенного `bitrix_dialog_id` запускается отдельный polling loop:
+Запускается единый fetch-цикл событий Битрикс:
 
-1. сервис читает последний обработанный курсор;
-2. забирает новые сообщения из Битрикс;
-3. отфильтровывает служебные и уже зеркалированные сообщения;
-4. пересылает текст или вложение в Telegram;
-5. обновляет курсор и таблицу связей.
-
-Если включён `BITRIX_WEBHOOK_BRIDGE_ENABLED=true`, входящий Bitrix webhook из `server-side/app.py` дополнительно будит синхронизацию немедленно через внутренний endpoint main-процесса. Это позволяет убрать типичную задержку в несколько секунд, не отказываясь от polling как от fallback-механизма.
+1. сервис читает последний обработанный offset событий для бота;
+2. опрашивает новые события через Vibe API (`GET /v1/bots/:botId/events`);
+3. обрабатывает новые сообщения (ONIMBOTV2MESSAGEADD), редактирования (ONIMBOTV2MESSAGEUPDATE), удаления (ONIMBOTV2MESSAGEDELETE) и изменения реакций (ONIMBOTV2REACTIONCHANGE);
+4. последовательно сохраняет прогресс (offset) после каждого успешного события.
 
 ### Редактирования и реакции
 
@@ -78,12 +72,28 @@
 
 - Python **3.11+** рекомендуется;
 - доступ к **Telegram Bot API**;
-- доступ к **Битрикс24 REST API** через входящий webhook;
+- доступ к **Vibe API (бот-платформа Битрикс24)** — личный ключ `vibe_api_...` со скоупами `imbot, disk` в режиме чтения+записи (https://vibecode.bitrix24.tech/keys);
 - для production-развёртывания: Linux-сервер, `systemd`, `nginx` и при необходимости TLS.
 
 ## Установка и быстрый старт
 
 ### Автоматическая установка на сервер (рекомендуется)
+
+Терминальное меню управления (Python 3, без дополнительных зависимостей):
+
+```bash
+sudo python3 tui.py
+# После установки:
+sudo python3 /opt/bitrix-bot/tui.py
+```
+
+Выберите цифру и нажмите Enter: установка, полное удаление, обновление,
+статус systemd-сервисов, ID бота Bitrix24, маппинги чатов или удаление регистрации бота.
+Меню управляет установкой `/opt/bitrix-bot`; маппинги читает из
+`MIRROR_STATE_DB_PATH` в её `.env` (SQLite открывается только для чтения).
+Полное удаление стирает локальные данные и снимает регистрацию бота;
+отдельное удаление регистрации сохраняет локальные данные, но отключает обмен с Bitrix24.
+Ошибки операций выводятся перед возвратом в меню. Выход: `0`, Ctrl+C или Ctrl+D.
 
 Склонируйте репозиторий и запустите установщик — он сам определит URL и ветку репозитория:
 
@@ -140,16 +150,19 @@ cp env.example .env
 Минимально нужно заполнить:
 
 - `TELEGRAM_BOT_TOKEN`
-- `BITRIX_WEBHOOK_BASE`
+- `VIBE_API_KEY`
 - хотя бы одну связку чатов:
   - `CHAT_MAPPING_1`, `CHAT_MAPPING_2`, ...
   - или `CHAT_MAPPINGS`
   - или legacy-пару `BITRIX_DIALOG_ID` + `ALLOWED_TELEGRAM_CHAT_ID`
 
-Если хотите отправлять сообщения в Битрикс **от имени зарегистрированного чат-бота**, дополнительно настройте:
+Бот регистрируется один раз через Vibe API (команда `POST /v1/bots` с `type=supervisor`, `eventMode=fetch`) — скриптом `server-side/register_bot.py` или автоматически установщиком:
 
-- `BITRIX_BOT_CLIENT_ID`
-- при необходимости `BITRIX_BOT_ID`
+```bash
+python3 server-side/register_bot.py "$VIBE_API_KEY" "" "Telegram Mirror V2"
+```
+
+Полученный `bot_id` нужно записать в `BITRIX_BOT_ID`, а бота добавить во все зеркалируемые чаты Битрикс24.
 
 #### 4. Запуск основного mirror-сервиса
 
@@ -165,19 +178,6 @@ python main.py
 - `/whereami` — показывает `chat_id`, тип чата, название и `message_thread_id`.
 
 ## Запуск дополнительных сервисов
-
-### Битрикс webhook сервис
-
-```bash
-uvicorn server-side.app:app --host 127.0.0.1 --port 8081
-```
-
-Доступные маршруты:
-
-- `GET /health`
-- `POST /bitrix/bot`
-
-Этот сервис полезен, если вы используете Bitrix bot events и хотите принимать webhook-события отдельно от основного polling-процесса. При настройке `MIRROR_INTERNAL_BASE_URL` и `MIRROR_INTERNAL_WEBHOOK_SECRET` он может не просто логировать события, а сразу пробрасывать их в основной mirror-service.
 
 ### Дэшборд мониторинг
 
@@ -203,7 +203,7 @@ export MONITOR_PASSWORD='change-me'
 ### Обязательные
 
 - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота.
-- `BITRIX_WEBHOOK_BASE` — базовый URL входящего Битрикс webhook.
+- `VIBE_API_KEY` — личный ключ Vibe API (режим чтение+запись, скоупы `imbot, disk`); при необходимости `VIBE_BASE_URL` (по умолчанию `https://vibecode.bitrix24.tech/v1`).
 - одна из схем маппинга чатов:
   - `CHAT_MAPPING_1=-1001234567890:chat2941`
   - `CHAT_MAPPING_2=-1001234567891:chat2942`
@@ -211,8 +211,8 @@ export MONITOR_PASSWORD='change-me'
 
 ### Отправка в Битрикс от имени чат-бота
 
-- `BITRIX_BOT_ID`
-- `BITRIX_BOT_CLIENT_ID`
+- `BITRIX_BOT_ID` — числовой ID бота, выданный `POST /v1/bots` (бот привязан к API-ключу, которым зарегистрирован).
+- `BITRIX_MAX_UPLOAD_FILE_BYTES` — потолок загружаемого в Битрикс файла (по умолчанию 31457280 = 30 МиБ; Vibe принимает тело до 40 МиБ).
 
 ### Форматирование сообщений
 
@@ -241,13 +241,10 @@ export MONITOR_PASSWORD='change-me'
 - `BITRIX_POLL_ERROR_BACKOFF_SECONDS=2`
 - `BITRIX_POLL_MAX_BACKOFF_SECONDS=30`
 
-### Webhook bridge и Telegram webhook
+### Telegram webhook
 
-- `BITRIX_WEBHOOK_BRIDGE_ENABLED=true` — включает внутренний bridge Bitrix webhook -> main.py.
 - `MIRROR_HTTP_HOST=127.0.0.1`
 - `MIRROR_HTTP_PORT=8090`
-- `MIRROR_INTERNAL_EVENT_PATH=/internal/bitrix/event`
-- `MIRROR_INTERNAL_WEBHOOK_SECRET=...`
 - `TELEGRAM_WEBHOOK_ENABLED=true` — переводит Telegram-бот на webhook вместо polling.
 - `TELEGRAM_WEBHOOK_PUBLIC_URL=https://bot.example.com`
 - `TELEGRAM_WEBHOOK_PATH=/telegram/webhook`
@@ -257,8 +254,7 @@ export MONITOR_PASSWORD='change-me'
 
 Monitoring dashboard также показывает:
 
-- отдельную карточку Telegram webhook: expected URL, actual URL, pending updates и последнюю ошибку Telegram API;
-- отдельную карточку Bitrix bridge: доступность main health endpoint, целевой internal event URL и факт того, что bridge действительно включён в основном mirror-процессе.
+- отдельную карточку Telegram webhook: expected URL, actual URL, pending updates и последнюю ошибку Telegram API.
 
 ### Производительность
 
@@ -320,7 +316,7 @@ ALLOWED_TELEGRAM_CHAT_ID=-1001234567890
 - Поддерживаются только **группы** и **супергруппы** Telegram.
 - Сообщения от Telegram-ботов игнорируются, чтобы избежать зацикливания.
 - Часть служебных Telegram-событий не зеркалируется.
-- Для Битрикс → Telegram используется polling, поэтому доставка не мгновенная, а с интервалом `BITRIX_POLL_INTERVAL_SECONDS`.
+- Для Битрикс → Telegram используется fetch-опрос событий, поэтому доставка происходит с интервалом `BITRIX_POLL_INTERVAL_SECONDS` при отсутствии новых событий.
 - При большом количестве чатов важно корректно настроить `BITRIX_MAX_CONCURRENT_REQUESTS` и число воркеров.
 
 ## Production deployment
@@ -331,7 +327,6 @@ ALLOWED_TELEGRAM_CHAT_ID=-1001234567890
 
 В каталоге `server-side/` уже лежат готовые шаблоны для production:
 
-- `bitrix-bot.service`
 - `bitrix-telegram-mirror.service`
 - `bitrix-monitor.service`
 - пример env-файла

@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import threading
+import unittest
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any, ClassVar
+
+REGISTER_BOT = Path(__file__).parents[1] / "server-side" / "register_bot.py"
+
+
+class _VibeStub(BaseHTTPRequestHandler):
+    scenario: ClassVar[dict[str, Any]] = {}
+    requests: ClassVar[list[dict[str, object]]] = []
+
+    def _send(self, status: int, payload: dict[str, object]) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _record(self, method: str, body: dict[str, object] | None = None) -> None:
+        type(self).requests.append({
+            "method": method,
+            "path": urllib.parse.urlparse(self.path).path,
+            "api_key": self.headers.get("X-Api-Key"),
+            "body": body,
+        })
+
+    def do_GET(self) -> None:
+        self._record("GET")
+        routes = self.scenario.get("get", {})
+        path = urllib.parse.urlparse(self.path).path
+        if path in routes:
+            status, payload = routes[path]
+            self._send(status, payload)
+            return
+        if path == "/v1/me":
+            self._send(200, {"success": True, "data": {"scopes": ["imbot", "disk"], "accessMode": "READWRITE", "status": "active"}})
+            return
+        if path.startswith("/v1/bots/"):
+            bot_id = path.rsplit("/", 1)[-1]
+            self._send(200, {"success": True, "data": {"bot": {"id": int(bot_id), "active": True}}})
+            return
+        self._send(404, {"success": False, "error": {"code": "BOT_NOT_FOUND", "message": "no"}})
+
+    def do_POST(self) -> None:
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+        body = json.loads(raw or b"{}")
+        self._record("POST", body)
+        status, payload = self.scenario.get("post", (500, {"success": False, "error": {"code": "?"}}))
+        self._send(status, payload)
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+class RegisterBotVibeTest(unittest.TestCase):
+    def _run(self, scenario: dict[str, object], args: list[str], *, expect_ok: bool = True) -> tuple[dict[str, str], list[dict[str, object]]]:
+        _VibeStub.scenario = scenario
+        _VibeStub.requests = []
+        server = HTTPServer(("127.0.0.1", 0), _VibeStub)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+            result = subprocess.run(
+                [sys.executable, str(REGISTER_BOT), "vibe_api_test", *args],
+                capture_output=True, text=True, timeout=30,
+                env={"VIBE_BASE_URL": base, "PATH": "/usr/bin:/bin"},
+            )
+            expected_rc = 0 if expect_ok else 1
+            self.assertEqual(result.returncode, expected_rc, result.stdout + result.stderr)
+            fields: dict[str, str] = {}
+            for line in result.stdout.splitlines():
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    fields[key] = value
+            return fields, list(_VibeStub.requests)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_registers_new_supervisor_bot_with_default_name(self) -> None:
+        # No name argument -> register_bot falls back to the product default,
+        # which must be "Telegram Mirror V2" (bot code stays tg_mirror_bot_v2;
+        # botId is platform-assigned and passed through unchanged).
+        fields, requests = self._run(
+            {
+                "get": {"/v1/bots": (200, {"success": True, "data": {"bots": []}})},
+                "post": (201, {"success": True, "data": {"botId": 42}}),
+            },
+            [],
+        )
+        self.assertEqual(fields["status"], "ok")
+        self.assertEqual(fields["action"], "registered")
+        self.assertEqual(fields["bot_id"], "42")
+        self.assertEqual(fields["bot_token"], "")
+        post = next(r for r in requests if r["method"] == "POST")
+        self.assertEqual(post["path"], "/v1/bots")
+        self.assertEqual(post["api_key"], "vibe_api_test")
+        self.assertEqual(
+            post["body"],
+            {"code": "tg_mirror_bot_v2", "name": "Telegram Mirror V2", "type": "supervisor", "eventMode": "fetch"},
+        )
+
+    def test_keeps_existing_bot_id_under_this_key(self) -> None:
+        fields, requests = self._run(
+            {"get": {"/v1/bots/42": (200, {"success": True, "data": {"botId": 42, "active": True}})}},
+            ["42"],
+        )
+        self.assertEqual(fields["status"], "ok")
+        self.assertEqual(fields["action"], "kept")
+        self.assertEqual(fields["bot_id"], "42")
+        self.assertEqual([r for r in requests if r["method"] == "POST"], [])
+
+    def test_reuses_existing_bot_from_list(self) -> None:
+        # GET /v1/bots names the numeric id "id" (not "botId"); a second install
+        # with the same key must adopt the existing bot, not re-register it.
+        fields, requests = self._run(
+            {"get": {"/v1/bots": (200, {"success": True, "data": {"bots": [{"id": 55, "code": "tg_mirror_bot_v2"}]}})}},
+            ["", "Telegram Mirror"],
+        )
+        self.assertEqual(fields["status"], "ok")
+        self.assertEqual(fields["action"], "existing")
+        self.assertEqual(fields["bot_id"], "55")
+        self.assertEqual([r for r in requests if r["method"] == "POST"], [])
+
+    def test_reuses_suffixed_bot_when_base_was_taken(self) -> None:
+        # server #1 got a suffix code (base was foreign-held); server #2 adopts it
+        fields, requests = self._run(
+            {"get": {"/v1/bots": (200, {"success": True, "data": {"bots": [{"id": 61, "code": "tg_mirror_bot_v2_2"}]}})}},
+            ["", "Telegram Mirror"],
+        )
+        self.assertEqual(fields["action"], "existing")
+        self.assertEqual(fields["bot_id"], "61")
+        self.assertEqual([r for r in requests if r["method"] == "POST"], [])
+
+    def test_prefers_base_code_over_suffix_variant(self) -> None:
+        fields, _ = self._run(
+            {"get": {"/v1/bots": (200, {"success": True, "data": {"bots": [
+                {"id": 61, "code": "tg_mirror_bot_v2_2"},
+                {"id": 42, "code": "tg_mirror_bot_v2"},
+            ]}})}},
+            ["", "Telegram Mirror"],
+        )
+        self.assertEqual(fields["action"], "existing")
+        self.assertEqual(fields["bot_id"], "42")
+
+    def test_409_with_bot_id_reports_foreign_owner(self) -> None:
+        fields, _ = self._run(
+            {
+                "get": {"/v1/bots": (200, {"success": True, "data": {"bots": []}})},
+                "post": (409, {"success": False, "error": {"code": "BOT_ALREADY_EXISTS", "message": "exists"}, "data": {"botId": 99, "code": "tg_mirror_bot_v2"}}),
+            },
+            ["", "Telegram Mirror"],
+            expect_ok=False,
+        )
+        self.assertEqual(fields["status"], "error")
+        self.assertIn("transfer", fields["message"])
+
+    def test_readonly_key_error_is_reported_with_hint(self) -> None:
+        fields, _ = self._run(
+            {
+                "get": {"/v1/bots": (200, {"success": True, "data": {"bots": []}})},
+                "post": (403, {"success": False, "error": {"code": "WRITE_BLOCKED_READONLY_KEY", "message": "read-only"}}),
+            },
+            ["", "Telegram Mirror"],
+            expect_ok=False,
+        )
+        self.assertEqual(fields["status"], "error")
+        self.assertIn("READWRITE", fields["message"])
+
+    def test_stdout_contract_keys_are_present(self) -> None:
+        fields, _ = self._run(
+            {"get": {"/v1/bots/42": (200, {"success": True, "data": {"id": 42, "code": "tg_mirror_bot_v2", "active": True}})}},
+            ["42"],
+        )
+        self.assertEqual(set(fields), {"status", "action", "bot_id", "bot_token", "message"})
+
+    def test_rejects_key_without_imbot_scope(self) -> None:
+        fields, _ = self._run(
+            {"get": {"/v1/bots": (200, {"success": True, "data": {"bots": [{"id": 55, "code": "tg_mirror_bot_v2"}]}}),
+                    "/v1/me": (200, {"success": True, "data": {"scopes": ["disk"], "accessMode": "READWRITE", "status": "active"}})}},
+            ["", "Telegram Mirror"], expect_ok=False,
+        )
+        self.assertIn("imbot", fields["message"])
+
+    def test_rejects_inactive_bot(self) -> None:
+        fields, _ = self._run(
+            {"get": {"/v1/bots": (200, {"success": True, "data": {"bots": [{"id": 55, "code": "tg_mirror_bot_v2"}]}}),
+                    "/v1/bots/55": (200, {"success": True, "data": {"bot": {"id": 55, "active": False}}})}},
+            ["", "Telegram Mirror"], expect_ok=False,
+        )
+        self.assertIn("неактивен", fields["message"])
+
+
+class InstallRegistrationWiringTest(unittest.TestCase):
+    """install.sh must call register_bot with the Vibe key and keep the Vibe DELETE contract."""
+
+    def test_install_invokes_register_bot_with_vibe_api_key(self) -> None:
+        source = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('python3 "$reg_script" "$VIBE_API_KEY"', source)
+        self.assertNotIn("BITRIX_WEBHOOK_BASE", source)
+        self.assertNotIn("BITRIX_BOT_CLIENT_ID", source)
+
+    def test_uninstall_can_keep_bot_for_reuse_on_next_install(self) -> None:
+        source = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
+        uninstall = source[source.index("do_uninstall() {"):]
+        self.assertIn("Удалить созданного бота в Bitrix24?", uninstall)
+        self.assertIn("Бот Bitrix24 сохранён", uninstall)
+        self.assertIn("используйте тот же VIBE_API_KEY", uninstall)
+        self.assertNotIn('source "$ENV_FILE"', source)
+
+    def test_manual_registration_hint_uses_vibe_payload(self) -> None:
+        source = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
+        summary = source[source.index("print_summary()") :]
+        self.assertIn("tg_mirror_bot_v2", summary)
+        self.assertIn("supervisor", summary)
+        self.assertIn("eventMode", summary)
+        self.assertNotIn("imbot.v2.Bot.register", summary)
+
+    def test_telegram_webhook_check_reports_request_and_transport_details(self) -> None:
+        source = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("GET https://api.telegram.org/bot<скрыт>/getWebhookInfo", source)
+        self.assertIn("HTTP ${webhook_http_code}, curl exit ${webhook_curl_exit}", source)
+        self.assertIn("webhook_api_error", source)
+
+
+if __name__ == "__main__":
+    unittest.main()

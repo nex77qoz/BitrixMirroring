@@ -17,3 +17,6 @@ bitrix.log
 .roo/
 .claude/
 docs/
+graphify-out/
+opencode.json
+test_config.env

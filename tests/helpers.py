@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from models import BitrixBotEvent
 from settings import ChatMapping, Settings
 
 
@@ -25,9 +26,9 @@ def make_mapping(
 def make_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "telegram_bot_token": "token",
-        "bitrix_webhook_base": "https://example.bitrix24.ru/rest/1/token",
+        "vibe_api_key": "vibe-test-key",
+        "vibe_base_url": "https://vibe.example.com/v1",
         "bitrix_bot_id": 7,
-        "bitrix_bot_client_id": "bot-token",
         "chat_mappings": (make_mapping(),),
         "prefix_with_chat_title": False,
         "prefix_with_sender": True,
@@ -45,16 +46,14 @@ def make_settings(**overrides: object) -> Settings:
         "bitrix_poll_max_backoff_seconds": 0.2,
         "bitrix_max_concurrent_requests": 2,
         "bitrix_send_queue_maxsize": 10,
-        "bitrix_send_workers": 1,
         "bitrix_rescan_recent_messages_limit": 20,
         "max_file_size_bytes": 1024 * 1024,
         "file_cache_dir": "",
+        "bitrix_max_upload_file_bytes": 31457280,
         "file_cache_max_bytes": 10 * 1024 * 1024,
         "db_cleanup_max_age_seconds": 3600,
         "mirror_http_host": "127.0.0.1",
         "mirror_http_port": 8090,
-        "bitrix_webhook_bridge_enabled": True,
-        "mirror_internal_event_path": "/internal/bitrix/event",
         "mirror_internal_webhook_secret": "internal-secret",
         "telegram_webhook_enabled": True,
         "telegram_webhook_path": "/telegram/webhook",
@@ -108,3 +107,33 @@ def make_message(**overrides: object) -> SimpleNamespace:
     values.update(overrides)
     return SimpleNamespace(**values)
 
+
+def make_bitrix_event(
+    event_type: str = "ONIMBOTV2MESSAGEADD",
+    *,
+    event_id: int = 101,
+    dialog_id: str = "chat42",
+    message_id: int = 789,
+    text: str = "hello",
+    author_id: int = 41,
+    chat_name: str | None = None,
+) -> BitrixBotEvent:
+    chat: dict[str, object] = {"id": 42, "dialogId": dialog_id}
+    if chat_name is not None:
+        chat["name"] = chat_name
+    return BitrixBotEvent(
+        event_id=event_id,
+        event_type=event_type,
+        data={
+            "bot": {"id": 7},
+            "message": {
+                "id": message_id,
+                "chatId": 42,
+                "authorId": author_id,
+                "text": text,
+                "params": {},
+            },
+            "chat": chat,
+            "user": {"id": author_id, "firstName": "Ivan", "lastName": "Petrov"},
+        },
+    )

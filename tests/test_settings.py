@@ -24,33 +24,49 @@ class SettingsTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             env = {
                 "TELEGRAM_BOT_TOKEN": "token",
-                "BITRIX_WEBHOOK_BASE": "https://example.bitrix24.ru/rest/1/token/",
+                "VIBE_API_KEY": " vibe_api_test ",
+                "VIBE_BASE_URL": "https://vibe.example.com/v1/",
                 "BITRIX_BOT_ID": "12",
-                "BITRIX_BOT_CLIENT_ID": "client-token",
+                "BITRIX_MAX_UPLOAD_FILE_BYTES": "2048",
                 "MIRROR_STATE_DB_PATH": os.path.join(tmpdir, "state.sqlite3"),
                 "ENABLE_SOCKS5_PROXY": "false",
-                "BITRIX_WEBHOOK_BRIDGE_ENABLED": "true",
-                "MIRROR_INTERNAL_WEBHOOK_SECRET": "internal-secret",
                 "TELEGRAM_WEBHOOK_ENABLED": "true",
                 "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://bot.example.com",
                 "TELEGRAM_WEBHOOK_SECRET": "tg-secret",
             }
             with patch.dict(os.environ, env, clear=True):
                 settings = Settings.from_env()
-        self.assertEqual(settings.bitrix_webhook_base, "https://example.bitrix24.ru/rest/1/token")
-        self.assertTrue(settings.bitrix_webhook_bridge_enabled)
+        self.assertEqual(settings.vibe_api_key, "vibe_api_test")
+        self.assertEqual(settings.vibe_base_url, "https://vibe.example.com/v1")
+        self.assertEqual(settings.bitrix_max_upload_file_bytes, 2048)
         self.assertTrue(settings.telegram_webhook_enabled)
         self.assertEqual(settings.telegram_webhook_path, "/telegram/webhook")
 
-    def test_from_env_requires_internal_secret_when_bridge_enabled(self) -> None:
-        env = {
+    def test_from_env_requires_vibe_api_key(self) -> None:
+        with patch.dict(os.environ, {
             "TELEGRAM_BOT_TOKEN": "token",
-            "BITRIX_WEBHOOK_BASE": "https://example.bitrix24.ru/rest/1/token",
+            "VIBE_API_KEY": "   ",
             "BITRIX_BOT_ID": "12",
-            "BITRIX_BOT_CLIENT_ID": "client-token",
-            "BITRIX_WEBHOOK_BRIDGE_ENABLED": "true",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(ValueError):
+        }, clear=True):
+            with self.assertRaisesRegex(ValueError, "VIBE_API_KEY is required"):
                 Settings.from_env()
 
+    def test_from_env_defaults_vibe_base_url(self) -> None:
+        with patch.dict(os.environ, {
+            "TELEGRAM_BOT_TOKEN": "token",
+            "VIBE_API_KEY": "vibe_api_test",
+            "BITRIX_BOT_ID": "12",
+        }, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.vibe_base_url, "https://vibecode.bitrix24.tech/v1")
+        self.assertEqual(settings.bitrix_max_upload_file_bytes, 30 * 1024 * 1024)
+
+    def test_from_env_rejects_insecure_vibe_base_url(self) -> None:
+        with patch.dict(os.environ, {
+            "TELEGRAM_BOT_TOKEN": "token",
+            "VIBE_API_KEY": "vibe_api_test",
+            "VIBE_BASE_URL": "http://vibe.example.com/v1",
+            "BITRIX_BOT_ID": "12",
+        }, clear=True):
+            with self.assertRaisesRegex(ValueError, "https"):
+                Settings.from_env()

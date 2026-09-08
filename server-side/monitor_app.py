@@ -15,21 +15,22 @@ Environment variables (shared with the main .env):
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
 
-from dotenv import load_dotenv
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.responses import HTMLResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 
@@ -50,15 +51,18 @@ DB_PATH = (
     else str(Path(__file__).resolve().parent.parent / _DB_RAW)
 )
 
+_ENV_FILE_PATH = Path(__file__).resolve().parent.parent / ".env"
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MAX_BACKUP_BYTES = 10 * 1024 * 1024
+_MAX_BACKUP_ENV_KEYS = 128
+_MAX_BACKUP_ROWS = 100_000
+
 MONITOR_USERNAME = os.getenv("MONITOR_USERNAME", "admin")
 MONITOR_PASSWORD = os.getenv("MONITOR_PASSWORD", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_WEBHOOK_ENABLED = os.getenv("TELEGRAM_WEBHOOK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 TELEGRAM_WEBHOOK_PUBLIC_URL = os.getenv("TELEGRAM_WEBHOOK_PUBLIC_URL", "").strip().rstrip("/")
 TELEGRAM_WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "/telegram/webhook").strip() or "/telegram/webhook"
-BITRIX_WEBHOOK_BRIDGE_ENABLED = os.getenv("BITRIX_WEBHOOK_BRIDGE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-MIRROR_INTERNAL_BASE_URL = os.getenv("MIRROR_INTERNAL_BASE_URL", "").strip().rstrip("/")
-MIRROR_INTERNAL_EVENT_PATH = os.getenv("MIRROR_INTERNAL_EVENT_PATH", "/internal/bitrix/event").strip() or "/internal/bitrix/event"
 MIRROR_INTERNAL_WEBHOOK_SECRET = os.getenv("MIRROR_INTERNAL_WEBHOOK_SECRET", "")
 MIRROR_HTTP_HOST = os.getenv("MIRROR_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1"
 MIRROR_HTTP_PORT = int(os.getenv("MIRROR_HTTP_PORT", "8090"))
@@ -66,7 +70,6 @@ MIRROR_HTTP_PORT = int(os.getenv("MIRROR_HTTP_PORT", "8090"))
 # Mapping from short key to systemd service name
 SERVICES: dict[str, str] = {
     "mirror": "bitrix-telegram-mirror",
-    "webhook": "bitrix-bot",
 }
 
 logger = logging.getLogger(__name__)
@@ -94,7 +97,7 @@ def _check_auth(credentials: HTTPBasicCredentials = Depends(security)) -> str:
             status_code=401,
             headers={"WWW-Authenticate": 'Basic realm="Bitrix Bot Monitor"'},
         )
-    return credentials.username
+    return credentials.username  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------
@@ -278,8 +281,6 @@ def _get_journal(service: str, lines: int = 50, errors_only: bool = False) -> li
     try:
         fetch_lines = 1000 if errors_only else lines
         cmd = [
-            "sudo",
-            "-n",
             "journalctl",
             "-u",
             service,
@@ -296,9 +297,9 @@ def _get_journal(service: str, lines: int = 50, errors_only: bool = False) -> li
         if r.returncode != 0:
             err = r.stderr.strip() or "Unknown error (stdout empty)"
             return [f"❌ Ошибка sudo/journalctl (код {r.returncode}):", err]
-            
+
         result = r.stdout.strip().splitlines()
-        
+
         if errors_only:
             filtered = []
             in_error = False
@@ -369,45 +370,6 @@ def _get_telegram_webhook_status() -> dict:
         return status
 
 
-def _get_bitrix_bridge_status() -> dict:
-    health_url = f"http://{MIRROR_HTTP_HOST}:{MIRROR_HTTP_PORT}/health"
-    expected_event_url = f"{MIRROR_INTERNAL_BASE_URL}{MIRROR_INTERNAL_EVENT_PATH}" if MIRROR_INTERNAL_BASE_URL else ""
-    status = {
-        "enabled": BITRIX_WEBHOOK_BRIDGE_ENABLED,
-        "health_url": health_url,
-        "expected_event_url": expected_event_url,
-        "configured_base_url": MIRROR_INTERNAL_BASE_URL,
-        "configured_event_path": MIRROR_INTERNAL_EVENT_PATH,
-        "reachable": False,
-        "main_ok": False,
-        "mirror_bridge_enabled": False,
-        "verified": False,
-    }
-
-    if not BITRIX_WEBHOOK_BRIDGE_ENABLED:
-        status["mode"] = "disabled"
-        return status
-
-    try:
-        response = httpx.get(health_url, timeout=5)
-        response.raise_for_status()
-        payload = response.json()
-        status["reachable"] = True
-        status["main_ok"] = bool(payload.get("ok"))
-        status["mirror_bridge_enabled"] = bool(payload.get("bitrix_webhook_bridge_enabled"))
-        status["telegram_webhook_enabled"] = bool(payload.get("telegram_webhook_enabled"))
-        webhook_status = payload.get("telegram_webhook_status")
-        if isinstance(webhook_status, dict):
-            status["mirror_telegram_webhook_status"] = webhook_status
-        status["verified"] = status["main_ok"] and status["mirror_bridge_enabled"]
-        if not status["mirror_bridge_enabled"]:
-            status["error"] = "Main mirror process reachable, but Bitrix bridge is disabled there"
-        return status
-    except Exception as exc:
-        status["error"] = str(exc)
-        return status
-
-
 def _get_persisted_forwarding_enabled() -> bool:
     try:
         conn = _db_connect()
@@ -444,12 +406,148 @@ def _get_forwarding_status() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Backup helpers
+# ---------------------------------------------------------------------------
+
+_BACKUP_TABLES = (
+    "chat_mappings",
+    "cursor_state",
+    "message_links",
+    "topic_names",
+    "telegram_admins",
+    "runtime_settings",
+)
+
+
+def _read_env_file() -> dict[str, str]:
+    env: dict[str, str] = {}
+    try:
+        text = _ENV_FILE_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return env
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+            val = val[1:-1]
+        # Unescape backslash-escaped quotes written by _write_env_file
+        val = val.replace('\\\\', '\\').replace('\\"', '"').replace("\\'", "'")
+        if key:
+            env[key] = val
+    return env
+
+
+def _read_db_for_backup() -> dict[str, list[dict]]:
+    conn = _db_connect()
+    try:
+        result: dict[str, list[dict]] = {}
+        for table in _BACKUP_TABLES:
+            try:
+                rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+                result[table] = [dict(r) for r in rows]
+            except sqlite3.OperationalError:
+                result[table] = []
+        return result
+    finally:
+        conn.close()
+
+
+def _write_env_file(env: dict[str, str]) -> None:
+    # Read existing .env to preserve secrets that were redacted in the backup
+    existing_env: dict[str, str] = {}
+    if _ENV_FILE_PATH.exists():
+        existing_env = _read_env_file()
+
+    lines = [
+        f"# Restored from backup on {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+    ]
+    # Write all keys from the backup, preserving existing values for redacted secrets
+    for key, val in env.items():
+        if not isinstance(key, str) or not _ENV_KEY_RE.fullmatch(key):
+            raise ValueError(f"Недопустимое имя переменной окружения: {key!r}")
+        if len(env) > _MAX_BACKUP_ENV_KEYS:
+            raise ValueError("Слишком много переменных окружения в бэкапе")
+        str_val = str(val)
+        if len(str_val) > _MAX_BACKUP_BYTES or "\x00" in str_val:
+            raise ValueError(f"Недопустимое значение переменной {key}")
+        if str_val == "***REDACTED***":
+            # Preserve the existing value from current .env
+            if key in existing_env:
+                str_val = existing_env[key]
+            else:
+                continue  # No existing value, skip
+        # Strip newlines from values to prevent line injection
+        str_val = str_val.replace("\r", "").replace("\n", " ")
+        escaped = str_val.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'{key}="{escaped}"')
+    # Also preserve keys that exist in current .env but are missing from the backup
+    for key, val in existing_env.items():
+        if key not in env:
+            str_val = str(val).replace("\r", "").replace("\n", " ")
+            escaped = str_val.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'{key}="{escaped}"')
+    content = "\n".join(lines) + "\n"
+    # Write atomically with correct permissions (no race window)
+    import tempfile
+    dir_ = _ENV_FILE_PATH.parent
+    fd, tmp_path = tempfile.mkstemp(dir=dir_, prefix=".env.tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, _ENV_FILE_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _restore_db_from_backup(db_data: dict) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    conn = _db_connect()
+    try:
+        conn.execute("BEGIN")
+        for table in _BACKUP_TABLES:
+            rows = db_data.get(table) or []
+            conn.execute(f"DELETE FROM {table}")
+            # Fetch valid column names for this table to prevent SQL injection via column names
+            valid_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for row in rows:
+                if not row:
+                    continue
+                filtered = {k: v for k, v in row.items() if str(k) in valid_cols}
+                if not filtered:
+                    continue
+                cols = ", ".join(str(k) for k in filtered.keys())
+                placeholders = ", ".join("?" * len(filtered))
+                conn.execute(
+                    f"INSERT INTO {table} ({cols}) VALUES ({placeholders})",
+                    list(filtered.values()),
+                )
+            counts[table] = len(rows)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        conn.close()
+        raise
+    conn.close()
+    return counts
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ARG001
+async def lifespan(app: FastAPI):
     _ensure_chat_mappings_table()
     yield
 
@@ -539,7 +637,6 @@ def api_status(_: str = Depends(_check_auth)):
     return {
         "services": {k: _get_service_info(v) for k, v in SERVICES.items()},
         "db": _get_db_stats(),
-        "bitrix_bridge": _get_bitrix_bridge_status(),
         "telegram_webhook": _get_telegram_webhook_status(),
         "forwarding": _get_forwarding_status(),
         "ts": int(time.time()),
@@ -646,6 +743,181 @@ def api_delete_mapping(mapping_id: int, _: str = Depends(_check_auth)):
         conn.close()
 
 
+_MAPPING_DIALOG_ID_RE = re.compile(r"^(chat\d+|sg\d+|\d+)$")
+
+
+def _notify_mirror_mappings_reload() -> tuple[bool, str | None]:
+    """Ask the running mirror process to reload mappings from the DB.
+
+    Best-effort: the mappings are already committed to SQLite, so if the mirror
+    is unreachable the caller simply restarts the service instead of losing data.
+    """
+    if not MIRROR_INTERNAL_WEBHOOK_SECRET:
+        return (False, "MIRROR_INTERNAL_WEBHOOK_SECRET не настроен — перезапустите Mirror вручную")
+    url = f"http://{MIRROR_HTTP_HOST}:{MIRROR_HTTP_PORT}/internal/mappings/reload"
+    try:
+        response = httpx.post(
+            url,
+            headers={"X-Internal-Webhook-Secret": MIRROR_INTERNAL_WEBHOOK_SECRET},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return (True, None)
+    except Exception as exc:  # surfaced to the UI, not fatal to the import
+        return (False, str(exc))
+
+
+@app.get("/monitor/api/mappings/export")
+def api_export_mappings(_: str = Depends(_check_auth)) -> Response:
+    conn = _db_connect()
+    try:
+        rows = conn.execute(
+            "SELECT tg_chat_id, bitrix_dialog_id, label, topic_ids "
+            "FROM chat_mappings ORDER BY created_at_unix, id"
+        ).fetchall()
+    finally:
+        conn.close()
+    mappings = []
+    for r in rows:
+        raw = str(r["topic_ids"] or "")
+        topic_ids = [int(t) for t in raw.split(",") if t.strip().lstrip("-").isdigit()]
+        mappings.append({
+            "tg_chat_id": int(r["tg_chat_id"]),
+            "bitrix_dialog_id": str(r["bitrix_dialog_id"]),
+            "label": str(r["label"] or ""),
+            "topic_ids": topic_ids,
+        })
+    payload = {
+        "kind": "bitrix-bot-mappings",
+        "version": "1",
+        "exported_at": int(time.time()),
+        "mappings": mappings,
+    }
+    date_str = datetime.date.today().isoformat()
+    filename = f"bitrix-bot-mappings-{date_str}.json"
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/monitor/api/mappings/import")
+async def api_import_mappings(
+    file: UploadFile = File(...),
+    mode: str = Query("merge"),
+    _: str = Depends(_check_auth),
+) -> dict:
+    if mode not in ("merge", "replace"):
+        raise HTTPException(status_code=400, detail="mode должен быть merge или replace")
+    content = await file.read()
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Невалидный JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Ожидается JSON-объект")
+    if payload.get("kind") != "bitrix-bot-mappings":
+        raise HTTPException(status_code=400, detail="Это не файл связок (нет поля kind)")
+    raw_mappings = payload.get("mappings")
+    if not isinstance(raw_mappings, list):
+        raise HTTPException(status_code=400, detail='Отсутствует или невалидное поле "mappings"')
+
+    conn = _db_connect()
+    added = updated = skipped = 0
+    errors: list[dict] = []
+    try:
+        if mode == "replace":
+            conn.execute("DELETE FROM chat_mappings")
+        for entry in raw_mappings:
+            if not isinstance(entry, dict):
+                skipped += 1
+                errors.append({"entry": str(entry)[:64], "reason": "не объект"})
+                continue
+            dialog_id = str(entry.get("bitrix_dialog_id", "")).strip()
+            if not _MAPPING_DIALOG_ID_RE.match(dialog_id):
+                skipped += 1
+                errors.append({"bitrix_dialog_id": dialog_id[:64], "reason": "неверный формат Dialog ID"})
+                continue
+            raw_tg = entry.get("tg_chat_id")
+            if raw_tg is None:
+                skipped += 1
+                errors.append({"bitrix_dialog_id": dialog_id, "reason": "неверный tg_chat_id"})
+                continue
+            try:
+                tg_chat_id = int(raw_tg)
+            except (TypeError, ValueError):
+                skipped += 1
+                errors.append({"bitrix_dialog_id": dialog_id, "reason": "неверный tg_chat_id"})
+                continue
+            label = str(entry.get("label") or "").strip()
+            raw_topics = entry.get("topic_ids") or []
+            if not isinstance(raw_topics, list):
+                raw_topics = []
+            try:
+                topic_ids = _normalize_topic_ids([int(t) for t in raw_topics])
+            except (TypeError, ValueError):
+                topic_ids = []
+            topic_ids_str = ",".join(str(t) for t in topic_ids)
+
+            existing = conn.execute(
+                "SELECT tg_chat_id FROM chat_mappings WHERE bitrix_dialog_id = ?",
+                (dialog_id,),
+            ).fetchone()
+            if existing is not None:
+                if int(existing["tg_chat_id"]) != tg_chat_id:
+                    skipped += 1
+                    errors.append({
+                        "bitrix_dialog_id": dialog_id,
+                        "reason": f"уже привязан к TG {int(existing['tg_chat_id'])}",
+                    })
+                    continue
+                conn.execute(
+                    "UPDATE chat_mappings SET label = ?, topic_ids = ? WHERE bitrix_dialog_id = ?",
+                    (label, topic_ids_str, dialog_id),
+                )
+                updated += 1
+                continue
+            try:
+                _validate_mapping_conflicts(
+                    conn, tg_chat_id=tg_chat_id, bitrix_dialog_id=dialog_id, topic_ids=topic_ids
+                )
+            except HTTPException as exc:
+                skipped += 1
+                errors.append({"bitrix_dialog_id": dialog_id, "reason": str(exc.detail)})
+                continue
+            conn.execute(
+                "INSERT INTO chat_mappings (tg_chat_id, bitrix_dialog_id, label, created_at_unix, topic_ids) "
+                "VALUES (?,?,?,?,?)",
+                (tg_chat_id, dialog_id, label, int(time.time()), topic_ids_str),
+            )
+            added += 1
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка импорта: {exc}") from exc
+    finally:
+        conn.close()
+
+    reloaded = False
+    reload_error: str | None = None
+    if added or updated:
+        reloaded, reload_error = _notify_mirror_mappings_reload()
+    result: dict = {
+        "ok": True,
+        "mode": mode,
+        "added": added,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "reloaded": reloaded,
+    }
+    if reload_error:
+        result["reload_error"] = reload_error
+    return result
+
+
 @app.get("/monitor/api/admins")
 def api_get_admins(_: str = Depends(_check_auth)):
     conn = _db_connect()
@@ -689,6 +961,111 @@ def api_delete_admin(tg_user_id: int, _: str = Depends(_check_auth)):
         conn.close()
 
 
+_SECRET_KEY_PATTERNS = (
+    "TELEGRAM_BOT_TOKEN",
+    "MONITOR_PASSWORD",
+    "VIBE_API_KEY",
+    "VIBE_APP_KEY",
+    "TELEGRAM_WEBHOOK_SECRET",
+)
+
+
+def _is_secret_key(key: str) -> bool:
+    upper = key.upper()
+    if upper in _SECRET_KEY_PATTERNS:
+        return True
+    if any(upper.endswith(suffix) for suffix in ("_TOKEN", "_SECRET", "_PASSWORD", "_KEY")):
+        return True
+    return False
+
+
+@app.get("/monitor/api/backup")
+def api_export_backup(_: str = Depends(_check_auth)) -> Response:
+    env_data = _read_env_file()
+    redacted_env = {
+        k: ("***REDACTED***" if _is_secret_key(k) else v)
+        for k, v in env_data.items()
+    }
+    db_data = _read_db_for_backup()
+    payload = {
+        "version": "1",
+        "exported_at": int(time.time()),
+        "env": redacted_env,
+        "db": db_data,
+    }
+    date_str = datetime.date.today().isoformat()
+    filename = f"bitrix-bot-backup-{date_str}.json"
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/monitor/api/backup")
+async def api_import_backup(
+    file: UploadFile = File(...),
+    _: str = Depends(_check_auth),
+) -> dict:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(min(1024 * 1024, _MAX_BACKUP_BYTES + 1 - total))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _MAX_BACKUP_BYTES:
+            raise HTTPException(status_code=413, detail="Файл бэкапа слишком большой")
+        chunks.append(chunk)
+    content = b"".join(chunks)
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Невалидный JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Ожидается JSON-объект")
+    if payload.get("version") != "1":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Неподдерживаемая версия бэкапа: {payload.get('version')!r}",
+        )
+    if not isinstance(payload.get("env"), dict):
+        raise HTTPException(status_code=400, detail='Отсутствует или невалидное поле "env"')
+    if not isinstance(payload.get("db"), dict):
+        raise HTTPException(status_code=400, detail='Отсутствует или невалидное поле "db"')
+    if len(payload["env"]) > _MAX_BACKUP_ENV_KEYS:
+        raise HTTPException(status_code=400, detail="Слишком много переменных окружения")
+    for key, value in payload["env"].items():
+        if not isinstance(key, str) or not _ENV_KEY_RE.fullmatch(key):
+            raise HTTPException(status_code=400, detail=f"Недопустимое имя переменной окружения: {key!r}")
+        if not isinstance(value, str) or len(value) > _MAX_BACKUP_BYTES or "\x00" in value:
+            raise HTTPException(status_code=400, detail=f"Недопустимое значение переменной {key}")
+    for table, rows in payload["db"].items():
+        if table not in _BACKUP_TABLES or not isinstance(rows, list) or len(rows) > _MAX_BACKUP_ROWS:
+            raise HTTPException(status_code=400, detail=f"Невалидные данные таблицы {table}")
+        if any(not isinstance(row, dict) for row in rows):
+            raise HTTPException(status_code=400, detail=f"Невалидная строка таблицы {table}")
+
+    try:
+        counts = _restore_db_from_backup(payload["db"])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Ошибка восстановления БД: {exc}") from exc
+
+    env_written = False
+    env_error: str | None = None
+    try:
+        _write_env_file(payload["env"])
+        env_written = True
+    except Exception as exc:
+        env_error = str(exc)
+
+    result: dict = {"ok": True, "tables_restored": counts, "env_written": env_written}
+    if env_error is not None:
+        result["env_error"] = env_error
+    return result
+
+
 @app.post("/monitor/api/services/{service_key}/restart")
 def api_restart(service_key: str, _: str = Depends(_check_auth)):
     if service_key not in SERVICES:
@@ -714,9 +1091,9 @@ def api_restart(service_key: str, _: str = Depends(_check_auth)):
 
 @app.get("/monitor/api/journal/{service_key}")
 def api_journal(
-    service_key: str, 
-    lines: int = Query(60, ge=1, le=1000), 
-    errors_only: bool = False, 
+    service_key: str,
+    lines: int = Query(60, ge=1, le=1000),
+    errors_only: bool = False,
     _: str = Depends(_check_auth)
 ):
     if service_key not in SERVICES:
@@ -734,8 +1111,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Монитор Bitrix Bot</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Pinned static stylesheet restores the utility classes without executing CDN JavaScript. -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" integrity="sha384-HtMZLkYo+pR5/u7zCzXxMJP6QoNnQJt1qkHM0EaOPvGDIzaVZbmYr/TlvUZ/sKAg" crossorigin="anonymous">
   <style>
+    /* Self-hosted baseline: the monitor must work without executable CDN assets. */
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f3f4f6; color: #111827; font-family: system-ui, sans-serif; }
+    .hidden { display: none !important; }
+    /* Tailwind 2.2 predates the slate palette used by this page. */
+    .bg-slate-100 { background-color: #f1f5f9; }
+    .bg-slate-600 { background-color: #475569; }
+    .bg-slate-700 { background-color: #334155; }
+    .bg-slate-800 { background-color: #1e293b; }
+    .bg-slate-900 { background-color: #0f172a; }
+    .bg-slate-900\\/80 { background-color: rgba(15, 23, 42, .8); }
+    .hover\\:bg-slate-200:hover { background-color: #e2e8f0; }
+    .hover\\:bg-slate-600:hover { background-color: #475569; }
+    .hover\\:bg-slate-700:hover { background-color: #334155; }
+    .text-slate-300 { color: #cbd5e1; }
+    .text-slate-400 { color: #94a3b8; }
+    .text-slate-700 { color: #334155; }
+    button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
+    .monitor-btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: .4rem;
+      min-height: 2.5rem; padding: .55rem 1rem; border: 1px solid transparent;
+      border-radius: .65rem; font-size: .875rem; font-weight: 650; line-height: 1;
+      letter-spacing: .01em; transition: transform .15s ease, background-color .15s ease,
+        box-shadow .15s ease, border-color .15s ease; box-shadow: 0 1px 2px rgba(15,23,42,.12);
+    }
+    .monitor-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(15,23,42,.16); }
+    .monitor-btn:focus-visible { outline: 3px solid rgba(14,165,233,.4); outline-offset: 2px; }
+    .monitor-btn:disabled { cursor: not-allowed; opacity: .5; transform: none; box-shadow: none; }
+    .monitor-btn-primary { background: #2563eb; color: #fff; }
+    .monitor-btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+    .monitor-btn-secondary { background: #334155; color: #f8fafc; }
+    .monitor-btn-secondary:hover:not(:disabled) { background: #1e293b; }
+    .monitor-btn-success { background: #059669; color: #fff; }
+    .monitor-btn-success:hover:not(:disabled) { background: #047857; }
+    .monitor-btn-warning { background: #d97706; color: #fff; }
+    .monitor-btn-warning:hover:not(:disabled) { background: #b45309; }
+    .monitor-btn-danger { background: #dc2626; color: #fff; }
+    .monitor-btn-danger:hover:not(:disabled) { background: #b91c1c; }
+    .monitor-btn-ghost { background: #f1f5f9; color: #334155; border-color: #cbd5e1; }
+    .monitor-btn-ghost:hover:not(:disabled) { background: #e2e8f0; }
     [x-cloak] { display: none !important; }
     .log-pre { white-space: pre-wrap; word-break: break-all; }
     details > summary { list-style: none; }
@@ -768,18 +1187,48 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div id="loginError"
          class="hidden mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm"></div>
-    <div class="space-y-3">
+    <form id="loginForm" class="space-y-3" onsubmit="event.preventDefault(); monitorDoLogin();">
       <input id="loginUser" type="text" value="admin"
              class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
              placeholder="Имя пользователя">
       <input id="loginPass" type="password"
              class="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
              placeholder="Пароль">
-      <button onclick="doLogin()"
-              class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-sm transition-colors">
+      <button type="submit"
+              class="monitor-btn monitor-btn-primary w-full">
         Войти
       </button>
-    </div>
+    </form>
+    <script>
+    async function monitorDoLogin() {
+      const user = document.getElementById('loginUser').value.trim();
+      const pass = document.getElementById('loginPass').value;
+      const error = document.getElementById('loginError');
+      if (!user || !pass) {
+        error.textContent = 'Введите имя пользователя и пароль';
+        error.classList.remove('hidden');
+        return;
+      }
+      const auth = 'Basic ' + btoa(unescape(encodeURIComponent(user + ':' + pass)));
+      try {
+        const response = await fetch('/monitor/api/status', { headers: { Authorization: auth } });
+        if (!response.ok) {
+          error.textContent = response.status === 401 ? 'Неверные учётные данные' : 'Ошибка сервера ' + response.status;
+          error.classList.remove('hidden');
+          return;
+        }
+        document.getElementById('loginOverlay').classList.add('hidden');
+        document.getElementById('app').classList.remove('hidden');
+        try { AUTH_HEADER = auth; } catch (_) { window.AUTH_HEADER = auth; }
+        if (typeof startPolling === 'function') startPolling();
+        if (typeof loadMappings === 'function') loadMappings();
+        if (typeof loadAdmins === 'function') loadAdmins();
+      } catch (err) {
+        error.textContent = 'Ошибка подключения: ' + err.message;
+        error.classList.remove('hidden');
+      }
+    }
+    </script>
   </div>
 </div>
 
@@ -798,11 +1247,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
       <div class="flex items-center gap-2">
         <button onclick="loadStatus(); loadMappings(); loadAdmins()"
-                class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg transition-colors">
+                class="monitor-btn monitor-btn-primary">
           ↻ Обновить
         </button>
         <button onclick="doLogout()"
-                class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white text-xs rounded-lg transition-colors">
+                class="monitor-btn monitor-btn-secondary">
           Выйти
         </button>
       </div>
@@ -810,6 +1259,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </header>
 
   <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+
+    <!-- ── Backup ──────────────────────────────────────────────────────────── -->
+    <section>
+      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Резервное копирование</h2>
+      <div class="bg-white rounded-xl shadow p-5">
+        <div class="flex flex-col gap-4">
+          <div>
+            <button onclick="downloadBackup()" id="downloadBackupBtn"
+                    class="monitor-btn monitor-btn-primary">
+              ⬇ Скачать резервную копию
+            </button>
+          </div>
+          <div>
+            <p class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Восстановить из файла</p>
+            <div class="flex gap-2 items-center flex-wrap">
+              <input type="file" id="backupFileInput" accept=".json"
+                     class="text-sm text-gray-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200">
+              <button onclick="uploadBackup()" id="uploadBackupBtn"
+                      class="monitor-btn monitor-btn-warning">
+                Восстановить
+              </button>
+            </div>
+            <p id="backupMsg" class="hidden mt-2 text-xs"></p>
+          </div>
+          <div class="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+            <span class="shrink-0">⚠</span>
+            <span>Файл содержит секреты (токены, пароли). После восстановления перезапустите сервисы Mirror и Webhook.</span>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <section>
       <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Переадресация сообщений</h2>
@@ -848,7 +1328,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                      placeholder="123456789">
             </div>
             <button id="addAdminBtn" onclick="addAdmin()"
-                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50">
+                    class="monitor-btn monitor-btn-primary">
               Добавить
             </button>
           </div>
@@ -878,13 +1358,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <section>
       <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Telegram Webhook</h2>
       <div id="telegramWebhookCard" class="bg-white rounded-xl shadow p-5">
-        <div class="text-sm text-gray-400">Загрузка…</div>
-      </div>
-    </section>
-
-    <section>
-      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Bitrix Bridge</h2>
-      <div id="bitrixBridgeCard" class="bg-white rounded-xl shadow p-5">
         <div class="text-sm text-gray-400">Загрузка…</div>
       </div>
     </section>
@@ -944,10 +1417,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       <!-- DB mappings (managed here) -->
       <div class="bg-white rounded-xl shadow overflow-hidden">
-        <div class="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
+        <div class="px-5 py-3 border-b border-gray-100 flex items-center gap-2 flex-wrap">
           <span class="font-medium text-gray-700 text-sm">Из базы данных</span>
           <span class="text-xs text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">можно редактировать</span>
+          <div class="ml-auto flex items-center gap-2">
+            <button onclick="exportMappings()" id="exportMappingsBtn"
+                    class="monitor-btn monitor-btn-secondary">
+              ⬇ Экспорт связок
+            </button>
+            <label class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer">
+              ⬆ Импорт связок
+              <input type="file" id="importMappingsFile" accept=".json,application/json" class="hidden" onchange="importMappings(this)">
+            </label>
+          </div>
         </div>
+        <p id="importMappingsMsg" class="hidden px-5 py-2 text-xs"></p>
         <table class="min-w-full text-sm">
           <thead class="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
             <tr>
@@ -992,7 +1476,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                      placeholder="12,34 (пусто = все)">
             </div>
             <button id="addMappingBtn" onclick="addMapping()"
-                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50">
+              class="monitor-btn monitor-btn-primary">
               Добавить
             </button>
           </div>
@@ -1079,7 +1563,6 @@ async function loadStatus() {
     const data = await r.json();
     renderForwarding(data.forwarding || {});
     renderServices(data.services || {});
-    renderBitrixBridge(data.bitrix_bridge || {});
     renderTelegramWebhook(data.telegram_webhook || {});
     renderStats(data.db || {});
     const t = new Date(data.ts * 1000).toLocaleTimeString();
@@ -1097,9 +1580,6 @@ function renderForwarding(info) {
       ? 'bg-green-100 text-green-800'
       : 'bg-red-100 text-red-800';
   const badgeLabel = !reachable ? 'Mirror недоступен' : enabled ? 'Переадресация включена' : 'Переадресация остановлена';
-  const buttonClass = enabled
-    ? 'bg-red-600 hover:bg-red-700'
-    : 'bg-green-600 hover:bg-green-700';
   const buttonLabel = enabled ? 'Остановить переадресацию' : 'Запустить переадресацию';
   const error = info.error || '';
   el.innerHTML = `
@@ -1117,7 +1597,7 @@ function renderForwarding(info) {
         </p>
       </div>
       <button id="forwardingToggleBtn" onclick="toggleForwarding(${enabled ? 'false' : 'true'})"
-              class="px-4 py-2 ${buttonClass} text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50"
+              class="monitor-btn ${enabled ? 'monitor-btn-danger' : 'monitor-btn-success'}"
               ${reachable ? '' : 'disabled'}>
         ${escHtml(buttonLabel)}
       </button>
@@ -1148,64 +1628,6 @@ async function toggleForwarding(enabled) {
   } finally {
     if (btn) btn.disabled = false;
   }
-}
-
-function renderBitrixBridge(info) {
-  const el = document.getElementById('bitrixBridgeCard');
-  const enabled = !!info.enabled;
-  const reachable = !!info.reachable;
-  const verified = !!info.verified;
-  const badge = !enabled
-    ? 'bg-gray-100 text-gray-600'
-    : verified
-      ? 'bg-green-100 text-green-800'
-      : reachable
-        ? 'bg-amber-100 text-amber-800'
-        : 'bg-red-100 text-red-800';
-  const badgeLabel = !enabled
-    ? 'Disabled'
-    : verified
-      ? 'Bridge OK'
-      : reachable
-        ? 'Config mismatch'
-        : 'Unreachable';
-  const error = info.error || '—';
-  const healthUrl = info.health_url || '—';
-  const eventUrl = info.expected_event_url || '—';
-  const mainEnabled = info.mirror_bridge_enabled ? 'true' : 'false';
-  const reachableText = reachable ? 'yes' : 'no';
-
-  el.innerHTML = `
-    <div class="flex items-start justify-between gap-4 mb-4">
-      <div>
-        <p class="text-xs text-gray-500 uppercase tracking-wide font-medium">Mode</p>
-        <p class="font-semibold text-gray-800 mt-0.5">${enabled ? 'bridge' : 'disabled'}</p>
-      </div>
-      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${badge}">${escHtml(badgeLabel)}</span>
-    </div>
-    <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm text-gray-600">
-      <div>
-        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Main health URL</dt>
-        <dd class="font-mono break-all text-xs">${escHtml(healthUrl)}</dd>
-      </div>
-      <div>
-        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Forward target</dt>
-        <dd class="font-mono break-all text-xs">${escHtml(eventUrl)}</dd>
-      </div>
-      <div>
-        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Reachable</dt>
-        <dd>${escHtml(reachableText)}</dd>
-      </div>
-      <div>
-        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Bridge enabled in main</dt>
-        <dd>${escHtml(mainEnabled)}</dd>
-      </div>
-      <div class="md:col-span-2">
-        <dt class="font-medium text-gray-500 text-xs uppercase tracking-wide mb-1">Last error</dt>
-        <dd class="break-all text-xs">${escHtml(error)}</dd>
-      </div>
-    </dl>
-  `;
 }
 
 function renderTelegramWebhook(info) {
@@ -1345,11 +1767,11 @@ function renderServices(services) {
       </dl>
       <div class="flex gap-2 mt-auto">
         <button id="restart-${key}" onclick="restartService('${key}', '${escHtml(svc.service)}')"
-                class="flex-1 px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white text-sm rounded-lg font-medium transition-colors disabled:opacity-50">
+                class="monitor-btn monitor-btn-warning flex-1">
           ↺ Перезапустить
         </button>
         <button id="logsBtn-${key}" onclick="toggleLogs('${key}')"
-                class="flex-1 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm rounded-lg font-medium transition-colors">
+                class="monitor-btn monitor-btn-ghost flex-1">
           📋 Логи
         </button>
       </div>
@@ -1361,7 +1783,7 @@ function renderServices(services) {
               <input type="checkbox" id="errorsOnly-${key}" onchange="refreshLogs('${key}')" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
               Только ошибки
             </label>
-            <button onclick="refreshLogs('${key}')" class="text-xs text-blue-600 hover:underline">Обновить</button>
+            <button onclick="refreshLogs('${key}')" class="monitor-btn monitor-btn-ghost text-xs">Обновить</button>
           </div>
         </div>
         <pre id="logsText-${key}" class="log-pre text-xs bg-slate-900 text-green-400 p-3 rounded-lg overflow-auto max-h-72 font-mono">Загрузка…</pre>
@@ -1463,6 +1885,73 @@ async function loadMappings() {
   } catch (_) {}
 }
 
+async function exportMappings() {
+  const btn = document.getElementById('exportMappingsBtn');
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = 'Загрузка…';
+  try {
+    const r = await apiFetch('/monitor/api/mappings/export');
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      alert('Ошибка: ' + (e.detail || r.status));
+      return;
+    }
+    const blob = await r.blob();
+    const cd = r.headers.get('content-disposition') || '';
+    const match = cd.match(/filename="?([^"]+)"?/);
+    const filename = (match && match[1]) ? match[1] : 'bitrix-bot-mappings.json';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert('Ошибка: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+}
+
+function showImportMsg(msg, type) {
+  const el = document.getElementById('importMappingsMsg');
+  el.textContent = msg;
+  el.className = 'px-5 py-2 text-xs ' + (type === 'error' ? 'text-red-600' : (type === 'warn' ? 'text-amber-700' : 'text-green-700'));
+}
+
+async function importMappings(input) {
+  if (!input.files || !input.files[0]) return;
+  input.disabled = true;
+  showImportMsg('Импорт связок…', 'warn');
+  try {
+    const formData = new FormData();
+    formData.append('file', input.files[0]);
+    const r = await fetch('/monitor/api/mappings/import?mode=merge', {
+      method: 'POST',
+      headers: { 'Authorization': AUTH_HEADER },
+      body: formData,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showImportMsg('Ошибка: ' + (data.detail || r.status), 'error');
+      return;
+    }
+    let msg = 'Импорт завершён: добавлено ' + data.added + ', обновлено ' + data.updated + ', пропущено ' + data.skipped + '.';
+    msg += data.reloaded ? ' Привязки применены на лету.' : ' Перезапустите сервис Mirror.';
+    if (data.reload_error) msg += ' (' + data.reload_error + ')';
+    const bad = (data.errors && data.errors.length) ? data.errors.length : 0;
+    if (bad) msg += ' Проблемных записей: ' + bad + '.';
+    showImportMsg(msg, bad ? 'warn' : 'ok');
+    loadMappings();
+  } catch (err) {
+    showImportMsg('Ошибка: ' + err.message, 'error');
+  } finally {
+    input.disabled = false;
+    input.value = '';
+  }
+}
+
 function renderDbMappings(mappings) {
   const tbody = document.getElementById('dbMappingsBody');
   tbody.innerHTML = '';
@@ -1483,7 +1972,7 @@ function renderDbMappings(mappings) {
       <td class="px-5 py-2.5 text-sm font-mono text-gray-700">${topicsLabel}</td>
       <td class="px-5 py-2.5">
         <button data-mapping-id="${m.id}" data-tg-chat-id="${tgChatIdAttr}" data-dialog-id="${dialogIdAttr}"
-                class="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-medium rounded-lg transition-colors">
+                class="monitor-btn monitor-btn-danger">
           Удалить
         </button>
       </td>
@@ -1588,7 +2077,7 @@ function renderAdmins(admins) {
       <td class="px-5 py-2.5 text-sm text-gray-500">${escHtml(addedDate)}</td>
       <td class="px-5 py-2.5">
         <button onclick="deleteAdmin(${a.tg_user_id})"
-                class="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-medium rounded-lg transition-colors">
+                class="monitor-btn monitor-btn-danger">
           Удалить
         </button>
       </td>
@@ -1657,9 +2146,86 @@ function escHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+// ── Backup ───────────────────────────────────────────────────────────────────
+async function downloadBackup() {
+  const btn = document.getElementById('downloadBackupBtn');
+  btn.disabled = true;
+  btn.textContent = 'Загрузка…';
+  try {
+    const r = await apiFetch('/monitor/api/backup');
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      alert('Ошибка: ' + (e.detail || r.status));
+      return;
+    }
+    const blob = await r.blob();
+    const cd = r.headers.get('content-disposition') || '';
+    const match = cd.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] || 'bitrix-bot-backup.json' : 'bitrix-bot-backup.json';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showBackupMsg('Резервная копия скачана', 'ok');
+  } catch (err) {
+    alert('Ошибка: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⬇ Скачать резервную копию';
+  }
+}
+
+async function uploadBackup() {
+  const input = document.getElementById('backupFileInput');
+  if (!input.files || !input.files[0]) {
+    showBackupMsg('Выберите файл резервной копии', 'error');
+    return;
+  }
+  if (!confirm('Это заменит все данные БД и перезапишет .env. Продолжить?')) return;
+  const btn = document.getElementById('uploadBackupBtn');
+  btn.disabled = true;
+  btn.textContent = 'Восстановление…';
+  try {
+    const formData = new FormData();
+    formData.append('file', input.files[0]);
+    const r = await fetch('/monitor/api/backup', {
+      method: 'POST',
+      headers: { 'Authorization': AUTH_HEADER },
+      body: formData,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showBackupMsg('Ошибка: ' + (data.detail || r.status), 'error');
+      return;
+    }
+    const tables = data.tables_restored || {};
+    const summary = Object.entries(tables).map(([t, n]) => t + ': ' + n).join(', ');
+    showBackupMsg('Восстановлено (' + summary + '). Перезапустите сервисы Mirror и Webhook.', 'ok');
+    input.value = '';
+    loadMappings();
+    loadAdmins();
+  } catch (err) {
+    showBackupMsg('Ошибка: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Восстановить';
+  }
+}
+
+function showBackupMsg(msg, type) {
+  const el = document.getElementById('backupMsg');
+  el.textContent = msg;
+  el.className = 'mt-2 text-xs ' + (type === 'error' ? 'text-red-600' : 'text-green-700');
+}
+
 // ── Keyboard shortcuts ───────────────────────────────────────────────────────
-document.getElementById('loginPass').addEventListener('keydown', e => {
-  if (e.key === 'Enter') doLogin();
+document.getElementById('loginForm').addEventListener('submit', e => {
+  e.preventDefault();
+  doLogin();
 });
 </script>
 </body>

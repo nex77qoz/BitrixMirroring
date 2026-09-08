@@ -6,222 +6,95 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from telegram.error import BadRequest
+
 from mirror_service import MirrorService, _bbcode_to_html
-from models import BitrixDialogSnapshot, BitrixMessage, CursorState, MirrorOrigin
-from tests.helpers import make_mapping, make_message, make_settings
+from models import BitrixEventPage, BitrixFile, BitrixMessage, MessageMirrorLink, MirrorOrigin
+from tests.helpers import make_bitrix_event, make_mapping, make_message, make_settings
 
 
 class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
+
     async def asyncSetUp(self) -> None:
         mapping = make_mapping(topic_ids=(100, 200))
         settings = make_settings(chat_mappings=(mapping,))
         self.bitrix = AsyncMock()
         self.state_store = AsyncMock()
+        self.state_store.get_link_by_bitrix_message.return_value = None
+        self.state_store.get_link_by_telegram_message.return_value = None
         self.service = MirrorService(settings, self.bitrix, self.state_store)
 
     async def test_resolve_mapping_prefers_matching_topic(self) -> None:
         mapping = self.service.resolve_mapping_for_chat_and_thread(-1001234567890, 200)
         self.assertIsNotNone(mapping)
         assert mapping is not None
-        self.assertEqual(mapping.bitrix_dialog_id, "chat42")
+        self.assertEqual(mapping.bitrix_dialog_id, 'chat42')
 
     async def test_get_chat_mappings_returns_current_mappings(self) -> None:
         mappings = self.service.get_chat_mappings()
         self.assertEqual(len(mappings), 1)
-        self.assertEqual(mappings[0].bitrix_dialog_id, "chat42")
+        self.assertEqual(mappings[0].bitrix_dialog_id, 'chat42')
 
     async def test_render_telegram_message_includes_topic_and_sender(self) -> None:
-        self.service._topic_names[(-1001234567890, 100)] = "Deploy"
-        message = make_message(message_thread_id=100, text="hello")
+        self.service._topic_names[-1001234567890, 100] = 'Deploy'
+        message = make_message(message_thread_id=100, text='hello')
         rendered = self.service.render_telegram_message(message)
-        self.assertIn("#Deploy", rendered)
-        self.assertIn("Alice Example", rendered)
-        self.assertIn("hello", rendered)
-
-    async def test_schedule_bitrix_dialog_sync_creates_single_task(self) -> None:
-        gate = asyncio.Event()
-
-        async def fake_sync(application, mapping, *, trigger: str) -> None:
-            await gate.wait()
-
-        self.service._application = SimpleNamespace()
-        self.service._sync_bitrix_dialog = fake_sync  # type: ignore[method-assign]
-
-        accepted1 = await self.service.schedule_bitrix_dialog_sync("chat42", trigger="webhook", message_id=7, reply_id=8)
-        accepted2 = await self.service.schedule_bitrix_dialog_sync("chat42", trigger="webhook")
-        self.assertTrue(accepted1)
-        self.assertTrue(accepted2)
-        self.assertEqual(self.service._webhook_reply_cache[7], 8)
-        self.assertEqual(len(self.service._bitrix_on_demand_tasks), 1)
-
-        gate.set()
-        await asyncio.gather(*self.service._bitrix_on_demand_tasks.values())
-        await asyncio.sleep(0)
-        self.assertEqual(self.service._bitrix_on_demand_tasks, {})
-
-    async def test_webhook_primes_missing_cursor_from_message_id(self) -> None:
-        seen_cursor: list[int | None] = []
-
-        async def fake_sync(application, mapping, *, trigger: str) -> None:
-            seen_cursor.append(self.service._last_seen_bitrix_message_ids.get(mapping.bitrix_dialog_id))
-
-        self.service._application = SimpleNamespace()
-        self.service._sync_bitrix_dialog = fake_sync  # type: ignore[method-assign]
-
-        accepted = await self.service.schedule_bitrix_dialog_sync(
-            "chat42",
-            trigger="webhook",
-            message_id=50,
-        )
-
-        self.assertTrue(accepted)
-        await asyncio.gather(*self.service._bitrix_on_demand_tasks.values())
-        await asyncio.sleep(0)
-        self.assertEqual(seen_cursor, [49])
-        self.state_store.save_cursor.assert_awaited_with(
-            "chat42",
-            CursorState(last_seen_bitrix_message_id=49),
-        )
-
-    async def test_webhook_uses_persisted_cursor_when_memory_empty(self) -> None:
-        seen_cursor: list[int | None] = []
-
-        async def fake_sync(application, mapping, *, trigger: str) -> None:
-            seen_cursor.append(self.service._last_seen_bitrix_message_ids.get(mapping.bitrix_dialog_id))
-
-        self.state_store.load_cursor.return_value = CursorState(last_seen_bitrix_message_id=80)
-        self.service._application = SimpleNamespace()
-        self.service._sync_bitrix_dialog = fake_sync  # type: ignore[method-assign]
-
-        accepted = await self.service.schedule_bitrix_dialog_sync(
-            "chat42",
-            trigger="webhook",
-            message_id=50,
-        )
-
-        self.assertTrue(accepted)
-        await asyncio.gather(*self.service._bitrix_on_demand_tasks.values())
-        await asyncio.sleep(0)
-        self.assertEqual(seen_cursor, [80])
-        self.state_store.save_cursor.assert_not_awaited()
+        self.assertIn('#Deploy', rendered)
+        self.assertIn('Alice Example', rendered)
+        self.assertIn('hello', rendered)
 
     async def test_forwarding_disabled_rejects_new_work(self) -> None:
         await self.service.set_forwarding_enabled(False)
         self.service._application = SimpleNamespace()
-
         message = make_message()
         await self.service.enqueue_telegram_message(message)
-        accepted = await self.service.schedule_bitrix_dialog_sync("chat42", trigger="webhook")
         await self.service.sync_telegram_edit(message)
         await self.service.sync_telegram_reaction(message.chat_id, message.message_id, True)
-
-        self.assertFalse(accepted)
         self.assertEqual(len(self.service._channel_queues), 0)
         self.bitrix.update_message.assert_not_awaited()
         self.bitrix.set_message_like.assert_not_awaited()
         self.state_store.set_forwarding_enabled.assert_awaited_once_with(False)
 
-    async def test_disabled_bitrix_sync_advances_cursor_without_forwarding(self) -> None:
-        mapping = self.service.settings.chat_mappings[0]
-        await self.service.set_forwarding_enabled(False)
-        self.bitrix.get_latest_message_id.return_value = 42
-        application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
-
-        await self.service._sync_bitrix_messages(application, mapping)
-
-        application.bot.send_message.assert_not_awaited()
-        self.bitrix.get_recent_messages.assert_not_awaited()
-        self.bitrix.get_messages_after.assert_not_awaited()
-        self.state_store.save_cursor.assert_awaited_with(
-            mapping.bitrix_dialog_id,
-            CursorState(last_seen_bitrix_message_id=42),
-        )
-
     async def test_sync_telegram_edit_uses_saved_link(self) -> None:
         self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(bitrix_message_id=99)
-        message = make_message(text="edited text")
+        message = make_message(text='edited text')
         await self.service.sync_telegram_edit(message)
         self.bitrix.update_message.assert_awaited_once()
 
+    async def test_sync_telegram_edit_skips_legacy_bitrix_message(self) -> None:
+        self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(bitrix_message_id=99)
+        self.bitrix.update_message = AsyncMock(side_effect=RuntimeError('Vibe error: BITRIX_ACCESS_DENIED | Access denied'))
+        message = make_message(text='edited text')
+
+        await self.service.sync_telegram_edit(message)
+
+    async def test_sync_telegram_edit_propagates_other_errors(self) -> None:
+        self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(bitrix_message_id=99)
+        self.bitrix.update_message = AsyncMock(side_effect=RuntimeError('Vibe error: RATE_LIMITED | slow down'))
+        message = make_message(text='edited text')
+
+        with self.assertRaisesRegex(RuntimeError, 'RATE_LIMITED'):
+            await self.service.sync_telegram_edit(message)
+
     async def test_sync_telegram_reaction_updates_state(self) -> None:
-        self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(
-            bitrix_message_id=99,
-            bitrix_liked_by_bot=False,
-            last_seen_bitrix_likes="",
-        )
+        self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(bitrix_message_id=99, bitrix_liked_by_bot=False, last_seen_bitrix_likes='')
         await self.service.sync_telegram_reaction(-1001234567890, 100, True)
         self.bitrix.set_message_like.assert_awaited_once_with(99, liked=True)
         self.state_store.update_reaction_state.assert_awaited_once()
 
     async def test_sync_telegram_reaction_removal_updates_state_correctly(self) -> None:
-        self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(
-            bitrix_message_id=99,
-            bitrix_liked_by_bot=True,
-            last_seen_bitrix_likes="123",
-        )
+        self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(bitrix_message_id=99, bitrix_liked_by_bot=True, last_seen_bitrix_likes='123')
         await self.service.sync_telegram_reaction(-1001234567890, 100, False)
         self.bitrix.set_message_like.assert_awaited_once_with(99, liked=False)
-        self.state_store.update_reaction_state.assert_awaited_once_with(
-            bitrix_message_id=99,
-            bitrix_liked_by_bot=False,
-            last_seen_bitrix_likes="123",
-        )
-
-    async def test_suppressed_telegram_origin_bitrix_message_advances_cursor(self) -> None:
-        mapping = self.service.settings.chat_mappings[0]
-        self.service._last_seen_bitrix_message_ids[mapping.bitrix_dialog_id] = 5
-        self.bitrix.get_recent_messages.return_value = BitrixDialogSnapshot(
-            messages=[],
-            users_by_id={},
-            files_by_id={},
-        )
-        self.bitrix.get_messages_after.return_value = BitrixDialogSnapshot(
-            messages=[
-                BitrixMessage(
-                    message_id=10,
-                    author_id=123,
-                    text="already mirrored from telegram",
-                    file_ids=(),
-                    update_time_unix=None,
-                    like_user_ids=(),
-                )
-            ],
-            users_by_id={},
-            files_by_id={},
-        )
-        self.state_store.get_link_by_bitrix_message.return_value = SimpleNamespace(
-            origin=MirrorOrigin.TELEGRAM,
-            telegram_message_id=777,
-        )
-        application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
-
-        await self.service._sync_bitrix_messages(application, mapping)
-
-        application.bot.send_message.assert_not_awaited()
-        self.state_store.save_cursor.assert_awaited_with(
-            mapping.bitrix_dialog_id,
-            CursorState(last_seen_bitrix_message_id=10),
-        )
-        self.assertEqual(self.service._last_seen_bitrix_message_ids[mapping.bitrix_dialog_id], 10)
-
-    async def test_persist_cursor_does_not_move_backwards(self) -> None:
-        self.service._last_seen_bitrix_message_ids["chat42"] = 20
-
-        await self.service._persist_cursor("chat42", 10)
-
-        self.state_store.save_cursor.assert_awaited_once_with(
-            "chat42",
-            CursorState(last_seen_bitrix_message_id=20),
-        )
-        self.assertEqual(self.service._last_seen_bitrix_message_ids["chat42"], 20)
+        self.state_store.update_reaction_state.assert_awaited_once_with(bitrix_message_id=99, bitrix_liked_by_bot=False, last_seen_bitrix_likes='123')
 
     async def test_bbcode_to_html_escapes_markup(self) -> None:
-        converted = _bbcode_to_html("[b]Hi[/b] <script>")
-        self.assertEqual(converted, "<b>Hi</b> &lt;script&gt;")
+        converted = _bbcode_to_html('[b]Hi[/b] <script>')
+        self.assertEqual(converted, '<b>Hi</b> &lt;script&gt;')
 
     async def test_bbcode_plain_url(self) -> None:
-        url = "https://www.technoavia.ru/closed-area/corp_universitet/siz_pechat"
-        converted = _bbcode_to_html(f"[URL]{url}[/URL]")
+        url = 'https://www.technoavia.ru/closed-area/corp_universitet/siz_pechat'
+        converted = _bbcode_to_html(f'[URL]{url}[/URL]')
         self.assertEqual(converted, f'<a href="{url}">{url}</a>')
 
     async def test_is_admin_delegates_to_state_store(self) -> None:
@@ -232,36 +105,35 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_reload_mappings_updates_lookup_tables(self) -> None:
         from tests.helpers import make_mapping
-        new_mapping = make_mapping(mapping_id=99, tg_chat_id=-9999, bitrix_dialog_id="chat77")
+        new_mapping = make_mapping(mapping_id=99, tg_chat_id=-9999, bitrix_dialog_id='chat77')
         self.state_store.load_all_chat_mappings = AsyncMock(return_value=(new_mapping,))
         await self.service.reload_mappings()
-        self.assertIsNotNone(self.service.get_mapping_for_bitrix_dialog("chat77"))
-        self.assertIsNone(self.service.get_mapping_for_bitrix_dialog("chat42"))
+        self.assertIsNotNone(self.service.get_mapping_for_bitrix_dialog('chat77'))
+        self.assertIsNone(self.service.get_mapping_for_bitrix_dialog('chat42'))
 
     async def test_connect_mapping_adds_and_reloads(self) -> None:
         from tests.helpers import make_mapping
-        new_mapping = make_mapping(mapping_id=10, tg_chat_id=-5555, bitrix_dialog_id="chatNEW")
+        new_mapping = make_mapping(mapping_id=10, tg_chat_id=-5555, bitrix_dialog_id='chatNEW')
         self.state_store.add_chat_mapping = AsyncMock(return_value=10)
         self.state_store.load_all_chat_mappings = AsyncMock(return_value=(new_mapping,))
-        await self.service.connect_mapping(-5555, "chatNEW", None, "")
-        self.state_store.add_chat_mapping.assert_awaited_once_with(-5555, "chatNEW", [], "")
-        self.assertIsNotNone(self.service.get_mapping_for_bitrix_dialog("chatNEW"))
+        await self.service.connect_mapping(-5555, 'chatNEW', None, '')
+        self.state_store.add_chat_mapping.assert_awaited_once_with(-5555, 'chatNEW', [], '')
+        self.assertIsNotNone(self.service.get_mapping_for_bitrix_dialog('chatNEW'))
 
     async def test_connect_mapping_raises_on_existing_dialog_different_chat(self) -> None:
         with self.assertRaises(ValueError):
-            await self.service.connect_mapping(-9999, "chat42", None, "")
+            await self.service.connect_mapping(-9999, 'chat42', None, '')
 
     async def test_connect_mapping_same_chat_adds_topic_to_existing(self) -> None:
         from tests.helpers import make_mapping
-        updated = make_mapping(mapping_id=1, tg_chat_id=-1001234567890, bitrix_dialog_id="chat42", topic_ids=(100, 200, 55))
+        updated = make_mapping(mapping_id=1, tg_chat_id=-1001234567890, bitrix_dialog_id='chat42', topic_ids=(100, 200, 55))
         self.state_store.update_chat_mapping_topic_ids = AsyncMock()
         self.state_store.load_all_chat_mappings = AsyncMock(return_value=(updated,))
-        await self.service.connect_mapping(-1001234567890, "chat42", 55, "")
+        await self.service.connect_mapping(-1001234567890, 'chat42', 55, '')
         self.state_store.update_chat_mapping_topic_ids.assert_awaited_once_with(1, [100, 200, 55])
         self.state_store.add_chat_mapping.assert_not_awaited()
 
     async def test_disconnect_mapping_removes_and_reloads(self) -> None:
-        from tests.helpers import make_mapping
         self.state_store.remove_chat_mapping = AsyncMock(return_value=True)
         self.state_store.load_all_chat_mappings = AsyncMock(return_value=())
         removed = await self.service.disconnect_mapping(-1001234567890, None)
@@ -274,75 +146,55 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_per_channel_queue_throttling_and_overflow(self) -> None:
         from unittest.mock import patch
-        
         loop = asyncio.get_event_loop()
         original_time = loop.time
         original_sleep = asyncio.sleep
-        
         loop_time = 10.0
+
         def get_time():
             return loop_time
-        
         loop.time = get_time
-        
         sleep_calls = []
+
         async def fake_sleep(delay):
             nonlocal loop_time
             sleep_calls.append(delay)
             loop_time += delay
             await original_sleep(0)
-
         self.service._forwarding_enabled = True
         self.service._stop_event.clear()
-
         try:
-            with patch("asyncio.sleep", side_effect=fake_sleep):
-                # 1. Test throttling on a single channel
+            with patch('asyncio.sleep', side_effect=fake_sleep):
                 msg1 = make_message(chat_id=-1001234567890, message_id=1)
                 msg2 = make_message(chat_id=-1001234567890, message_id=2)
                 msg3 = make_message(chat_id=-1001234567890, message_id=3)
-                
                 await self.service.enqueue_telegram_message(msg1)
                 await self.service.enqueue_telegram_message(msg2)
                 await self.service.enqueue_telegram_message(msg3)
-
                 queue = self.service._channel_queues[-1001234567890]
-                
-                # Let loop process
                 for _ in range(20):
                     if queue.empty():
                         break
                     await asyncio.sleep(0)
-                
                 throttling_sleeps = [d for d in sleep_calls if d > 0]
                 self.assertEqual(len(throttling_sleeps), 2)
                 self.assertAlmostEqual(throttling_sleeps[0], 0.2)
                 self.assertAlmostEqual(throttling_sleeps[1], 0.2)
-
-            # 2. Test overflow: overflowing configured maxsize messages drops subsequent messages
-            # Patch asyncio.create_task to avoid running background workers for these overflow tests
-            with patch("asyncio.create_task") as mock_create_task, \
-                 patch.object(self.service, "resolve_mapping_for_telegram_message", return_value=make_mapping()):
-                mock_create_task.return_value = AsyncMock()
-                
+            with patch.object(self.service, 'resolve_mapping_for_telegram_message', return_value=make_mapping()):
                 chat_id_overflow = 9999
-                max_size = self.service.settings.bitrix_send_queue_maxsize
-                for i in range(max_size + 5):
-                    msg = make_message(chat_id=chat_id_overflow, message_id=100 + i)
-                    await self.service.enqueue_telegram_message(msg)
-                
-                # Channel 1 queue has max size, and is full. Next 5 messages are dropped.
-                self.assertEqual(self.service._channel_queues[chat_id_overflow].qsize(), max_size)
-                
-                # Other channel is unaffected
-                chat_id_other = 8888
-                msg_other = make_message(chat_id=chat_id_other, message_id=9999)
-                await self.service.enqueue_telegram_message(msg_other)
-                self.assertEqual(self.service._channel_queues[chat_id_other].qsize(), 1)
+                overflow_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+                overflow_queue.put_nowait(make_message(chat_id=chat_id_overflow, message_id=100))
+                self.service._channel_queues[chat_id_overflow] = overflow_queue
+                blocked_put = asyncio.create_task(self.service.enqueue_telegram_message(make_message(chat_id=chat_id_overflow, message_id=101)))
+                await asyncio.sleep(0)
+                self.assertFalse(blocked_put.done())
+                overflow_queue.get_nowait()
+                overflow_queue.task_done()
+                await blocked_put
+                self.assertEqual(overflow_queue.qsize(), 1)
         finally:
             loop.time = original_time
             self.service._channel_workers.pop(9999, None)
-            self.service._channel_workers.pop(8888, None)
             await self.service.stop()
 
     async def test_reload_mappings_cancels_obsolete_workers(self) -> None:
@@ -351,173 +203,59 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         dummy_task = AsyncMock(spec=asyncio.Task)
         self.service._channel_workers[chat_id] = dummy_task
         self.service._channel_queues[chat_id] = asyncio.Queue()
-
-        new_mapping = make_mapping(mapping_id=99, tg_chat_id=-9999, bitrix_dialog_id="chat77")
+        new_mapping = make_mapping(mapping_id=99, tg_chat_id=-9999, bitrix_dialog_id='chat77')
         self.state_store.load_all_chat_mappings = AsyncMock(return_value=(new_mapping,))
-        
         await self.service.reload_mappings()
-        
         dummy_task.cancel.assert_called_once()
         self.assertNotIn(chat_id, self.service._channel_workers)
         self.assertNotIn(chat_id, self.service._channel_queues)
 
-    async def test_poll_scheduler_concurrency(self) -> None:
-        from tests.helpers import make_mapping, make_settings
-        # Create 10 mappings
-        mappings = [
-            make_mapping(mapping_id=i, tg_chat_id=-100123456000 - i, bitrix_dialog_id=f"chat{i}")
-            for i in range(10)
-        ]
-        settings = make_settings(chat_mappings=tuple(mappings))
-        import dataclasses
-        settings = dataclasses.replace(settings, sync_bitrix_to_telegram=True)
-        
-        # Instantiate service
-        service = MirrorService(settings, self.bitrix, self.state_store)
-        
-        # Track concurrency
-        active_concurrency = 0
-        max_concurrency = 0
-        completed_polls = 0
-        concurrency_lock = asyncio.Lock()
-        done_event = asyncio.Event()
-
-        async def fake_sync_dialog(application, mapping, *, trigger):
-            nonlocal active_concurrency, max_concurrency, completed_polls
-            async with concurrency_lock:
-                active_concurrency += 1
-                if active_concurrency > max_concurrency:
-                    max_concurrency = active_concurrency
-            
-            # Sleep a bit to force concurrent execution
-            await asyncio.sleep(0.01)
-
-            async with concurrency_lock:
-                active_concurrency -= 1
-                completed_polls += 1
-                if completed_polls == 10:
-                    done_event.set()
-
-        async def fake_initialize_cursor(mapping):
-            service._last_seen_bitrix_message_ids[mapping.bitrix_dialog_id] = 1
-
-        service._sync_bitrix_dialog = fake_sync_dialog  # type: ignore[method-assign]
-        service._initialize_bitrix_cursor = fake_initialize_cursor  # type: ignore[method-assign]
-
-        # Start polling
-        app = SimpleNamespace()
-        await service.start_bitrix_polling(app)  # type: ignore[arg-type]
-
-        # Wait for all 10 to finish
-        try:
-            await asyncio.wait_for(done_event.wait(), timeout=2.0)
-        finally:
-            await service.stop()
-
-        # Verify no more than 5 ran concurrently
-        self.assertEqual(completed_polls, 10)
-        self.assertEqual(max_concurrency, 5)
-
-    async def test_reload_mappings_starts_and_stops_scheduler_dynamically(self) -> None:
-        from tests.helpers import make_mapping, make_settings
-        # 1. Start with zero mappings
+    async def test_fetcher_task_started_whenever_sync_is_enabled_even_with_zero_mappings(self) -> None:
+        from tests.helpers import make_settings
         settings = make_settings(chat_mappings=())
-        import dataclasses
         settings = dataclasses.replace(settings, sync_bitrix_to_telegram=True)
-        
         service = MirrorService(settings, self.bitrix, self.state_store)
         app = SimpleNamespace()
-        
-        # Start service
-        await service.start(app)  # type: ignore[arg-type]
-        
-        # Verify scheduler task is None because mappings was empty
-        self.assertIsNone(service._scheduler_task)
-        
-        # Mock load_all_chat_mappings to return a mapping
-        new_mapping = make_mapping(mapping_id=1, tg_chat_id=-1001234567890, bitrix_dialog_id="chat42")
-        self.state_store.load_all_chat_mappings = AsyncMock(return_value=(new_mapping,))
-        
-        # Reload mappings (simulates /connect)
+        await service.start(app)
+        self.assertIsNotNone(service._bitrix_event_task)
+        assert service._bitrix_event_task is not None
+        self.assertFalse(service._bitrix_event_task.done())
+        old_task = service._bitrix_event_task
         await service.reload_mappings()
-        
-        # Verify scheduler task has been started dynamically!
-        self.assertIsNotNone(service._scheduler_task)
-        self.assertFalse(service._scheduler_task.done())
-        
-        # Now change load_all_chat_mappings to return empty tuple (simulates disconnecting all mappings)
-        self.state_store.load_all_chat_mappings = AsyncMock(return_value=())
-        
-        # Reload mappings again
-        await service.reload_mappings()
-        
-        # Verify scheduler task has been cancelled and cleaned up to None!
-        self.assertIsNone(service._scheduler_task)
-        
-        # Cleanup
+        self.assertIs(service._bitrix_event_task, old_task)
         await service.stop()
+        self.assertIsNone(service._bitrix_event_task)
+
+    async def test_forwarding_disabled_acknowledges_events_without_telegram_side_effects(self) -> None:
+        self.service._forwarding_enabled = False
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        event = make_bitrix_event()
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.send_message.assert_not_called()
 
     async def test_should_forward_bitrix_message_ignores_own_bot(self) -> None:
         self.service.settings = dataclasses.replace(self.service.settings, bitrix_bot_id=999)
-        msg_from_bot = BitrixMessage(
-            message_id=15,
-            author_id=999,
-            text="hello from bot",
-            file_ids=(),
-            update_time_unix=None,
-            like_user_ids=(),
-            reply_id=None,
-            is_sticker=False,
-            is_meeting=False,
-            is_task=False,
-        )
-        should_forward = await self.service._should_forward_bitrix_message("chat42", msg_from_bot)
+        msg_from_bot = BitrixMessage(message_id=15, author_id=999, text='hello from bot', file_ids=(), update_time_unix=None, like_user_ids=(), reply_id=None, is_sticker=False, is_meeting=False, is_task=False)
+        should_forward = await self.service._should_forward_bitrix_message('chat42', msg_from_bot)
         self.assertFalse(should_forward)
 
     async def test_should_forward_bitrix_message_ignores_tg_connect_command(self) -> None:
-        msg = BitrixMessage(
-            message_id=20,
-            author_id=123,
-            text="/tg_connect",
-            file_ids=(),
-            update_time_unix=None,
-            like_user_ids=(),
-            reply_id=None,
-            is_sticker=False,
-            is_meeting=False,
-            is_task=False,
-        )
-        should_forward = await self.service._should_forward_bitrix_message("chat42", msg)
+        msg = BitrixMessage(message_id=20, author_id=123, text='/tg_connect', file_ids=(), update_time_unix=None, like_user_ids=(), reply_id=None, is_sticker=False, is_meeting=False, is_task=False)
+        should_forward = await self.service._should_forward_bitrix_message('chat42', msg)
         self.assertFalse(should_forward)
 
     async def test_should_forward_bitrix_message_ignores_tg_connect_with_args(self) -> None:
-        msg = BitrixMessage(
-            message_id=21,
-            author_id=123,
-            text="/tg_connect argument",
-            file_ids=(),
-            update_time_unix=None,
-            like_user_ids=(),
-            reply_id=None,
-            is_sticker=False,
-            is_meeting=False,
-            is_task=False,
-        )
-        should_forward = await self.service._should_forward_bitrix_message("chat42", msg)
+        msg = BitrixMessage(message_id=21, author_id=123, text='/tg_connect argument', file_ids=(), update_time_unix=None, like_user_ids=(), reply_id=None, is_sticker=False, is_meeting=False, is_task=False)
+        should_forward = await self.service._should_forward_bitrix_message('chat42', msg)
         self.assertFalse(should_forward)
 
     async def test_enqueue_telegram_message_uses_configured_queue_maxsize(self) -> None:
         self.service.settings = dataclasses.replace(self.service.settings, bitrix_send_queue_maxsize=555)
         self.service._forwarding_enabled = True
-        
-        message = make_message(text="test queue size")
+        message = make_message(text='test queue size')
         await self.service.enqueue_telegram_message(message)
-        
-        # Get the created queue for the chat
         queue = self.service._channel_queues[message.chat_id]
         self.assertEqual(queue.maxsize, 555)
-        
-        # Cancel the worker task to prevent background task leaks in tests
         if message.chat_id in self.service._channel_workers:
             self.service._channel_workers[message.chat_id].cancel()
 
@@ -525,20 +263,266 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         """Worker must not send messages that were queued before forwarding was disabled."""
         mapping = self.service.settings.chat_mappings[0]
         chat_id = mapping.tg_chat_id
-
-        # Create queue and register it directly (bypassing enqueue_telegram_message which already checks the flag)
         queue: asyncio.Queue = asyncio.Queue()
         self.service._channel_queues[chat_id] = queue
-
-        # Disable forwarding, then put message directly in queue
         self.service._forwarding_enabled = False
         message = make_message(chat_id=chat_id)
         await queue.put(message)
-
-        # Run worker briefly
         worker_task = asyncio.create_task(self.service._per_channel_worker(chat_id))
         await asyncio.sleep(0.05)
         worker_task.cancel()
         await asyncio.gather(worker_task, return_exceptions=True)
-
         self.bitrix.send_message.assert_not_awaited()
+
+    async def test_message_add_forwards_without_dialog_history_call(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(return_value=make_message())))
+        await self.service._handle_bitrix_event(make_bitrix_event())
+        self.service._application.bot.send_message.assert_awaited_once()
+        self.state_store.upsert_link.assert_awaited_once()
+        self.bitrix.get_recent_messages.assert_not_awaited()
+        self.bitrix.get_messages_after.assert_not_awaited()
+
+    async def test_message_add_splits_long_text_for_telegram(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(return_value=make_message())))
+
+        await self.service._handle_bitrix_event(make_bitrix_event(text='x' * 5000))
+
+        calls = self.service._application.bot.send_message.await_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(len(call.kwargs['text']) <= 4096 for call in calls))
+        self.assertTrue(all(call.kwargs['parse_mode'] is None for call in calls))
+
+    async def test_worker_splits_long_text_for_bitrix_and_links_first_part(self) -> None:
+        mapping = self.service.settings.chat_mappings[0]
+        queue: asyncio.Queue = asyncio.Queue()
+        self.service._channel_queues[mapping.tg_chat_id] = queue
+        self.service._forwarding_enabled = True
+        self.bitrix.send_message = AsyncMock(side_effect=[501, 502])
+        await queue.put(make_message(chat_id=mapping.tg_chat_id, text='x' * 20_100))
+        worker = asyncio.create_task(self.service._per_channel_worker(mapping.tg_chat_id))
+
+        await queue.join()
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+        calls = self.bitrix.send_message.await_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(len(call.args[0]) <= 20_000 for call in calls))
+        self.assertEqual(self.state_store.upsert_link.await_args.kwargs['bitrix_message_id'], 501)
+
+    async def test_worker_retries_in_place_when_queue_is_full(self) -> None:
+        mapping = self.service.settings.chat_mappings[0]
+        queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+        self.service._channel_queues[mapping.tg_chat_id] = queue
+        self.service._forwarding_enabled = True
+        self.bitrix.send_message = AsyncMock(side_effect=[RuntimeError('temporary'), 501, 502])
+        await queue.put(make_message(chat_id=mapping.tg_chat_id, message_id=1, text='first'))
+        await queue.put(make_message(chat_id=mapping.tg_chat_id, message_id=2, text='second'))
+        worker = asyncio.create_task(self.service._per_channel_worker(mapping.tg_chat_id))
+
+        await asyncio.wait_for(queue.join(), timeout=2)
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+        sent_texts = [call.args[0] for call in self.bitrix.send_message.await_args_list]
+        self.assertEqual(sent_texts[0], sent_texts[1])
+        self.assertNotEqual(sent_texts[1], sent_texts[2])
+
+    async def test_message_add_is_idempotent_when_link_exists(self) -> None:
+        self.state_store.get_link_by_bitrix_message.return_value = make_link(origin=MirrorOrigin.BITRIX)
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        await self.service._handle_bitrix_event(make_bitrix_event())
+        self.service._application.bot.send_message.assert_not_awaited()
+
+    async def test_message_add_ignores_own_bot(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        await self.service._handle_bitrix_event(make_bitrix_event(author_id=7))
+        self.service._application.bot.send_message.assert_not_awaited()
+
+    async def test_message_add_ignores_unmapped_dialog(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        await self.service._handle_bitrix_event(make_bitrix_event(dialog_id='chat999'))
+        self.service._application.bot.send_message.assert_not_awaited()
+
+    async def test_tg_connect_saves_token_and_captures_chat_title(self) -> None:
+        event = make_bitrix_event(text='/tg_connect', chat_name='Рабочий чат')
+        await self.service._handle_bitrix_event(event)
+        self.state_store.save_pending_connection.assert_awaited_once()
+        args = self.state_store.save_pending_connection.await_args.args
+        self.assertEqual(args[0], 'chat42')          # dialog_id
+        self.assertEqual(args[3], 'Рабочий чат')      # captured Bitrix chat title
+        self.bitrix.send_message.assert_awaited_once()
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        self.service._application.bot.send_message.assert_not_awaited()
+
+    async def test_tg_connect_without_chat_name_stores_empty_title(self) -> None:
+        # private chats carry no group name; the flow must still store '' and succeed
+        event = make_bitrix_event(text='/tg_connect')
+        await self.service._handle_bitrix_event(event)
+        args = self.state_store.save_pending_connection.await_args.args
+        self.assertEqual(args[3], '')
+
+    async def test_join_chat_greets_personal_dialog_only(self) -> None:
+        # personal 1:1 dialog: numeric dialogId, chat.type != "chat"
+        event = make_bitrix_event('ONIMBOTV2JOINCHAT')
+        event = dataclasses.replace(event, data={'bot': {'id': 7}, 'dialogId': '55', 'chat': {'dialogId': '55', 'type': 'im'}})
+        await self.service._handle_bitrix_event(event)
+        self.bitrix.send_message.assert_awaited_once_with('Привет. Бот подключён и готов к работе.', dialog_id='55')
+
+    async def test_join_chat_does_not_greet_group_dialog(self) -> None:
+        event = make_bitrix_event('ONIMBOTV2JOINCHAT')
+        event = dataclasses.replace(event, data={'bot': {'id': 7}, 'dialogId': 'chat42', 'chat': {'dialogId': 'chat42', 'type': 'chat'}})
+        await self.service._handle_bitrix_event(event)
+        self.bitrix.send_message.assert_not_awaited()
+
+    async def test_join_chat_does_not_greet_group_dialog_without_type(self) -> None:
+        # group dialog identified purely by the "chatXXX" dialogId prefix
+        event = make_bitrix_event('ONIMBOTV2JOINCHAT')
+        event = dataclasses.replace(event, data={'bot': {'id': 7}, 'dialogId': 'chat42', 'chat': {'dialogId': 'chat42'}})
+        await self.service._handle_bitrix_event(event)
+        self.bitrix.send_message.assert_not_awaited()
+
+    async def test_message_update_edits_linked_telegram_message(self) -> None:
+        link = make_link(origin=MirrorOrigin.BITRIX)
+        self.state_store.get_link_by_bitrix_message.return_value = link
+        application = SimpleNamespace(bot=SimpleNamespace(edit_message_text=AsyncMock()))
+        self.service._application = application
+        await self.service._handle_bitrix_event(make_bitrix_event('ONIMBOTV2MESSAGEUPDATE', text='edited'))
+        application.bot.edit_message_text.assert_awaited_once()
+        self.state_store.upsert_link.assert_awaited_once()
+
+    async def test_message_update_ignores_our_bot(self) -> None:
+        link = make_link(origin=MirrorOrigin.TELEGRAM)
+        self.state_store.get_link_by_bitrix_message.return_value = link
+        application = SimpleNamespace(bot=SimpleNamespace(edit_message_text=AsyncMock()))
+        self.service._application = application
+
+        await self.service._handle_bitrix_event(
+            make_bitrix_event("ONIMBOTV2MESSAGEUPDATE", author_id=self.service.settings.bitrix_bot_id)
+        )
+
+        application.bot.edit_message_text.assert_not_awaited()
+        self.state_store.upsert_link.assert_not_awaited()
+
+    async def test_message_delete_removes_telegram_message_and_link(self) -> None:
+        link = make_link(origin=MirrorOrigin.BITRIX)
+        self.state_store.get_link_by_bitrix_message.return_value = link
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(delete_message=AsyncMock()))
+        event = dataclasses.replace(make_bitrix_event('ONIMBOTV2MESSAGEDELETE'), data={'messageId': 789, 'chat': {'dialogId': 'chat42'}})
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.delete_message.assert_awaited_once()
+        self.state_store.delete_link_by_bitrix_message.assert_awaited_once_with(bitrix_message_id=789)
+
+    async def test_message_delete_removes_link_when_telegram_message_not_found(self) -> None:
+        link = make_link(origin=MirrorOrigin.BITRIX)
+        self.state_store.get_link_by_bitrix_message.return_value = link
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(delete_message=AsyncMock(side_effect=BadRequest('Message to delete not found'))))
+        event = dataclasses.replace(make_bitrix_event('ONIMBOTV2MESSAGEDELETE'), data={'messageId': 789, 'chat': {'dialogId': 'chat42'}})
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.delete_message.assert_awaited_once()
+        self.state_store.delete_link_by_bitrix_message.assert_awaited_once_with(bitrix_message_id=789)
+
+    async def test_like_event_updates_telegram_and_reaction_state(self) -> None:
+        link = make_link(last_seen_bitrix_likes='')
+        self.state_store.get_link_by_bitrix_message.return_value = link
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(set_message_reaction=AsyncMock()))
+        event = dataclasses.replace(make_bitrix_event('ONIMBOTV2REACTIONCHANGE'), data={'reaction': 'like', 'action': 'add', 'message': {'id': 789}, 'chat': {'dialogId': 'chat42'}, 'user': {'id': 41}})
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.set_message_reaction.assert_awaited_once()
+        self.state_store.update_reaction_state.assert_awaited_once_with(bitrix_message_id=789, bitrix_liked_by_bot=False, last_seen_bitrix_likes='41')
+
+    async def test_message_add_resolves_reply_to_message_id(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(return_value=make_message())))
+        reply_link = make_link(telegram_message_id=456, bitrix_message_id=700)
+        self.state_store.get_link_by_bitrix_message.side_effect = lambda bitrix_message_id: reply_link if bitrix_message_id == 700 else None
+        event = make_bitrix_event()
+        event.data['message']['params']['REPLY_ID'] = '700'
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.send_message.assert_awaited_once()
+        kwargs = self.service._application.bot.send_message.await_args.kwargs
+        self.assertEqual(kwargs.get('reply_to_message_id'), 456)
+
+    async def test_message_add_delivers_photo_file(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_photo=AsyncMock(return_value=make_message(photo=[SimpleNamespace(file_id='tgfile')]))))
+        self.bitrix.download_file_by_id = AsyncMock(return_value=b'fake-image-bytes')
+        event = make_bitrix_event()
+        event.data['message']['params']['FILE_ID'] = ['9']
+        event.data['files'] = {'9': {'ID': 9, 'original_name': 'pic.jpg', 'TYPE': 'file', 'MIME_TYPE': 'image/jpeg', 'DOWNLOAD_URL': 'https://example.com/pic.jpg', 'AUTHOR_ID': 41}}
+        await self.service._handle_bitrix_event(event)
+        self.bitrix.download_file_by_id.assert_awaited_once_with(9, fallback_url='https://example.com/pic.jpg')
+        self.service._application.bot.send_photo.assert_awaited_once()
+
+    async def test_message_add_fetches_file_meta_when_event_lacks_files(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_photo=AsyncMock(return_value=make_message(photo=[SimpleNamespace(file_id='tgfile')]))))
+        self.bitrix.download_file_by_id = AsyncMock(return_value=b'fake-image-bytes')
+        self.bitrix.get_file_meta = AsyncMock(return_value=BitrixFile(
+            file_id=9, name='photo.jpg', url_download='https://example.com/photo.jpg',
+            mime_type='image/jpeg', file_type='image', is_image=True, author_id=41,
+        ))
+        event = make_bitrix_event()
+        event.data['message']['params']['FILE_ID'] = ['9']
+
+        await self.service._handle_bitrix_event(event)
+
+        self.bitrix.get_file_meta.assert_awaited_once_with(9)
+        # the named disk record (with its download URL) reached the forwarder,
+        # not the anonymous file_9 placeholder
+        self.bitrix.download_file_by_id.assert_awaited_once_with(9, fallback_url='https://example.com/photo.jpg')
+        self.service._application.bot.send_photo.assert_awaited_once()
+
+    async def test_message_add_without_files_falls_back_to_placeholder(self) -> None:
+        # get_file_meta returns None -> download is still resolved by file ID.
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(
+            send_message=AsyncMock(return_value=make_message()),
+            send_photo=AsyncMock(),
+            send_document=AsyncMock(return_value=make_message()),
+        ))
+        self.bitrix.download_file_by_id = AsyncMock(return_value=b'fake-image-bytes')
+        self.bitrix.get_file_meta = AsyncMock(return_value=None)
+        event = make_bitrix_event()
+        event.data['message']['params']['FILE_ID'] = ['9']
+
+        await self.service._handle_bitrix_event(event)
+
+        self.bitrix.get_file_meta.assert_awaited_once_with(9)
+        self.bitrix.download_file_by_id.assert_awaited_once_with(9, fallback_url=None)
+        self.service._application.bot.send_document.assert_awaited_once()
+
+    async def test_fetch_cycle_advances_after_each_successful_event(self) -> None:
+        self.state_store.load_bitrix_event_offset.return_value = 100
+        self.bitrix.get_bot_events.return_value = BitrixEventPage(events=(make_bitrix_event(event_id=101),), next_offset=102, has_more=False)
+        self.service._handle_bitrix_event = AsyncMock()
+        await self.service._fetch_bitrix_events_once()
+        self.state_store.save_bitrix_event_offset.assert_awaited_once_with(7, 102)
+
+    async def test_fetch_cycle_does_not_advance_failed_event(self) -> None:
+        self.state_store.load_bitrix_event_offset.return_value = 100
+        self.bitrix.get_bot_events.return_value = BitrixEventPage(events=(make_bitrix_event(event_id=101),), next_offset=102, has_more=False)
+        self.service._handle_bitrix_event = AsyncMock(side_effect=RuntimeError('Telegram down'))
+        with self.assertRaises(RuntimeError):
+            await self.service._fetch_bitrix_events_once()
+        self.state_store.save_bitrix_event_offset.assert_not_awaited()
+
+    async def test_message_add_does_not_acknowledge_after_third_failure(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(side_effect=RuntimeError("Telegram down"))))
+        event = make_bitrix_event()
+        self.service._forward_attempts[event.data["message"]["id"]] = 2
+
+        with self.assertRaises(RuntimeError):
+            await self.service._handle_bitrix_event(event)
+
+    async def test_fetch_cycle_sequentially_saves_event_offsets(self) -> None:
+        self.state_store.load_bitrix_event_offset.return_value = 100
+        self.bitrix.get_bot_events.return_value = BitrixEventPage(events=(make_bitrix_event(event_id=101), make_bitrix_event(event_id=102), make_bitrix_event(event_id=103)), next_offset=104, has_more=False)
+
+        async def mock_handle(event):
+            if event.event_id == 103:
+                raise RuntimeError('Fail on third event')
+        self.service._handle_bitrix_event = mock_handle
+        with self.assertRaises(RuntimeError):
+            await self.service._fetch_bitrix_events_once()
+        self.assertEqual(self.state_store.save_bitrix_event_offset.call_count, 2)
+        self.state_store.save_bitrix_event_offset.assert_has_awaits([unittest.mock.call(7, 102), unittest.mock.call(7, 103)])
+
+def make_link(*, origin: MirrorOrigin=MirrorOrigin.BITRIX, last_seen_bitrix_likes: str='', bitrix_liked_by_bot: bool=False, telegram_chat_id: int=-1001234567890, telegram_message_id: int=200, bitrix_message_id: int=789) -> MessageMirrorLink:
+    return MessageMirrorLink(telegram_chat_id=telegram_chat_id, telegram_message_id=telegram_message_id, bitrix_message_id=bitrix_message_id, origin=origin, telegram_message_date_unix=123456, bitrix_author_id=41, last_seen_bitrix_revision='rev', created_at_unix=123456, updated_at_unix=123456, bitrix_liked_by_bot=bitrix_liked_by_bot, last_seen_bitrix_likes=last_seen_bitrix_likes)

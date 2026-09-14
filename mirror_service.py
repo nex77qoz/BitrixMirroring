@@ -31,7 +31,7 @@ logger = logging.getLogger('tg-bitrix-mirror')
 _BITRIX_MESSAGE_LIMIT = 20_000
 _TELEGRAM_MESSAGE_LIMIT = 4_096
 _TELEGRAM_CAPTION_LIMIT = 1_024
-_BBCODE_PATTERNS: list[tuple[re.Pattern[str], str]] = [(re.compile('\\[b\\](.*?)\\[/b\\]', re.DOTALL | re.IGNORECASE), '<b>\\1</b>'), (re.compile('\\[i\\](.*?)\\[/i\\]', re.DOTALL | re.IGNORECASE), '<i>\\1</i>'), (re.compile('\\[u\\](.*?)\\[/u\\]', re.DOTALL | re.IGNORECASE), '<u>\\1</u>'), (re.compile('\\[s\\](.*?)\\[/s\\]', re.DOTALL | re.IGNORECASE), '<s>\\1</s>'), (re.compile('\\[code\\](.*?)\\[/code\\]', re.DOTALL | re.IGNORECASE), '<code>\\1</code>'), (re.compile('\\[quote\\](.*?)\\[/quote\\]', re.DOTALL | re.IGNORECASE), '<blockquote>\\1</blockquote>'), (re.compile('\\[url\\](.*?)\\[/url\\]', re.DOTALL | re.IGNORECASE), '<a href="\\1">\\1</a>'), (re.compile('\\[url=([^\\]]+)\\](.*?)\\[/url\\]', re.DOTALL | re.IGNORECASE), '<a href="\\1">\\2</a>'), (re.compile('\\[color=[^\\]]+\\](.*?)\\[/color\\]', re.DOTALL | re.IGNORECASE), '\\1')]
+_BBCODE_PATTERNS: list[tuple[re.Pattern[str], str]] = [(re.compile('\\[b\\](.*?)\\[/b\\]', re.DOTALL | re.IGNORECASE), '<b>\\1</b>'), (re.compile('\\[i\\](.*?)\\[/i\\]', re.DOTALL | re.IGNORECASE), '<i>\\1</i>'), (re.compile('\\[u\\](.*?)\\[/u\\]', re.DOTALL | re.IGNORECASE), '<u>\\1</u>'), (re.compile('\\[s\\](.*?)\\[/s\\]', re.DOTALL | re.IGNORECASE), '<s>\\1</s>'), (re.compile('\\[code\\](.*?)\\[/code\\]', re.DOTALL | re.IGNORECASE), '<code>\\1</code>'), (re.compile('\\[quote\\](.*?)\\[/quote\\]', re.DOTALL | re.IGNORECASE), '<blockquote>\\1</blockquote>'), (re.compile('\\[url\\](.*?)\\[/url\\]', re.DOTALL | re.IGNORECASE), '<a href="\\1">\\1</a>'), (re.compile('\\[url=([^\\]]+)\\](.*?)\\[/url\\]', re.DOTALL | re.IGNORECASE), '<a href="\\1">\\2</a>'), (re.compile('\\[color=[^\\]]+\\](.*?)\\[/color\\]', re.DOTALL | re.IGNORECASE), '\\1'), (re.compile('\\[user=\\d+\\](.*?)\\[/user\\]', re.DOTALL | re.IGNORECASE), '<b>@\\1</b>')]
 
 def _bbcode_to_html(text: str) -> str:
     """Convert Bitrix BBCode markup to Telegram HTML markup.
@@ -52,7 +52,6 @@ class MirrorService:
         self.settings = settings
         self.bitrix = bitrix
         self.state_store = state_store
-        self._last_seen_bitrix_message_ids: dict[str, int | None] = {}
         self._bitrix_poll_tasks: list[asyncio.Task[None]] = []
         self._stop_event = asyncio.Event()
         self._cursor_locks: dict[str, asyncio.Lock] = {}
@@ -326,6 +325,18 @@ class MirrorService:
             return
         if self.settings.bitrix_bot_id and bitrix_message.author_id == self.settings.bitrix_bot_id:
             return
+        if bitrix_message.author_id == 0:
+            logger.debug('Ignoring Bitrix service message %s from author_id=0', bitrix_message.message_id)
+            return
+        if bitrix_message.is_sticker:
+            logger.debug('Ignoring Bitrix sticker message %s', bitrix_message.message_id)
+            return
+        if bitrix_message.is_meeting:
+            logger.debug('Ignoring Bitrix meeting card %s', bitrix_message.message_id)
+            return
+        if bitrix_message.is_task:
+            logger.debug('Ignoring Bitrix task card %s', bitrix_message.message_id)
+            return
         text_lower = (bitrix_message.text or '').strip().lower()
         if text_lower in {'/start', 'start'}:
             reply = 'Привет. Я получил сообщение и могу отвечать в этот чат.'
@@ -565,10 +576,12 @@ class MirrorService:
                     f = BitrixFile.from_api_payload(v)
                     if f is not None:
                         files_by_id[f.file_id] = f
-        for fid in bitrix_message.file_ids:
-            if fid in files_by_id:
-                continue
-            meta = await self.bitrix.get_file_meta(fid)
+        missing_ids = [fid for fid in bitrix_message.file_ids if fid not in files_by_id]
+        # Resolve concurrently: this coroutine runs on the single-threaded Bitrix
+        # event handler, so resolving sequentially would let get_file_meta's
+        # internal retry sleep on one attachment block every other queued event.
+        resolved = await asyncio.gather(*(self.bitrix.get_file_meta(fid) for fid in missing_ids))
+        for fid, meta in zip(missing_ids, resolved, strict=True):
             if meta is not None:
                 files_by_id[fid] = meta
             else:
@@ -600,12 +613,15 @@ class MirrorService:
                 backoff = min(backoff * 2, self.settings.bitrix_poll_max_backoff_seconds)
 
     async def _fetch_bitrix_events_once(self) -> bool:
+        # Vibe's docs are explicit: always resume with the API-provided nextOffset,
+        # never with the last event's eventId+1 — eventId and the offset cursor are
+        # not guaranteed to share the same numbering. Event handlers are idempotent
+        # (existing_link checks), so re-processing this page after a mid-page failure
+        # is safe; we only persist progress once the whole page has been handled.
         page = await self.bitrix.get_bot_events(offset=self._bitrix_event_offset)
         for event in page.events:
             await self._handle_bitrix_event(event)
-            self._bitrix_event_offset = event.event_id + 1
-            await self.state_store.save_bitrix_event_offset(self.settings.bitrix_bot_id, self._bitrix_event_offset)
-        if not page.events and page.next_offset is not None:
+        if page.next_offset is not None:
             self._bitrix_event_offset = page.next_offset
             await self.state_store.save_bitrix_event_offset(self.settings.bitrix_bot_id, self._bitrix_event_offset)
         return page.has_more
@@ -674,41 +690,6 @@ class MirrorService:
                 self._channel_worker_busy.discard(chat_id)
                 if retry_message is None:
                     queue.task_done()
-    async def _should_forward_bitrix_message(self, dialog_id: str, bitrix_message: BitrixMessage) -> bool:
-        if self.settings.bitrix_bot_id and bitrix_message.author_id == self.settings.bitrix_bot_id:
-            logger.debug('Ignoring Bitrix message %s from our own bot (author_id=%s)', bitrix_message.message_id, bitrix_message.author_id)
-            return False
-        last_seen = self._last_seen_bitrix_message_ids.get(dialog_id)
-        if last_seen is not None and bitrix_message.message_id <= last_seen:
-            self._forward_attempts.pop(bitrix_message.message_id, None)
-            return False
-        existing_link = await self.state_store.get_link_by_bitrix_message(bitrix_message_id=bitrix_message.message_id)
-        if existing_link is not None:
-            return False
-        if bitrix_message.author_id == 0:
-            logger.debug('Ignoring Bitrix service message %s from author_id=0', bitrix_message.message_id)
-            return False
-        text_lower = bitrix_message.text.lower().strip()
-        if text_lower == '/tg_connect' or text_lower.startswith('/tg_connect '):
-            logger.debug('Ignoring Bitrix /tg_connect command message %s', bitrix_message.message_id)
-            return False
-        if bitrix_message.is_sticker:
-            logger.debug('Ignoring Bitrix sticker message %s', bitrix_message.message_id)
-            return False
-        if bitrix_message.is_meeting:
-            logger.debug('Ignoring Bitrix meeting card %s', bitrix_message.message_id)
-            return False
-        if bitrix_message.is_task:
-            logger.debug('Ignoring Bitrix task card %s', bitrix_message.message_id)
-            return False
-        if not bitrix_message.text.strip() and (not bitrix_message.file_ids):
-            return False
-        link = await self.state_store.get_link_by_bitrix_message(bitrix_message_id=bitrix_message.message_id)
-        if link is not None and link.origin == MirrorOrigin.TELEGRAM:
-            logger.debug('Suppressing Bitrix message %s because it is mapped to Telegram-origin message %s', bitrix_message.message_id, link.telegram_message_id)
-            return False
-        return True
-
     def _has_uploadable_file(self, message: Message) -> bool:
         return bool(message.photo or message.document or message.video or message.audio)
 

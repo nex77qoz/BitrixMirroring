@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 from telegram.error import BadRequest
 
 from mirror_service import MirrorService, _bbcode_to_html
-from models import BitrixEventPage, BitrixFile, BitrixMessage, MessageMirrorLink, MirrorOrigin
+from models import BitrixEventPage, BitrixFile, MessageMirrorLink, MirrorOrigin
 from tests.helpers import make_bitrix_event, make_mapping, make_message, make_settings
 
 
@@ -96,6 +96,10 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         url = 'https://www.technoavia.ru/closed-area/corp_universitet/siz_pechat'
         converted = _bbcode_to_html(f'[URL]{url}[/URL]')
         self.assertEqual(converted, f'<a href="{url}">{url}</a>')
+
+    async def test_bbcode_user_mention_renders_as_bold_name(self) -> None:
+        converted = _bbcode_to_html('Привет [USER=183982]Мария Штейнфельд[/USER], как дела?')
+        self.assertEqual(converted, 'Привет <b>@Мария Штейнфельд</b>, как дела?')
 
     async def test_is_admin_delegates_to_state_store(self) -> None:
         self.state_store.is_admin = AsyncMock(return_value=True)
@@ -233,21 +237,48 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         await self.service._handle_bitrix_event(event)
         self.service._application.bot.send_message.assert_not_called()
 
-    async def test_should_forward_bitrix_message_ignores_own_bot(self) -> None:
-        self.service.settings = dataclasses.replace(self.service.settings, bitrix_bot_id=999)
-        msg_from_bot = BitrixMessage(message_id=15, author_id=999, text='hello from bot', file_ids=(), update_time_unix=None, like_user_ids=(), reply_id=None, is_sticker=False, is_meeting=False, is_task=False)
-        should_forward = await self.service._should_forward_bitrix_message('chat42', msg_from_bot)
-        self.assertFalse(should_forward)
+    async def test_message_add_ignores_tg_connect_command(self) -> None:
+        event = make_bitrix_event(text='/tg_connect')
+        await self.service._handle_bitrix_event(event)
+        self.bitrix.send_message.assert_awaited_once()
+        self.state_store.upsert_link.assert_not_awaited()
 
-    async def test_should_forward_bitrix_message_ignores_tg_connect_command(self) -> None:
-        msg = BitrixMessage(message_id=20, author_id=123, text='/tg_connect', file_ids=(), update_time_unix=None, like_user_ids=(), reply_id=None, is_sticker=False, is_meeting=False, is_task=False)
-        should_forward = await self.service._should_forward_bitrix_message('chat42', msg)
-        self.assertFalse(should_forward)
+    async def test_message_add_ignores_tg_connect_with_args(self) -> None:
+        event = make_bitrix_event(text='/tg_connect argument')
+        await self.service._handle_bitrix_event(event)
+        self.bitrix.send_message.assert_awaited_once()
+        self.state_store.upsert_link.assert_not_awaited()
 
-    async def test_should_forward_bitrix_message_ignores_tg_connect_with_args(self) -> None:
-        msg = BitrixMessage(message_id=21, author_id=123, text='/tg_connect argument', file_ids=(), update_time_unix=None, like_user_ids=(), reply_id=None, is_sticker=False, is_meeting=False, is_task=False)
-        should_forward = await self.service._should_forward_bitrix_message('chat42', msg)
-        self.assertFalse(should_forward)
+    async def test_message_add_ignores_service_message_author_id_zero(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        event = make_bitrix_event(author_id=0, text='')
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.send_message.assert_not_called()
+        self.state_store.upsert_link.assert_not_awaited()
+
+    async def test_message_add_ignores_sticker(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        event = make_bitrix_event()
+        event.data['message']['params']['STICKER_PARAMS'] = {'id': '1'}
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.send_message.assert_not_called()
+        self.state_store.upsert_link.assert_not_awaited()
+
+    async def test_message_add_ignores_meeting_card(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        event = make_bitrix_event()
+        event.data['message']['params']['MEETING_CONFIRM'] = 'Y'
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.send_message.assert_not_called()
+        self.state_store.upsert_link.assert_not_awaited()
+
+    async def test_message_add_ignores_task_card(self) -> None:
+        self.service._application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        event = make_bitrix_event()
+        event.data['message']['params']['TASK_ID'] = '5'
+        await self.service._handle_bitrix_event(event)
+        self.service._application.bot.send_message.assert_not_called()
+        self.state_store.upsert_link.assert_not_awaited()
 
     async def test_enqueue_telegram_message_uses_configured_queue_maxsize(self) -> None:
         self.service.settings = dataclasses.replace(self.service.settings, bitrix_send_queue_maxsize=555)
@@ -511,7 +542,9 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await self.service._handle_bitrix_event(event)
 
-    async def test_fetch_cycle_sequentially_saves_event_offsets(self) -> None:
+    async def test_fetch_cycle_does_not_advance_offset_on_partial_page_failure(self) -> None:
+        # A failure partway through a page must not persist nextOffset — event
+        # handlers are idempotent, so the whole page is safely retried next poll.
         self.state_store.load_bitrix_event_offset.return_value = 100
         self.bitrix.get_bot_events.return_value = BitrixEventPage(events=(make_bitrix_event(event_id=101), make_bitrix_event(event_id=102), make_bitrix_event(event_id=103)), next_offset=104, has_more=False)
 
@@ -521,8 +554,7 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.service._handle_bitrix_event = mock_handle
         with self.assertRaises(RuntimeError):
             await self.service._fetch_bitrix_events_once()
-        self.assertEqual(self.state_store.save_bitrix_event_offset.call_count, 2)
-        self.state_store.save_bitrix_event_offset.assert_has_awaits([unittest.mock.call(7, 102), unittest.mock.call(7, 103)])
+        self.state_store.save_bitrix_event_offset.assert_not_awaited()
 
 def make_link(*, origin: MirrorOrigin=MirrorOrigin.BITRIX, last_seen_bitrix_likes: str='', bitrix_liked_by_bot: bool=False, telegram_chat_id: int=-1001234567890, telegram_message_id: int=200, bitrix_message_id: int=789) -> MessageMirrorLink:
     return MessageMirrorLink(telegram_chat_id=telegram_chat_id, telegram_message_id=telegram_message_id, bitrix_message_id=bitrix_message_id, origin=origin, telegram_message_date_unix=123456, bitrix_author_id=41, last_seen_bitrix_revision='rev', created_at_unix=123456, updated_at_unix=123456, bitrix_liked_by_bot=bitrix_liked_by_bot, last_seen_bitrix_likes=last_seen_bitrix_likes)

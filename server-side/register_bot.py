@@ -1,19 +1,19 @@
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any
 
 DEFAULT_BASE_URL = "https://vibecode.bitrix24.tech/v1"
 BOT_CODE = "tg_mirror_bot_v2"
+_RETRY_ATTEMPTS = 4
+_RETRY_BASE_DELAY_SECONDS = 1.0
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 
-def vibe_request(api_key: str, base_url: str, method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
-    """Perform one Vibe API call. Returns (http_status, parsed_json_envelope).
-
-    Raises RuntimeError on transport failure or a non-JSON response.
-    """
+def _vibe_request_once(api_key: str, base_url: str, method: str, path: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
     url = f"{base_url.rstrip('/')}{path}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(  # noqa: S310 - base URL is HTTPS by configuration
@@ -45,6 +45,27 @@ def vibe_request(api_key: str, base_url: str, method: str, path: str, body: dict
     if not isinstance(envelope, dict):
         raise RuntimeError(f"{method} {path} -> unexpected JSON payload (HTTP {status})")
     return status, envelope
+
+
+def vibe_request(api_key: str, base_url: str, method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+    """Perform one Vibe API call, retrying transient failures. Returns (http_status, parsed_json_envelope).
+
+    Raises RuntimeError on transport failure or a non-JSON response. A transient
+    5xx/429 is retried with backoff (this install-time client has no other
+    resilience, unlike the runtime BitrixClient._request it otherwise duplicates).
+    """
+    delay = _RETRY_BASE_DELAY_SECONDS
+    last: tuple[int, dict[str, Any]] | None = None
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        status, envelope = _vibe_request_once(api_key, base_url, method, path, body)
+        if status not in _RETRYABLE_STATUSES:
+            return status, envelope
+        last = (status, envelope)
+        if attempt < _RETRY_ATTEMPTS:
+            time.sleep(delay)
+            delay *= 2
+    assert last is not None
+    return last
 
 
 def vibe_get(api_key: str, base_url: str, path: str) -> tuple[int, dict[str, Any]]:

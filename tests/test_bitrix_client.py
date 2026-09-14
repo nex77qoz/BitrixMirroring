@@ -169,14 +169,28 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(page.has_more)
         self.assertEqual(str(requests[0].url), "https://vibe.example.com/v1/bots/7/events?limit=1")
 
-    async def test_get_bot_events_rejects_malformed_payloads(self) -> None:
-        invalid_data: tuple[object, ...] = ([], {}, {"events": {}}, {"events": [{}]}, {"events": [], "nextOffset": "9"}, {"events": [], "nextOffset": True})
+    async def test_get_bot_events_rejects_malformed_envelopes(self) -> None:
+        invalid_data: tuple[object, ...] = ([], {}, {"events": {}}, {"events": [], "nextOffset": "9"}, {"events": [], "nextOffset": True})
         for payload in invalid_data:
             with self.subTest(payload=payload):
                 client, _ = make_client([(200, {"success": True, "data": payload}, {})])
                 self.addAsyncCleanup(client.close)
                 with self.assertRaises(RuntimeError):
                     await client.get_bot_events(offset=None)
+
+    async def test_get_bot_events_skips_malformed_events_without_dropping_the_page(self) -> None:
+        # One bad event must not stall the whole page (or the offset that covers it).
+        client, _ = make_client([ok({
+            "events": [{}, {"eventId": 8, "type": "ONIMBOTV2MESSAGEADD", "data": {"messageId": 3}}],
+            "nextOffset": 9,
+            "hasMore": False,
+        })])
+        self.addAsyncCleanup(client.close)
+
+        page = await client.get_bot_events(offset=None)
+
+        self.assertEqual(page.events, (BitrixBotEvent(8, "ONIMBOTV2MESSAGEADD", {"messageId": 3}),))
+        self.assertEqual(page.next_offset, 9)
 
     async def test_transient_bitrix_error_is_retried_then_succeeds(self) -> None:
         client, requests = make_client([

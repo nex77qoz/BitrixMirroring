@@ -195,7 +195,9 @@ class BitrixFile:
 
     @staticmethod
     def from_api_payload(payload: dict[str, Any]) -> BitrixFile | None:
-        raw_file_id = payload.get("id") or payload.get("ID")
+        raw_file_id = payload.get("id")
+        if raw_file_id is None:
+            raw_file_id = payload.get("ID")
         if isinstance(raw_file_id, str) and raw_file_id.strip().isdigit():
             raw_file_id = int(raw_file_id.strip())
         if not isinstance(raw_file_id, int):
@@ -228,6 +230,17 @@ class BitrixFile:
             or bool(mime_type and mime_type.startswith("image/"))
             or lower_name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"))
         )
+        # GET /v1/files/{id} (Vibe Disk schema, used by get_file_meta as a fallback
+        # when an event does not inline file metadata) has no mime_type and its
+        # "type" field means file-vs-folder, not media category — it always comes
+        # back as "file" for a chat attachment. Fall back to the filename extension
+        # so video/audio attachments resolved via that path still classify correctly,
+        # matching the extension fallback already used for images above.
+        if file_type == "file":
+            if lower_name.endswith((".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v")):
+                file_type = "video"
+            elif lower_name.endswith((".mp3", ".ogg", ".oga", ".wav", ".m4a", ".flac")):
+                file_type = "audio"
         return BitrixFile(
             file_id=raw_file_id,
             name=name,

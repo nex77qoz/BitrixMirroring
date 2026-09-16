@@ -103,6 +103,7 @@ def make_message(**overrides: object) -> SimpleNamespace:
         "video": None,
         "audio": None,
         "animation": None,
+        "api_kwargs": {},
     }
     values.update(overrides)
     return SimpleNamespace(**values)

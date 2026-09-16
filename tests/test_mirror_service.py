@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from telegram import Bot, Update
 from telegram.error import BadRequest
 
 from mirror_service import MirrorService, _bbcode_to_html
@@ -100,6 +101,95 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_bbcode_user_mention_renders_as_bold_name(self) -> None:
         converted = _bbcode_to_html('Привет [USER=183982]Мария Штейнфельд[/USER], как дела?')
         self.assertEqual(converted, 'Привет <b>@Мария Штейнфельд</b>, как дела?')
+
+    async def test_render_telegram_message_renders_rich_message_as_bbcode(self) -> None:
+        rich_message = {
+            'blocks': [
+                {
+                    'type': 'paragraph',
+                    'text': [
+                        'Hello ',
+                        {'type': 'bold', 'text': 'Bitrix'},
+                        ', see ',
+                        {'type': 'url', 'text': 'docs', 'url': 'https://example.com/docs'},
+                        ' and ',
+                        {'type': 'code', 'text': 'x = 1'},
+                    ],
+                },
+                {
+                    'type': 'list',
+                    'items': [
+                        {'blocks': [{'type': 'paragraph', 'text': 'first'}]},
+                        {'blocks': [{'type': 'paragraph', 'text': [{'type': 'italic', 'text': 'second'}]}]},
+                    ],
+                },
+                {'type': 'blockquote', 'blocks': [{'type': 'paragraph', 'text': 'quoted'}]},
+                {'type': 'table', 'cells': [[{'text': 'Metric'}, {'text': 'Value'}], [{'text': 'Uptime'}, {'text': '99.9%'}]]},
+                {'type': 'divider'},
+            ]
+        }
+        message = make_message(text=None, caption=None, api_kwargs={'rich_message': rich_message})
+
+        rendered = self.service.render_telegram_message(message)
+
+        self.assertIn('Hello [B]Bitrix[/B]', rendered)
+        self.assertIn('[URL=https://example.com/docs]docs[/URL]', rendered)
+        self.assertIn('[CODE]x = 1[/CODE]', rendered)
+        self.assertIn('- first\n- [I]second[/I]', rendered)
+        self.assertIn('[QUOTE]quoted[/QUOTE]', rendered)
+        self.assertIn('Metric | Value\nUptime | 99.9%', rendered)
+        self.assertIn('———', rendered)
+        self.assertNotIn('[Сообщение без поддерживаемого текста или вложения]', rendered)
+
+    async def test_extract_primary_text_prefers_typed_rich_message_attribute(self) -> None:
+        class _TypedRich:
+            def __init__(self, payload: dict) -> None:
+                self._payload = payload
+
+            def to_dict(self) -> dict:
+                return self._payload
+
+        typed = _TypedRich({'blocks': [{'type': 'paragraph', 'text': 'from attribute'}]})
+        message = make_message(
+            text=None,
+            caption=None,
+            rich_message=typed,
+            api_kwargs={'rich_message': {'blocks': [{'type': 'paragraph', 'text': 'from api_kwargs'}]}},
+        )
+
+        rendered = self.service.render_telegram_message(message)
+
+        self.assertIn('from attribute', rendered)
+        self.assertNotIn('from api_kwargs', rendered)
+
+    async def test_render_telegram_message_reads_rich_message_from_real_update(self) -> None:
+        payload = {
+            'update_id': 1,
+            'message': {
+                'message_id': 10,
+                'date': 1758000000,
+                'chat': {'id': -1001234567890, 'type': 'supergroup', 'title': 'Team', 'is_forum': True},
+                'from': {'id': 5, 'is_bot': False, 'first_name': 'Alice'},
+                'rich_message': {'blocks': [{'type': 'paragraph', 'text': [{'type': 'bold', 'text': 'Rich update'}]}]},
+            },
+        }
+        update = Update.de_json(payload, Bot(token='123456:TESTTOKEN'))
+        assert update is not None
+        message = update.effective_message
+        assert message is not None
+
+        rendered = self.service.render_telegram_message(message)
+
+        self.assertIn('[B]Rich update[/B]', rendered)
+
+    async def test_unsupported_message_logs_and_falls_back_to_placeholder(self) -> None:
+        message = make_message(text=None, caption=None, api_kwargs={'unknown_field': 1})
+
+        with self.assertLogs('tg-bitrix-mirror', level='WARNING') as captured:
+            rendered = self.service.render_telegram_message(message)
+
+        self.assertIn('[Сообщение без поддерживаемого текста или вложения]', rendered)
+        self.assertTrue(any('unknown_field' in record.getMessage() for record in captured.records))
 
     async def test_is_admin_delegates_to_state_store(self) -> None:
         self.state_store.is_admin = AsyncMock(return_value=True)

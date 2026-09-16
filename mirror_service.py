@@ -6,6 +6,7 @@ import hashlib
 import html
 import logging
 import re
+from collections.abc import Mapping
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
@@ -45,6 +46,209 @@ def _bbcode_to_html(text: str) -> str:
     for pattern, replacement in _BBCODE_PATTERNS:
         escaped = pattern.sub(replacement, escaped)
     return escaped
+
+
+# Rich Messages (Bot API 10.1): inline RichText wrapper types mapped to the
+# matching Bitrix BBCode tag. Everything else is rendered as plain text.
+_RICH_TEXT_BBCODE_TAGS = {
+    'bold': 'B',
+    'italic': 'I',
+    'underline': 'U',
+    'strikethrough': 'S',
+    'code': 'CODE',
+}
+# Inline RichText types that only carry a nested ``text`` node to render as-is.
+_RICH_TEXT_INLINE_TYPES = {
+    'date_time',
+    'text_mention',
+    'subscript',
+    'superscript',
+    'marked',
+    'email_address',
+    'phone_number',
+    'bank_card_number',
+    'mention',
+    'hashtag',
+    'cashtag',
+    'bot_command',
+    'anchor_link',
+    'reference',
+    'reference_link',
+}
+# RichBlock types whose payload is a single ``text`` node.
+_RICH_BLOCK_TEXT_TYPES = {'paragraph', 'heading', 'pre', 'footer'}
+_RICH_BLOCK_QUOTE_TYPES = {'blockquote', 'expandable_blockquote', 'pullquote'}
+# RichBlock media types rendered by their caption only (the binary itself is not
+# forwarded here).
+_RICH_BLOCK_MEDIA_TYPES = {'animation', 'audio', 'collage', 'document', 'map', 'photo', 'slideshow', 'video', 'voice_note'}
+
+
+def _rich_to_mapping(node: Any) -> dict[str, Any] | None:
+    """Normalise a rich-message node to a plain dict.
+
+    PTB 21.x/22.x surfaces ``rich_message`` as a raw dict (``api_kwargs``),
+    while a future release that types the field will hand us ``RichMessage``
+    objects. Both are accepted so the flattener survives that upgrade.
+    """
+    if isinstance(node, dict):
+        return node
+    to_dict = getattr(node, 'to_dict', None)
+    if callable(to_dict):
+        result = to_dict()
+        if isinstance(result, dict):
+            return result
+    return None
+
+
+def _rich_text_to_bbcode(node: Any) -> str:
+    """Render a RichText node tree to Bitrix BBCode."""
+    if node is None:
+        return ''
+    if isinstance(node, str):
+        return node
+    if isinstance(node, list | tuple):
+        return ''.join(_rich_text_to_bbcode(child) for child in node)
+    mapping = _rich_to_mapping(node)
+    if mapping is None:
+        return ''
+    node_type = mapping.get('type')
+    inner = _rich_text_to_bbcode(mapping.get('text'))
+    if isinstance(node_type, str):
+        tag = _RICH_TEXT_BBCODE_TAGS.get(node_type)
+        if tag is not None:
+            return f'[{tag}]{inner}[/{tag}]' if inner else ''
+        if node_type == 'url':
+            url = mapping.get('url')
+            url_text = url.strip() if isinstance(url, str) else ''
+            if not url_text:
+                return inner
+            return f'[URL={url_text}]{inner or url_text}[/URL]'
+        if node_type == 'custom_emoji':
+            alternative = mapping.get('alternative_text')
+            return alternative if isinstance(alternative, str) else ''
+        if node_type == 'mathematical_expression':
+            expression = mapping.get('expression')
+            return expression if isinstance(expression, str) else ''
+        if node_type == 'button':
+            button = _rich_to_mapping(mapping.get('button'))
+            return _rich_text_to_bbcode(button.get('text')) if button else ''
+        if node_type == 'anchor':
+            return ''
+        if node_type in _RICH_TEXT_INLINE_TYPES:
+            return inner
+    # Unknown or untyped node: fall back to whatever text payload it carries.
+    return inner
+
+
+def _rich_caption_to_bbcode(caption: Any) -> str:
+    mapping = _rich_to_mapping(caption)
+    if mapping is None:
+        return ''
+    text = _rich_text_to_bbcode(mapping.get('text'))
+    credit = _rich_text_to_bbcode(mapping.get('credit'))
+    if text and credit:
+        return f'{text}\n— {credit}'
+    return text or credit
+
+
+def _rich_table_to_bbcode(block: dict[str, Any]) -> str:
+    lines: list[str] = []
+    rows = block.get('cells')
+    if isinstance(rows, list | tuple):
+        for row in rows:
+            if not isinstance(row, list | tuple):
+                continue
+            cells: list[str] = []
+            for raw_cell in row:
+                cell = _rich_to_mapping(raw_cell)
+                cells.append(_rich_text_to_bbcode(cell.get('text')).strip() if cell else '')
+            line = ' | '.join(cells).strip()
+            if line.strip(' |'):
+                lines.append(line)
+    caption = _rich_text_to_bbcode(block.get('caption'))
+    if caption:
+        lines.append(caption)
+    return '\n'.join(lines)
+
+
+def _rich_blocks_to_bbcode(blocks: Any) -> list[str]:
+    """Render a list of RichBlock nodes to a list of BBCode paragraph strings."""
+    if not isinstance(blocks, list | tuple):
+        return []
+    rendered: list[str] = []
+    for raw_block in blocks:
+        block = _rich_to_mapping(raw_block)
+        if block is None:
+            if isinstance(raw_block, str) and raw_block.strip():
+                rendered.append(raw_block.strip())
+            continue
+        block_type = block.get('type')
+        text = _rich_text_to_bbcode(block.get('text'))
+        if block_type in _RICH_BLOCK_TEXT_TYPES:
+            if text:
+                rendered.append(text)
+        elif block_type in _RICH_BLOCK_QUOTE_TYPES:
+            inner_parts = _rich_blocks_to_bbcode(block.get('blocks'))
+            inner = '\n'.join(part for part in inner_parts if part) or text
+            credit = _rich_text_to_bbcode(block.get('credit'))
+            if credit:
+                inner = f'{inner}\n— {credit}' if inner else f'— {credit}'
+            if inner:
+                rendered.append(f'[QUOTE]{inner}[/QUOTE]')
+        elif block_type == 'list':
+            items = block.get('items')
+            lines: list[str] = []
+            if isinstance(items, list | tuple):
+                for raw_item in items:
+                    item = _rich_to_mapping(raw_item)
+                    if item is None:
+                        continue
+                    item_text = '\n'.join(_rich_blocks_to_bbcode(item.get('blocks'))) or _rich_text_to_bbcode(item.get('text'))
+                    if not item_text:
+                        continue
+                    if item.get('has_checkbox'):
+                        prefix = '[x] ' if item.get('is_checked') else '[ ] '
+                    else:
+                        label = item.get('label')
+                        prefix = f'{label}. ' if isinstance(label, str) and label else '- '
+                    lines.append(prefix + item_text)
+            if lines:
+                rendered.append('\n'.join(lines))
+        elif block_type == 'table':
+            table = _rich_table_to_bbcode(block)
+            if table:
+                rendered.append(table)
+        elif block_type == 'details':
+            summary = _rich_text_to_bbcode(block.get('summary'))
+            pieces = ([summary] if summary else []) + [part for part in _rich_blocks_to_bbcode(block.get('blocks')) if part]
+            if pieces:
+                rendered.append('\n'.join(pieces))
+        elif block_type == 'divider':
+            rendered.append('———')
+        elif block_type == 'mathematical_expression':
+            expression = block.get('expression')
+            if isinstance(expression, str) and expression.strip():
+                rendered.append(expression.strip())
+        elif block_type in _RICH_BLOCK_MEDIA_TYPES:
+            caption = _rich_caption_to_bbcode(block.get('caption'))
+            if caption:
+                rendered.append(caption)
+        elif block_type in {'anchor', 'thinking', 'buttons'}:
+            continue
+        elif text:
+            rendered.append(text)
+    return rendered
+
+
+def _rich_message_to_bbcode(rich: Any) -> str:
+    """Flatten a RichMessage payload to Bitrix BBCode text."""
+    mapping = _rich_to_mapping(rich)
+    if mapping is None:
+        return ''
+    parts = [part for part in _rich_blocks_to_bbcode(mapping.get('blocks')) if part.strip()]
+    body = re.sub(r'\n{3,}', '\n\n', '\n\n'.join(parts))
+    return body.strip()
+
 
 class MirrorService:
 
@@ -877,6 +1081,12 @@ class MirrorService:
         if not parts:
             if self._has_uploadable_file(message):
                 return ''
+            logger.warning(
+                'Unsupported Telegram message %s in chat %s has no text, caption or uploadable file; api_kwargs=%s',
+                message.message_id,
+                message.chat_id,
+                sorted(getattr(message, 'api_kwargs', None) or {}),
+            )
             return '[Сообщение без поддерживаемого текста или вложения]'
         return '\n'.join(parts)
 
@@ -885,7 +1095,28 @@ class MirrorService:
             return message.text  # type: ignore[no-any-return]
         if message.caption:
             return message.caption  # type: ignore[no-any-return]
+        rich = self._extract_rich_message(message)
+        if rich is not None:
+            return _rich_message_to_bbcode(rich)
         return ''
+
+    @staticmethod
+    def _extract_rich_message(message: Message) -> Any:
+        """Return the raw RichMessage payload carried by an update, if any.
+
+        Bot API 10.1 delivers long Markdown/rich messages as a ``rich_message``
+        field with no ``text``/``caption``. PTB <= 22.x does not type that field
+        yet, so it lands in ``api_kwargs``; a future release will expose a
+        ``rich_message`` attribute instead. Prefer the attribute when present so
+        this reader survives that upgrade.
+        """
+        rich = getattr(message, 'rich_message', None)
+        if rich is not None:
+            return rich
+        api_kwargs = getattr(message, 'api_kwargs', None)
+        if isinstance(api_kwargs, Mapping):
+            return api_kwargs.get('rich_message')
+        return None
 
     def _describe_attachments(self, message: Message) -> str:
         chunks: list[str] = []

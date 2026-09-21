@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import json
 import logging
 import os
 
@@ -157,7 +158,12 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
     @app.post("/internal/forwarding")
     async def set_forwarding(request: Request) -> dict[str, object]:
         _verify_internal_secret(request)
-        payload = await request.json()
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Request body must be a JSON object")
         enabled = payload.get("enabled")
         if not isinstance(enabled, bool):
             raise HTTPException(status_code=400, detail="enabled must be a boolean")
@@ -181,7 +187,12 @@ def _build_http_app(settings: Settings, application: Application, mirror: Mirror
         if not hmac.compare_digest(expected_secret, provided_secret):
             raise HTTPException(status_code=403, detail="Forbidden")
 
-        payload = await request.json()
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Request body must be a JSON object")
         update = Update.de_json(payload, application.bot)
         if update is not None:
             await application.process_update(update)
@@ -226,17 +237,17 @@ async def _run_combined_runtime(settings: Settings, bitrix: BitrixClient, mirror
         )
     )
 
-    await application.initialize()
-    await application.start()
-    await mirror.start(application)
-    logger.info(
-        "Combined runtime started. host=%s port=%s telegram_webhook=%s",
-        settings.mirror_http_host,
-        settings.mirror_http_port,
-        settings.telegram_webhook_enabled,
-    )
-
     try:
+        await application.initialize()
+        await application.start()
+        await mirror.start(application)
+        logger.info(
+            "Combined runtime started. host=%s port=%s telegram_webhook=%s",
+            settings.mirror_http_host,
+            settings.mirror_http_port,
+            settings.telegram_webhook_enabled,
+        )
+
         if settings.telegram_webhook_enabled:
             assert settings.telegram_webhook_public_url is not None
             assert settings.telegram_webhook_secret is not None
@@ -294,9 +305,9 @@ def main() -> None:
 
     logger = logging.getLogger("tg-bitrix-mirror")
     logger.info(
-        "Starting bot. chat_mappings=%s proxy=%s tg_to_bitrix=%s bitrix_to_tg=%s tg_webhook=%s",
+        "Starting bot. chat_mappings=%s proxy_enabled=%s tg_to_bitrix=%s bitrix_to_tg=%s tg_webhook=%s",
         [(m.tg_chat_id, m.bitrix_dialog_id) for m in settings.chat_mappings],
-        settings.socks5_proxy_url,
+        settings.socks5_proxy_url is not None,  # never log the URL: it may embed user:pass credentials
         settings.sync_telegram_to_bitrix,
         settings.sync_bitrix_to_telegram,
         settings.telegram_webhook_enabled,

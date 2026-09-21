@@ -54,12 +54,13 @@ server {
     }
 
     # ── Monitoring dashboard — restricted by IP ───────────────────────────
-    # Add your trusted IPs below. Replace/extend the allow list.
+    # Closed by default. Add your trusted IPs below, then remove `deny all;`
+    # (or move it after your `allow` lines) to open access to them.
     location /monitor {
         # allow 10.0.0.0/8;
         # allow 192.168.0.0/16;
         # allow YOUR_IP;
-        # deny all;
+        deny all;
 
         limit_req zone=monitor burst=20 nodelay;
         limit_req_status 429;

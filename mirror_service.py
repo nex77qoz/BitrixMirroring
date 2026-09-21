@@ -376,11 +376,20 @@ class MirrorService:
         self._tg_to_mappings = new_tg
         self._bitrix_to_mapping = {m.bitrix_dialog_id: m for m in mappings}
         active_chat_ids = {m.tg_chat_id for m in mappings}
+        removed_tasks: list[asyncio.Task] = []
         for chat_id in list(self._channel_workers.keys()):
             if chat_id not in active_chat_ids:
                 task = self._channel_workers.pop(chat_id)
                 task.cancel()
+                removed_tasks.append(task)
                 self._channel_queues.pop(chat_id, None)
+        for task in removed_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Channel worker task raised during reload_mappings cancellation")
 
     async def connect_mapping(self, tg_chat_id: int, bitrix_dialog_id: str, topic_id: int | None, label: str) -> None:
         existing = self._bitrix_to_mapping.get(bitrix_dialog_id)

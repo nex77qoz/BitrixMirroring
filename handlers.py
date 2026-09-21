@@ -14,9 +14,22 @@ from mirror_service import MirrorService
 logger = logging.getLogger("tg-bitrix-mirror")
 
 _bot_reply_ids: dict[int, list[int]] = {}
+_BOT_REPLY_IDS_MAX_PER_CHAT = 50
 
 _ADMIN_CALLBACK_PREFIX = "admin:"
 _SERVICE_NAMES = ("bitrix-monitor", "bitrix-telegram-mirror")
+
+
+def _track_bot_reply(chat_id: int, message_id: int) -> None:
+    """Record a bot reply for later /clear deletion, bounded per chat.
+
+    Private-chat entries are never popped by /clear (group-only), so without a
+    cap this dict grows without bound for the life of the process.
+    """
+    ids = _bot_reply_ids.setdefault(chat_id, [])
+    ids.append(message_id)
+    if len(ids) > _BOT_REPLY_IDS_MAX_PER_CHAT:
+        del ids[: len(ids) - _BOT_REPLY_IDS_MAX_PER_CHAT]
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -34,7 +47,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Команда /whereami покажет chat_id текущего чата и thread_id темы."
     )
     if update.effective_chat:
-        _bot_reply_ids.setdefault(update.effective_chat.id, []).append(sent.message_id)
+        _track_bot_reply(update.effective_chat.id, sent.message_id)
 
 
 async def on_private_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -191,7 +204,7 @@ async def cmd_whereami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             ]
         )
     )
-    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+    _track_bot_reply(chat.id, sent.message_id)
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -373,7 +386,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         if not _BITRIX_ID_RE.match(bitrix_dialog_id):
             sent = await msg.reply_text("Неверный формат Bitrix Chat ID.")
-            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            _track_bot_reply(chat.id, sent.message_id)
             return
 
         # Returns the stored Bitrix chat title on success, None on an invalid or
@@ -382,7 +395,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         chat_title = await mirror.state_store.verify_and_consume_token(bitrix_dialog_id, token)
         if chat_title is None:
             sent = await msg.reply_text("⚠️ Неверный, использованный или просроченный токен подключения.")
-            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            _track_bot_reply(chat.id, sent.message_id)
             return
         label = chat_title
 
@@ -393,7 +406,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         bitrix_dialog_id = args[0].strip()
         if not _BITRIX_ID_RE.match(bitrix_dialog_id):
             sent = await msg.reply_text("Неверный формат Bitrix Chat ID.")
-            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            _track_bot_reply(chat.id, sent.message_id)
             return
     else:
         sent = await msg.reply_text(
@@ -401,7 +414,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Самостоятельно: `/connect <BitrixChatId> <Token>`\n"
             "Для администраторов: `/connect <BitrixChatId>`"
         )
-        _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+        _track_bot_reply(chat.id, sent.message_id)
         return
 
     is_forum = getattr(chat, "is_forum", False)
@@ -410,7 +423,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await mirror.connect_mapping(chat.id, bitrix_dialog_id, topic_id, label)
     except ValueError as exc:
         sent = await msg.reply_text(f"⚠️ {exc}")
-        _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+        _track_bot_reply(chat.id, sent.message_id)
         return
     try:
         await mirror.bitrix.send_message("Связка установлена", dialog_id=bitrix_dialog_id)
@@ -419,7 +432,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     thread_info = f" (ветка #{topic_id})" if topic_id else ""
     sent = await msg.reply_text(f"✅ Связка установлена: {bitrix_dialog_id} ↔ этот чат{thread_info}")
-    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+    _track_bot_reply(chat.id, sent.message_id)
 
 
 async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -442,7 +455,7 @@ async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         sent = await msg.reply_text(f"✅ Связка удалена для этого чата{thread_info}.")
     else:
         sent = await msg.reply_text("⚠️ Связка для этого чата/ветки не найдена.")
-    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+    _track_bot_reply(chat.id, sent.message_id)
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

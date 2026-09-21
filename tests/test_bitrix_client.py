@@ -214,6 +214,52 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
             await client.send_message("hi", dialog_id="chat42")
         self.assertEqual(len(requests), 1)
 
+    async def test_send_message_does_not_retry_after_ambiguous_timeout(self) -> None:
+        # A ReadTimeout on message creation gives no signal on whether Bitrix
+        # already received and processed the POST. Retrying blindly here is
+        # what causes duplicate messages (chat443900 incident), so send_message
+        # must surface the error instead of resending.
+        client = BitrixClient(make_settings())
+        self.addAsyncCleanup(client.close)
+        call_count = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            raise httpx.ReadTimeout("timed out", request=request)
+
+        client._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            headers={"X-Api-Key": "vibe-test-key", "Accept": "application/json"},
+        )
+
+        with self.assertRaises(httpx.ReadTimeout):
+            await client.send_message("hi", dialog_id="chat42")
+        self.assertEqual(call_count, 1)
+
+    async def test_get_bot_events_retries_after_ambiguous_timeout(self) -> None:
+        # GET is idempotent: retrying after a timeout is safe and expected.
+        client = BitrixClient(make_settings())
+        self.addAsyncCleanup(client.close)
+        call_count = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ReadTimeout("timed out", request=request)
+            return httpx.Response(200, json={"success": True, "data": {"events": [], "nextOffset": None, "hasMore": False}})
+
+        client._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            headers={"X-Api-Key": "vibe-test-key", "Accept": "application/json"},
+        )
+
+        page = await client.get_bot_events(offset=None)
+
+        self.assertEqual(call_count, 2)
+        self.assertEqual(page.events, ())
+
     def test_documented_transient_errors_are_retryable(self) -> None:
         client, _ = make_client([ok({})])
         self.addAsyncCleanup(client.close)

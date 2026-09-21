@@ -313,7 +313,9 @@ class MirrorStateStore:
         with self._connect() as connection:
             try:
                 rows = connection.execute('SELECT id, tg_chat_id, bitrix_dialog_id, topic_ids, label FROM chat_mappings ORDER BY created_at_unix, id').fetchall()
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as exc:
+                if 'no such table' not in str(exc).lower():
+                    logger.exception('Unexpected sqlite error loading chat_mappings')
                 return ()
         return tuple(ChatMapping(mapping_id=int(row[0]), tg_chat_id=int(row[1]), bitrix_dialog_id=str(row[2]), topic_ids=_parse_topic_ids(str(row[3]) if row[3] else ''), label=str(row[4]) if row[4] is not None else '') for row in rows)
 
@@ -354,10 +356,10 @@ class MirrorStateStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        if self._conn is None:
-            self._conn = sqlite3.connect(self._path, timeout=30.0, check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute('PRAGMA journal_mode=WAL')
-            self._conn.execute('PRAGMA synchronous=NORMAL')
         with self._conn_lock:
+            if self._conn is None:
+                self._conn = sqlite3.connect(self._path, timeout=30.0, check_same_thread=False)
+                self._conn.row_factory = sqlite3.Row
+                self._conn.execute('PRAGMA journal_mode=WAL')
+                self._conn.execute('PRAGMA synchronous=NORMAL')
             yield self._conn

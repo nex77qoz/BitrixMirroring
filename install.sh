@@ -187,6 +187,10 @@ env_escape() {
 }
 
 load_env_file() {
+    # $ENV_FILE is owned by $SVC_USER, not root. Blindly export()ing every key
+    # from it would let a compromised service account plant PATH/LD_PRELOAD/
+    # IFS/etc. and get code execution the next time this installer runs as
+    # root. Reject shell-behavior-affecting variable names outright.
     local file="$1" key value
     [[ -f "$file" ]] || return 1
     while IFS=$'\t' read -r key value; do
@@ -195,6 +199,11 @@ load_env_file() {
     done < <(python3 - "$file" <<'PY'
 import shlex, sys
 path = sys.argv[1]
+DENYLIST = {
+    "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "IFS", "ENV",
+    "BASH_ENV", "PS1", "PS2", "PS4", "SHELL", "SHELLOPTS", "PYTHONPATH",
+    "PYTHONSTARTUP", "PERL5LIB", "HOME", "CDPATH", "GLOBIGNORE",
+}
 with open(path, encoding="utf-8") as stream:
     for raw in stream:
         line = raw.strip()
@@ -206,6 +215,8 @@ with open(path, encoding="utf-8") as stream:
             continue
         key, value = line.split("=", 1)
         if not key or not (key[0].isalpha() or key[0] == "_") or not all(c.isalnum() or c == "_" for c in key):
+            continue
+        if key.upper() in DENYLIST or key.upper().startswith(("LD_", "BASH_")):
             continue
         try:
             parsed = shlex.split(value, comments=True, posix=True)
@@ -1061,18 +1072,28 @@ step_setup_ssl() {
 step_configure_nginx() {
     print_step "Настройка nginx"
 
-    # Build monitor IP allow/deny block (with real newlines, not \n literals)
-    local monitor_ip_block=""
+    # Build monitor IP allow/deny block (with real newlines, not \n literals).
+    # Fail closed: an empty/unset MONITOR_ALLOWED_IPS must still deny public
+    # access to the admin dashboard, not leave it unrestricted. Each entry is
+    # validated as a plain IPv4/IPv6 address or CIDR before interpolation, so
+    # a malformed value can't inject extra nginx directives.
+    local monitor_ip_block="        deny all;"
     if [[ -n "$MONITOR_ALLOWED_IPS" ]]; then
+        local allow_lines="" ip
         local IFS=','
         for ip in $MONITOR_ALLOWED_IPS; do
             ip=$(echo "$ip" | xargs)  # trim whitespace
-            if [[ -n "$ip" ]]; then
-                monitor_ip_block="${monitor_ip_block}        allow ${ip};
-"
+            [[ -n "$ip" ]] || continue
+            if [[ ! "$ip" =~ ^[0-9a-fA-F.:/]+$ ]]; then
+                print_error "Некорректный IP в MONITOR_ALLOWED_IPS: $ip"
+                exit 1
             fi
+            allow_lines="${allow_lines}        allow ${ip};
+"
         done
-        monitor_ip_block="${monitor_ip_block}        deny all;"
+        if [[ -n "$allow_lines" ]]; then
+            monitor_ip_block="${allow_lines}        deny all;"
+        fi
     fi
 
     if [[ "$SKIP_SSL" == true ]]; then

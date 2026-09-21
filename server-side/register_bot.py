@@ -13,6 +13,10 @@ _RETRY_BASE_DELAY_SECONDS = 1.0
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 
+class _TransientVibeError(RuntimeError):
+    """Network/timeout failure that is safe to retry (no response was received)."""
+
+
 def _vibe_request_once(api_key: str, base_url: str, method: str, path: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
     url = f"{base_url.rstrip('/')}{path}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -36,8 +40,9 @@ def _vibe_request_once(api_key: str, base_url: str, method: str, path: str, body
             payload = e.read().decode("utf-8")
         except Exception as exc:
             raise RuntimeError(f"{method} {path} -> HTTP {status} (unreadable body)") from exc
-    except Exception as exc:
-        raise RuntimeError(f"{method} {path} -> {exc}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        # No response was received at all (DNS/connect/timeout) — safe to retry.
+        raise _TransientVibeError(f"{method} {path} -> {exc}") from exc
     try:
         envelope = json.loads(payload)
     except ValueError as exc:
@@ -47,23 +52,47 @@ def _vibe_request_once(api_key: str, base_url: str, method: str, path: str, body
     return status, envelope
 
 
-def vibe_request(api_key: str, base_url: str, method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+def vibe_request(
+    api_key: str, base_url: str, method: str, path: str, body: dict[str, Any] | None = None, *, retry: bool = True
+) -> tuple[int, dict[str, Any]]:
     """Perform one Vibe API call, retrying transient failures. Returns (http_status, parsed_json_envelope).
 
     Raises RuntimeError on transport failure or a non-JSON response. A transient
-    5xx/429 is retried with backoff (this install-time client has no other
-    resilience, unlike the runtime BitrixClient._request it otherwise duplicates).
+    5xx/429 response, or a network-level failure where no response was received
+    at all (_TransientVibeError), is retried with backoff (this install-time
+    client has no other resilience, unlike the runtime BitrixClient._request it
+    otherwise duplicates).
+
+    retry=False performs exactly one attempt with no backoff loop — required for
+    non-idempotent calls (e.g. POST /bots) where blindly resending after a lost
+    response risks creating a duplicate resource; callers must instead check for
+    an already-created resource before retrying.
     """
+    if not retry:
+        status, envelope = _vibe_request_once(api_key, base_url, method, path, body)
+        return status, envelope
     delay = _RETRY_BASE_DELAY_SECONDS
     last: tuple[int, dict[str, Any]] | None = None
+    last_exc: _TransientVibeError | None = None
     for attempt in range(1, _RETRY_ATTEMPTS + 1):
-        status, envelope = _vibe_request_once(api_key, base_url, method, path, body)
+        try:
+            status, envelope = _vibe_request_once(api_key, base_url, method, path, body)
+        except _TransientVibeError as exc:
+            last_exc = exc
+            if attempt < _RETRY_ATTEMPTS:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise
+        last_exc = None
         if status not in _RETRYABLE_STATUSES:
             return status, envelope
         last = (status, envelope)
         if attempt < _RETRY_ATTEMPTS:
             time.sleep(delay)
             delay *= 2
+    if last_exc is not None:
+        raise last_exc
     assert last is not None
     return last
 
@@ -72,8 +101,10 @@ def vibe_get(api_key: str, base_url: str, path: str) -> tuple[int, dict[str, Any
     return vibe_request(api_key, base_url, "GET", path)
 
 
-def vibe_post(api_key: str, base_url: str, path: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    return vibe_request(api_key, base_url, "POST", path, body)
+def vibe_post(
+    api_key: str, base_url: str, path: str, body: dict[str, Any], *, retry: bool = True
+) -> tuple[int, dict[str, Any]]:
+    return vibe_request(api_key, base_url, "POST", path, body, retry=retry)
 
 
 def envelope_error(envelope: dict[str, Any]) -> tuple[str, str]:
@@ -201,7 +232,18 @@ def try_register(api_key: str, base_url: str, bot_name: str) -> tuple[str, int] 
     last_error: dict[str, Any] = {"code": "", "message": "no attempts made"}
     for code in candidate_codes:
         body = {"code": code, "name": bot_name, "type": "supervisor", "eventMode": "fetch"}
-        status, envelope = vibe_post(api_key, base_url, "/bots", body)
+        # retry=False: a blind resend after a lost response could create a
+        # second bot under the same code. If the response is ambiguous (5xx,
+        # 429, or a network failure with no response at all), check whether
+        # the bot was actually created before treating it as a failure.
+        try:
+            status, envelope = vibe_post(api_key, base_url, "/bots", body, retry=False)
+        except _TransientVibeError as exc:
+            existing = find_existing_bot(api_key, base_url)
+            if existing is not None and existing[0] == code:
+                return existing
+            last_error = {"code": "", "message": str(exc), "_status": None}
+            continue
         if status in (200, 201) and envelope.get("success"):
             data = envelope_data(envelope)
             bot_id = data.get("botId")
@@ -228,6 +270,13 @@ def try_register(api_key: str, base_url: str, bot_name: str) -> tuple[str, int] 
                     ),
                 }
             # 409 without data: external bot holds the code on the portal — try next candidate.
+            continue
+        if status in _RETRYABLE_STATUSES:
+            # Ambiguous server-side failure — the bot may have been created
+            # despite the error response. Check before trying another code.
+            existing = find_existing_bot(api_key, base_url)
+            if existing is not None and existing[0] == code:
+                return existing
             continue
         return last_error
     return last_error

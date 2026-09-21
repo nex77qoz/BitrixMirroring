@@ -103,28 +103,31 @@ def _load_db_chat_mappings(db_path: str) -> tuple[ChatMapping, ...]:
         return ()
     try:
         conn = _sqlite3.connect(str(path))
-        try:
-            rows = conn.execute(
-                "SELECT id, tg_chat_id, bitrix_dialog_id, topic_ids, label FROM chat_mappings ORDER BY created_at_unix, id"
-            ).fetchall()
-            mappings = tuple(
-                ChatMapping(
-                    mapping_id=int(row[0]),
-                    tg_chat_id=int(row[1]),
-                    bitrix_dialog_id=str(row[2]),
-                    topic_ids=_parse_topic_ids(str(row[3]) if row[3] else ""),
-                    label=str(row[4]) if row[4] is not None else "",
-                )
-                for row in rows
-            )
-            _validate_chat_mappings(mappings)
-            return mappings
-        except _sqlite3.OperationalError:
-            return ()  # table doesn't exist yet
-        finally:
-            conn.close()
-    except Exception:
+    except _sqlite3.Error:
         return ()
+    try:
+        rows = conn.execute(
+            "SELECT id, tg_chat_id, bitrix_dialog_id, topic_ids, label FROM chat_mappings ORDER BY created_at_unix, id"
+        ).fetchall()
+        mappings = tuple(
+            ChatMapping(
+                mapping_id=int(row[0]),
+                tg_chat_id=int(row[1]),
+                bitrix_dialog_id=str(row[2]),
+                topic_ids=_parse_topic_ids(str(row[3]) if row[3] else ""),
+                label=str(row[4]) if row[4] is not None else "",
+            )
+            for row in rows
+        )
+        # ValueError from _validate_chat_mappings (duplicate/conflicting
+        # mappings) is a real config error and must propagate, not be
+        # silently treated the same as "table doesn't exist yet".
+        _validate_chat_mappings(mappings)
+        return mappings
+    except _sqlite3.OperationalError:
+        return ()  # table doesn't exist yet
+    finally:
+        conn.close()
 
 
 def _validate_chat_mappings(mappings: tuple[ChatMapping, ...]) -> None:

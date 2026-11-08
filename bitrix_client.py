@@ -13,19 +13,15 @@ from settings import Settings
 
 
 def _redact_url(url: str) -> str:
-    """Strip query string (where Vibe's single-use download token lives) before logging."""
+    """Strip query string (where the REST download auth token lives) before logging."""
     parts = urlsplit(url)
     return f'{parts.scheme}://{parts.netloc}{parts.path}' if parts.scheme else url.split('?', 1)[0]
 
 logger = logging.getLogger('tg-bitrix-mirror')
 
-_TRANSIENT_BITRIX_SUBSTRINGS = (
-    'QUERY_LIMIT_EXCEEDED',
-    'TEMPORARY_ERROR',
-    'OPERATION_TIME_LIMIT',
-    'OVERLOAD_LIMIT',
-)
-_RETRYABLE_VIBE_CODES = {'RATE_LIMITED', 'BITRIX_UNAVAILABLE', 'INTERNAL_ERROR'}
+_RETRYABLE_ERROR_CODES = {
+    'QUERY_LIMIT_EXCEEDED', 'TEMPORARY_ERROR', 'OPERATION_TIME_LIMIT', 'OVERLOAD_LIMIT', 'INTERNAL_SERVER_ERROR',
+}
 
 
 class BitrixClient:
@@ -35,16 +31,18 @@ class BitrixClient:
         self._client = httpx.AsyncClient(
             timeout=settings.request_timeout_seconds,
             proxy=settings.socks5_proxy_url,
-            headers={'X-Api-Key': settings.vibe_api_key, 'Accept': 'application/json'},
+            verify=settings.bitrix_verify_ssl,
+            headers={'Accept': 'application/json'},
         )
         self._download_client = httpx.AsyncClient(
             timeout=settings.request_timeout_seconds,
             proxy=settings.socks5_proxy_url,
+            verify=settings.bitrix_verify_ssl,
             headers={'Accept': 'application/octet-stream'},
         )
         self._request_semaphore = asyncio.Semaphore(settings.bitrix_max_concurrent_requests)
         self._rate_last_request: float = 0.0
-        self._rate_min_interval: float = 1.0 / max(settings.bitrix_max_concurrent_requests, 1)
+        self._rate_min_interval: float = settings.bitrix_min_request_interval_seconds
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -54,60 +52,56 @@ class BitrixClient:
         fields: dict[str, Any] = {'message': text, 'system': False, 'urlPreview': not self.settings.disable_link_preview}
         if reply_id is not None:
             fields['replyId'] = reply_id
-        body: dict[str, Any] = {'dialogId': dialog_id, 'fields': fields}
-        data = await self._request('POST', f'/bots/{self.settings.bitrix_bot_id}/messages', json_body=body, idempotent=False)
+        data = await self._call('imbot.v2.Chat.Message.send', {'dialogId': dialog_id, 'fields': fields}, idempotent=False)
         message_id = data.get('id')
         if not isinstance(message_id, int):
-            raise RuntimeError(f'Missing id in Vibe message send response: {data}')
+            raise RuntimeError(f'Missing id in Bitrix message send response: {data}')
         return message_id
 
     async def update_message(self, *, message_id: int, text: str) -> None:
-        body: dict[str, Any] = {'message': text, 'urlPreview': not self.settings.disable_link_preview}
-        data = await self._request('PATCH', f'/bots/{self.settings.bitrix_bot_id}/messages/{message_id}', json_body=body)
+        fields: dict[str, Any] = {'message': text, 'urlPreview': not self.settings.disable_link_preview}
+        data = await self._call('imbot.v2.Chat.Message.update', {'messageId': message_id, 'fields': fields})
         if data.get('result') is not True:
-            raise RuntimeError(f'Unexpected Vibe response: {data}')
+            raise RuntimeError(f'Unexpected Bitrix response: {data}')
 
     async def set_message_like(self, message_id: int, *, liked: bool) -> None:
-        path = f'/bots/{self.settings.bitrix_bot_id}/messages/{message_id}/reactions'
+        method = 'imbot.v2.Chat.Message.Reaction.add' if liked else 'imbot.v2.Chat.Message.Reaction.delete'
         try:
-            if liked:
-                data = await self._request('POST', path, json_body={'reaction': 'like'})
-            else:
-                data = await self._request('DELETE', path, json_body={'reaction': 'like'})
+            data = await self._call(method, {'messageId': message_id, 'reaction': 'like'})
         except RuntimeError as exc:
             err = str(exc)
             if 'REACTION_ALREADY_SET' in err or 'REACTION_NOT_FOUND' in err:
                 return
             raise
         if data.get('result') is not True:
-            raise RuntimeError(f'Unexpected Vibe response: {data}')
+            raise RuntimeError(f'Unexpected Bitrix response: {data}')
 
     async def send_photo(self, *, caption: str, filename: str, content: bytes, dialog_id: str) -> int:
         limit = self.settings.bitrix_max_upload_file_bytes
         encoded = base64.b64encode(content).decode('ascii')
         # Compare the encoded size against the limit: base64 inflates payload
-        # size by ~33%, and it is the encoded body that is actually sent to Vibe.
+        # size by ~33%, and it is the encoded body that is actually sent to Bitrix.
         if len(encoded) > limit:
             raise RuntimeError(f'File too large for Bitrix upload: {len(content)} bytes ({len(encoded)} bytes base64-encoded) > {limit}')
         return await self._upload_file(dialog_id=dialog_id, filename=filename, encoded=encoded, caption=caption)
 
     async def _upload_file(self, *, dialog_id: str, filename: str, encoded: str, caption: str) -> int:
-        body: dict[str, Any] = {'dialogId': dialog_id, 'file': {'name': filename, 'content': encoded}, 'message': caption}
-        data = await self._request('POST', f'/bots/{self.settings.bitrix_bot_id}/files', json_body=body, idempotent=False)
+        fields: dict[str, Any] = {'name': filename, 'content': encoded, 'message': caption}
+        data = await self._call('imbot.v2.File.upload', {'dialogId': dialog_id, 'fields': fields}, idempotent=False)
         message_id = data.get('messageId')
         if not isinstance(message_id, int):
-            raise RuntimeError(f'Missing messageId in Vibe file upload response: {data}')
+            raise RuntimeError(f'Missing messageId in Bitrix file upload response: {data}')
         return message_id
 
     async def get_bot_events(self, *, offset: int | None, limit: int=100) -> BitrixEventPage:
         params: dict[str, Any] = {'limit': max(1, min(limit, 1000))}
         if offset is not None:
             params['offset'] = offset
-        data = await self._request('GET', f'/bots/{self.settings.bitrix_bot_id}/events', params=params)
+        data = await self._call('imbot.v2.Event.get', params)
         events = data.get('events')
         next_offset = data.get('nextOffset')
         if not isinstance(events, list) or (next_offset is not None and type(next_offset) is not int):
-            raise RuntimeError(f'Unexpected Vibe event response: {data}')
+            raise RuntimeError(f'Unexpected Bitrix event response: {data}')
         parsed_events: list[BitrixBotEvent] = []
         for raw_event in events:
             # A single malformed event must not stall the whole page: skip and log
@@ -124,8 +118,8 @@ class BitrixClient:
 
     async def download_file(self, url: str) -> bytes:
         # No retry loop here: download_file_by_id's outer loop is the single
-        # retry policy for downloads, and it re-resolves a fresh (single-use)
-        # Vibe URL on each attempt. Retrying here too would multiply total
+        # retry policy for downloads, and it re-resolves a fresh
+        # download URL on each attempt. Retrying here too would multiply total
         # attempts to roughly retry_attempts^2. Direct callers of this method
         # with a stable URL (e.g. a caller-provided fallback) get one attempt;
         # download_file_by_id already retries its fallback_url call as needed.
@@ -135,7 +129,7 @@ class BitrixClient:
         return response.content
 
     async def download_file_by_id(self, file_id: int, fallback_url: str | None=None) -> bytes:
-        # Vibe downloadUrl is single-use: every attempt must re-resolve a fresh link.
+        # Download links carry short-lived auth: every attempt re-resolves a fresh one.
         errors: list[str] = []
         delay = self.settings.bitrix_retry_base_delay_seconds
         for attempt in range(1, self.settings.bitrix_retry_attempts + 1):
@@ -171,14 +165,14 @@ class BitrixClient:
         raise RuntimeError(f"Unable to download Bitrix file_id={file_id}. Tried: {' | '.join(errors)}")
 
     async def _get_file_download_url(self, file_id: int) -> str:
-        data = await self._request('GET', f'/bots/{self.settings.bitrix_bot_id}/files/{file_id}')
+        data = await self._call('imbot.v2.File.download', {'fileId': file_id})
         download_url = data.get('downloadUrl')
         if not isinstance(download_url, str) or not download_url.strip():
-            raise RuntimeError(f'Missing downloadUrl in Vibe file download response: {data}')
+            raise RuntimeError(f'Missing downloadUrl in Bitrix file download response: {data}')
         return download_url.strip()
 
     async def get_file_meta(self, file_id: int) -> BitrixFile | None:
-        """Read disk metadata for a chat attachment via GET /files/{file_id}.
+        """Read disk metadata for a chat attachment via disk.file.get.
 
         The Bitrix24 disk index can lag the bot event by 1-2 seconds, so a
         fresh 403/404 is retried once after a short pause. Denials that persist
@@ -187,7 +181,7 @@ class BitrixClient:
         """
         for attempt in range(1, 3):
             try:
-                data = await self._request('GET', f'/files/{file_id}')
+                data = await self._call('disk.file.get', {'id': file_id}, as_bot=False)
             except RuntimeError as exc:
                 if not _is_file_meta_denied(str(exc)):
                     raise
@@ -208,35 +202,39 @@ class BitrixClient:
             return file_meta
         return None
 
-    async def _request(self, verb: str, path: str, *, json_body: dict | None=None, params: dict | None=None, idempotent: bool=True) -> dict[str, Any]:
-        url = f'{self.settings.vibe_base_url}{path}'
+    async def _call(self, method: str, params: dict[str, Any], *, as_bot: bool=True, idempotent: bool=True) -> dict[str, Any]:
+        body = dict(params)
+        if as_bot:
+            body['botId'] = self.settings.bitrix_bot_id
+            body['botToken'] = self.settings.bitrix_bot_token
+        url = f'{self.settings.bitrix_webhook_url}/{method}'
         delay = self.settings.bitrix_retry_base_delay_seconds
         for attempt in range(1, self.settings.bitrix_retry_attempts + 1):
             retry_after: float | None = None
             try:
-                now = asyncio.get_running_loop().time()
-                wait_for = self._rate_last_request + self._rate_min_interval - now
-                if wait_for > 0:
-                    self._rate_last_request = now + wait_for
-                    await asyncio.sleep(wait_for)
-                else:
-                    self._rate_last_request = now
+                if self._rate_min_interval > 0:
+                    now = asyncio.get_running_loop().time()
+                    wait_for = self._rate_last_request + self._rate_min_interval - now
+                    if wait_for > 0:
+                        self._rate_last_request = now + wait_for
+                        await asyncio.sleep(wait_for)
+                    else:
+                        self._rate_last_request = now
                 async with self._request_semaphore:
-                    response = await self._client.request(verb, url, json=json_body, params=params)
+                    response = await self._client.post(url, json=body)
                 if response.status_code >= 500 or response.status_code in {408, 429}:
-                    raise httpx.HTTPStatusError(f'Temporary Vibe HTTP error: {response.status_code}', request=response.request, response=response)
-                data = cast(dict[str, Any], response.json())
-                if response.status_code >= 400 or not data.get('success', True):
-                    error_obj = data.get('error')
-                    error: dict[str, Any] = error_obj if isinstance(error_obj, dict) else {}
-                    code = str(error.get('code') or response.status_code)
-                    message = str(error.get('message') or '')
-                    if code in _RETRYABLE_VIBE_CODES:
-                        raise RuntimeError(f'Temporary Vibe error: {code}')
-                    if code == 'BITRIX_ERROR' and any(token in message for token in _TRANSIENT_BITRIX_SUBSTRINGS):
-                        raise RuntimeError(f'Temporary Vibe error: {code}')
-                    raise RuntimeError(f'Vibe error: {code} | {message}')
-                payload = data.get('data')
+                    raise httpx.HTTPStatusError(f'Temporary Bitrix HTTP error: {response.status_code}', request=response.request, response=response)
+                try:
+                    data = cast(dict[str, Any], response.json())
+                except ValueError:
+                    raise RuntimeError(f'Bitrix error: {response.status_code} | non-JSON response (check BITRIX_WEBHOOK_URL)') from None
+                if response.status_code >= 400 or data.get('error'):
+                    code = str(data.get('error') or response.status_code)
+                    message = str(data.get('error_description') or '')
+                    if code in _RETRYABLE_ERROR_CODES or any(token in message for token in _RETRYABLE_ERROR_CODES):
+                        raise RuntimeError(f'Temporary Bitrix error: {code}')
+                    raise RuntimeError(f'Bitrix error: {code} | {message}')
+                payload = data.get('result')
                 return payload if isinstance(payload, dict) else {}
             except (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError, httpx.HTTPStatusError, RuntimeError) as exc:
                 if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
@@ -246,14 +244,14 @@ class BitrixClient:
                 if is_last_attempt or not is_retryable:
                     raise
                 sleep_for = delay if retry_after is None else max(delay, retry_after)
-                logger.warning('Vibe call %s %s failed on attempt %s/%s: %s. Retrying in %.1fs', verb, path, attempt, self.settings.bitrix_retry_attempts, exc, sleep_for)
+                logger.warning('Bitrix call %s failed on attempt %s/%s: %s. Retrying in %.1fs', method, attempt, self.settings.bitrix_retry_attempts, exc, sleep_for)
                 await asyncio.sleep(sleep_for)
                 delay = min(delay * 2, self.settings.bitrix_retry_max_delay_seconds)
-        raise RuntimeError(f'Vibe call {verb} {path} exhausted retries without returning a response')
+        raise RuntimeError(f'Bitrix call {method} exhausted retries without returning a response')
 
     def _is_retryable_exception(self, exc: Exception, *, idempotent: bool=True) -> bool:
         if isinstance(exc, RuntimeError):
-            return str(exc).startswith('Temporary Vibe error:')
+            return str(exc).startswith('Temporary Bitrix error:')
         if isinstance(exc, httpx.HTTPStatusError):
             http_status_error = cast(httpx.HTTPStatusError, exc)
             response = http_status_error.response
@@ -273,8 +271,8 @@ def _is_file_meta_denied(text: str) -> bool:
     # Only auth/lookup failures are worth the silent single retry; anything
     # else must propagate so callers see the real transport error.
     return any(token in text for token in (
-        'Vibe error: 403', 'Vibe error: 404',
-        'BITRIX_ACCESS_DENIED', 'NOT_FOUND', 'FORBIDDEN', 'ACCESS_DENIED',
+        'Bitrix error: 403', 'Bitrix error: 404',
+        'BITRIX_ACCESS_DENIED', 'NOT_FOUND', 'FORBIDDEN', 'ACCESS_DENIED', 'ERROR_NOT_FOUND', 'ACCESS_DENIED',
     ))
 
 

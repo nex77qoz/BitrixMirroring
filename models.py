@@ -230,8 +230,8 @@ class BitrixFile:
             or bool(mime_type and mime_type.startswith("image/"))
             or lower_name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"))
         )
-        # GET /v1/files/{id} (Vibe Disk schema, used by get_file_meta as a fallback
-        # when an event does not inline file metadata) has no mime_type and its
+        # disk.file.get (used by get_file_meta as a fallback when an event does
+        # not inline file metadata) has no mime_type and its
         # "type" field means file-vs-folder, not media category — it always comes
         # back as "file" for a chat attachment. Fall back to the filename extension
         # so video/audio attachments resolved via that path still classify correctly,

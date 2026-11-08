@@ -35,7 +35,7 @@
 1. **Mirror service** — основной процесс, который:
    - получает апдейты Telegram через polling или webhook;
    - отправляет новые сообщения в Битрикс;
-   - запускает фоновый fetch loop, опрашивающий события Битрикс через Vibe API (`GET /v1/bots/:botId/events`).
+   - запускает фоновый fetch loop, опрашивающий события Битрикс через REST коробки (`imbot.v2.Event.get`).
 2. **Monitoring dashboard** — HTTP endpoint и web-интерфейс для просмотра состояния сервиса, логов и управления связкой чатов.
 
 ## Как это работает
@@ -58,7 +58,7 @@
 Запускается единый fetch-цикл событий Битрикс:
 
 1. сервис читает последний обработанный offset событий для бота;
-2. опрашивает новые события через Vibe API (`GET /v1/bots/:botId/events`);
+2. опрашивает новые события через REST коробки (`imbot.v2.Event.get`);
 3. обрабатывает новые сообщения (ONIMBOTV2MESSAGEADD), редактирования (ONIMBOTV2MESSAGEUPDATE), удаления (ONIMBOTV2MESSAGEDELETE) и изменения реакций (ONIMBOTV2REACTIONCHANGE);
 4. последовательно сохраняет прогресс (offset) после каждого успешного события.
 
@@ -72,7 +72,7 @@
 
 - Python **3.11+** рекомендуется;
 - доступ к **Telegram Bot API**;
-- доступ к **Vibe API (бот-платформа Битрикс24)** — личный ключ `vibe_api_...` со скоупами `imbot, disk` в режиме чтения+записи (https://vibecode.bitrix24.tech/keys);
+- доступ к **коробочному Битрикс24** — входящий вебхук администратора (`https://портал/rest/<id>/<код>/`) со скоупами `imbot, im, disk`;
 - для production-развёртывания: Linux-сервер, `systemd`, `nginx` и при необходимости TLS.
 
 ## Установка и быстрый старт
@@ -150,16 +150,17 @@ cp env.example .env
 Минимально нужно заполнить:
 
 - `TELEGRAM_BOT_TOKEN`
-- `VIBE_API_KEY`
+- `BITRIX_WEBHOOK_URL`
+- `BITRIX_BOT_TOKEN`
 - хотя бы одну связку чатов:
   - `CHAT_MAPPING_1`, `CHAT_MAPPING_2`, ...
   - или `CHAT_MAPPINGS`
   - или legacy-пару `BITRIX_DIALOG_ID` + `ALLOWED_TELEGRAM_CHAT_ID`
 
-Бот регистрируется один раз через Vibe API (команда `POST /v1/bots` с `type=supervisor`, `eventMode=fetch`) — скриптом `server-side/register_bot.py` или автоматически установщиком:
+Бот регистрируется один раз через REST (`imbot.v2.Bot.register`, `type=supervisor`, `eventMode=fetch`) — скриптом `server-side/register_bot.py` или автоматически установщиком:
 
 ```bash
-python3 server-side/register_bot.py "$VIBE_API_KEY" "" "Telegram Mirror V2"
+python3 server-side/register_bot.py "$BITRIX_WEBHOOK_URL" "" "Telegram Mirror V2"
 ```
 
 Полученный `bot_id` нужно записать в `BITRIX_BOT_ID`, а бота добавить во все зеркалируемые чаты Битрикс24.
@@ -203,7 +204,7 @@ export MONITOR_PASSWORD='change-me'
 ### Обязательные
 
 - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота.
-- `VIBE_API_KEY` — личный ключ Vibe API (режим чтение+запись, скоупы `imbot, disk`); при необходимости `VIBE_BASE_URL` (по умолчанию `https://vibecode.bitrix24.tech/v1`).
+- `BITRIX_WEBHOOK_URL` — URL входящего вебхука портала (скоупы `imbot, im, disk`); `BITRIX_BOT_TOKEN` — секрет владения ботом (выдаёт `register_bot.py`); `BITRIX_VERIFY_SSL=false` — для самоподписанного сертификата.
 - одна из схем маппинга чатов:
   - `CHAT_MAPPING_1=-1001234567890:chat2941`
   - `CHAT_MAPPING_2=-1001234567891:chat2942`
@@ -211,8 +212,8 @@ export MONITOR_PASSWORD='change-me'
 
 ### Отправка в Битрикс от имени чат-бота
 
-- `BITRIX_BOT_ID` — числовой ID бота, выданный `POST /v1/bots` (бот привязан к API-ключу, которым зарегистрирован).
-- `BITRIX_MAX_UPLOAD_FILE_BYTES` — потолок загружаемого в Битрикс файла (по умолчанию 31457280 = 30 МиБ; Vibe принимает тело до 40 МиБ).
+- `BITRIX_BOT_ID` — числовой ID бота из `imbot.v2.Bot.register` (бот привязан к `BITRIX_BOT_TOKEN`).
+- `BITRIX_MAX_UPLOAD_FILE_BYTES` — потолок загружаемого в Битрикс файла (по умолчанию 31457280 = 30 МиБ; учитывайте `post_max_size` PHP).
 
 ### Форматирование сообщений
 
@@ -234,7 +235,7 @@ export MONITOR_PASSWORD='change-me'
 
 ### Polling и устойчивость к ошибкам
 
-- `BITRIX_POLL_INTERVAL_SECONDS=5`
+- `BITRIX_POLL_INTERVAL_SECONDS=2`
 - `BITRIX_RETRY_ATTEMPTS=4`
 - `BITRIX_RETRY_BASE_DELAY_SECONDS=1`
 - `BITRIX_RETRY_MAX_DELAY_SECONDS=15`

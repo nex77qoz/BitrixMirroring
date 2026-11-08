@@ -994,8 +994,8 @@ def api_delete_admin(tg_user_id: int, _: str = Depends(_check_auth)):
 _SECRET_KEY_PATTERNS = (
     "TELEGRAM_BOT_TOKEN",
     "MONITOR_PASSWORD",
-    "VIBE_API_KEY",
-    "VIBE_APP_KEY",
+    "BITRIX_WEBHOOK_URL",
+    "BITRIX_BOT_TOKEN",
     "TELEGRAM_WEBHOOK_SECRET",
 )
 

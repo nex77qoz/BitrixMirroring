@@ -11,8 +11,10 @@ INSTALL_SH = Path(__file__).parents[1] / "install.sh"
 def extract_function(name: str) -> str:
     """Pull one top-level bash function out of install.sh (it ends at column 0 '}')."""
     source = INSTALL_SH.read_text(encoding="utf-8")
-    start = source.index(f"{name}() {{")
-    end = source.index("\n}\n", start) + len("\n}\n")
+    opening = "(" if f"{name}() (" in source else "{"
+    closing = ")" if opening == "(" else "}"
+    start = source.index(f"{name}() {opening}")
+    end = source.index(f"\n{closing}\n", start) + len(f"\n{closing}\n")
     return source[start:end]
 
 
@@ -54,7 +56,7 @@ notify_telegram_admins_about_bitrix_bot
                 "TG_ADMIN_IDS": "111",
                 "BITRIX_BOT_ID": "777",
                 "TELEGRAM_BOT_TOKEN": "tg-token",
-                "VIBE_API_KEY": "vibe_api_secret",
+                "BITRIX_BOT_TOKEN": "bot_secret_token",
                 "CAPTURE_FILE": str(capture),
             }))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -62,8 +64,8 @@ notify_telegram_admins_about_bitrix_bot
         # the notification text must carry the bot id...
         self.assertIn("Bot ID:", sent.replace("\\n", "\n"))
         self.assertIn("777", sent)
-        # ...but never the Vibe API key or any bot token
-        self.assertNotIn("vibe_api_secret", sent)
+        # ...but never the bot token
+        self.assertNotIn("bot_secret_token", sent)
         self.assertNotIn("Токен", sent)
         self.assertNotIn("BOT_TOKEN", extract_function("notify_telegram_admins_about_bitrix_bot").replace("TELEGRAM_BOT_TOKEN", ""))
 
@@ -71,12 +73,12 @@ notify_telegram_admins_about_bitrix_bot
         with tempfile.TemporaryDirectory() as tmpdir:
             marker = Path(tmpdir) / "executed"
             env_file = Path(tmpdir) / ".env"
-            env_file.write_text(f'VIBE_API_KEY="$(touch {marker})"\n', encoding="utf-8")
+            env_file.write_text(f'BITRIX_WEBHOOK_URL="$(touch {marker})"\n', encoding="utf-8")
             script = "\n".join((
                 "set -euo pipefail",
                 self.prologue,
                 f"load_env_file {env_file}",
-                'printf "%s" "$VIBE_API_KEY"',
+                'printf "%s" "$BITRIX_WEBHOOK_URL"',
             ))
             result = run_bash(script)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -119,32 +121,85 @@ unregister_bitrix_bot
             sent = capture.read_text(encoding="utf-8") if capture.exists() else ""
             return sent, result.stdout
 
-    def test_deletes_bot_via_vibe_with_api_key_header(self) -> None:
+    def test_unregisters_bot_via_imbot_v2(self) -> None:
         sent, stdout = self._run(
-            {"VIBE_API_KEY": "vibe_api_test", "VIBE_BASE_URL": "https://vibe.example.com/v1", "BITRIX_BOT_ID": "777"},
-            '{"success": true, "data": {"deleted": true}}',
+            {"BITRIX_WEBHOOK_URL": "https://portal.example.com/rest/1/hook/", "BITRIX_BOT_TOKEN": "tok", "BITRIX_BOT_ID": "777"},
+            '{"result": {"result": true}}',
         )
-        self.assertIn("DELETE", sent)
-        self.assertIn("X-Api-Key:", sent)
-        self.assertIn("vibe_api_test", sent)
-        self.assertIn("https://vibe.example.com/v1/bots/777", sent)
+        self.assertIn("https://portal.example.com/rest/1/hook/imbot.v2.Bot.unregister", sent)
+        self.assertIn('"botId": 777', sent)
+        self.assertIn('"botToken": "tok"', sent)
         self.assertIn("Бот удалён", stdout)
-        # no botToken in the request body — the platform stores tokens itself
-        self.assertNotIn("botToken", sent)
 
-    def test_reports_failure_on_unsuccessful_envelope(self) -> None:
+    def test_reports_failure_on_error_response(self) -> None:
         _, stdout = self._run(
-            {"VIBE_API_KEY": "vibe_api_test", "BITRIX_BOT_ID": "777"},
-            '{"success": false, "error": {"code": "BOT_NOT_FOUND", "message": "gone"}}',
+            {"BITRIX_WEBHOOK_URL": "https://p/rest/1/h", "BITRIX_BOT_TOKEN": "tok", "BITRIX_BOT_ID": "777"},
+            '{"error": "BOT_NOT_FOUND", "error_description": "gone"}',
         )
         self.assertIn("не удалил", stdout)
 
-    def test_skips_without_key_or_id(self) -> None:
-        for env in ({}, {"VIBE_API_KEY": "k"}, {"BITRIX_BOT_ID": "5"}):
+    def test_skips_without_webhook_token_or_id(self) -> None:
+        for env in ({}, {"BITRIX_WEBHOOK_URL": "https://p/rest/1/h"}, {"BITRIX_BOT_ID": "5"}):
             with self.subTest(env=env):
-                sent, stdout = self._run(env, '{"success": true}')
+                sent, stdout = self._run(env, '{"result": true}')
                 self.assertEqual(sent, "")
                 self.assertIn("не заданы", stdout)
+
+    def test_retained_bot_credentials_survive_removal_of_install_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            install_dir = Path(tmpdir) / "installation"
+            install_dir.mkdir()
+            env_file = install_dir / ".env"
+            env_file.write_text("BITRIX_WEBHOOK_URL=https://portal/rest/1/hook\nBITRIX_BOT_ID=42\nBITRIX_BOT_TOKEN=secret\nBITRIX_VERIFY_SSL=false\n")
+            script = f'''
+{self.prologue}
+INSTALL_DIR={str(install_dir)!r}
+ENV_FILE={str(env_file)!r}
+LOG_FILE=/dev/null
+{extract_function("export_bitrix_credentials")}
+export_bitrix_credentials
+rm -rf "$INSTALL_DIR"
+'''
+            result = run_bash(script)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            exported = next(Path(f"{install_dir}.credentials").glob("*.env"))
+            self.assertIn("BITRIX_BOT_TOKEN='secret'", exported.read_text())
+            self.assertIn("BITRIX_VERIFY_SSL='false'", exported.read_text())
+            self.assertEqual(exported.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn("secret", result.stdout)
+
+    def test_manual_credentials_require_both_id_and_token(self) -> None:
+        for bot_id, token, valid in (("42", "secret", True), ("42", "", False), ("invalid", "secret", False)):
+            with self.subTest(bot_id=bot_id, token=token):
+                script = f'''
+{self.prologue}
+LOG_FILE=/dev/null
+ask_input() {{ BITRIX_BOT_ID={bot_id!r}; }}
+ask_secret() {{ BITRIX_BOT_TOKEN={token!r}; }}
+{extract_function("collect_manual_bitrix_credentials")}
+collect_manual_bitrix_credentials
+'''
+                result = run_bash(script)
+                self.assertEqual(result.returncode == 0, valid, result.stderr)
+
+    def test_uninstall_stops_before_removing_files_when_export_fails(self) -> None:
+        script = f'''
+{self.prologue}
+LOG_FILE=/dev/null
+banner() {{ :; }}
+check_root() {{ :; }}
+export_bitrix_credentials() {{ return 1; }}
+rm() {{ echo FILE_REMOVAL_CALLED; }}
+systemctl() {{ :; }}
+nginx() {{ return 1; }}
+id() {{ return 1; }}
+{extract_function("do_uninstall")}
+do_uninstall <<< $'yes\nn'
+'''
+        result = run_bash(script)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("Удаление остановлено", result.stdout)
+        self.assertNotIn("FILE_REMOVAL_CALLED", result.stdout)
 
 
 if __name__ == "__main__":

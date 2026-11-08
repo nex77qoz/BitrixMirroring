@@ -11,6 +11,8 @@ from bitrix_client import BitrixClient
 from models import BitrixBotEvent, BitrixEventPage
 from tests.helpers import make_settings
 
+WEBHOOK = "https://portal.example.com/rest/1/hook"
+
 
 def make_client(responses: list[tuple[int, dict[str, Any], dict[str, str]]]) -> tuple[BitrixClient, list[httpx.Request]]:
     """Client whose transport replays `responses` (status, envelope, headers)."""
@@ -27,17 +29,17 @@ def make_client(responses: list[tuple[int, dict[str, Any], dict[str, str]]]) -> 
     # never opens connections because no request goes through it.
     client._client = httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
-        headers={"X-Api-Key": "vibe-test-key", "Accept": "application/json"},
+        headers={"Accept": "application/json"},
     )
     return client, requests
 
 
 def ok(data: dict[str, Any]) -> tuple[int, dict[str, Any], dict[str, str]]:
-    return (200, {"success": True, "data": data}, {})
+    return (200, {"result": data}, {})
 
 
 class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
-    async def test_file_download_never_sends_vibe_api_key_to_download_host(self) -> None:
+    async def test_file_download_never_sends_webhook_credentials_to_download_host(self) -> None:
         client, _ = make_client([ok({})])
         self.addAsyncCleanup(client.close)
         await client._download_client.aclose()
@@ -52,7 +54,7 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await client.download_file("https://files.example.test/object"), b"file")
         self.assertIsNone(seen[0].headers.get("X-Api-Key"))
 
-    async def test_send_message_posts_vibe_envelope_and_returns_id(self) -> None:
+    async def test_send_message_calls_imbot_v2_and_returns_id(self) -> None:
         client, requests = make_client([ok({"id": 321, "uuidMap": []})])
         self.addAsyncCleanup(client.close)
 
@@ -61,49 +63,50 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message_id, 321)
         request = requests[0]
         self.assertEqual(request.method, "POST")
-        self.assertEqual(str(request.url), "https://vibe.example.com/v1/bots/7/messages")
-        self.assertEqual(request.headers["X-Api-Key"], "vibe-test-key")
+        self.assertEqual(str(request.url), f"{WEBHOOK}/imbot.v2.Chat.Message.send")
         body = json.loads(request.content)
+        self.assertEqual(body["botId"], 7)
+        self.assertEqual(body["botToken"], "bot-token")
         self.assertEqual(body["dialogId"], "chat42")
         self.assertEqual(body["fields"]["message"], "hello")
         self.assertIs(body["fields"]["urlPreview"], False)
         self.assertEqual(body["fields"]["replyId"], 9)
 
-    async def test_update_message_patches_flat_body(self) -> None:
+    async def test_update_message_sends_fields(self) -> None:
         client, requests = make_client([ok({"result": True})])
         self.addAsyncCleanup(client.close)
 
         await client.update_message(message_id=10, text="edited")
 
         request = requests[0]
-        self.assertEqual(request.method, "PATCH")
-        self.assertEqual(str(request.url), "https://vibe.example.com/v1/bots/7/messages/10")
+        self.assertEqual(str(request.url), f"{WEBHOOK}/imbot.v2.Chat.Message.update")
         body = json.loads(request.content)
-        self.assertEqual(body["message"], "edited")
-        self.assertIs(body["urlPreview"], False)
+        self.assertEqual(body["messageId"], 10)
+        self.assertEqual(body["fields"]["message"], "edited")
+        self.assertIs(body["fields"]["urlPreview"], False)
 
-    async def test_set_message_like_uses_post_and_delete_with_reaction_body(self) -> None:
+    async def test_set_message_like_uses_reaction_add_and_delete(self) -> None:
         client, requests = make_client([ok({"result": True}), ok({"result": True})])
         self.addAsyncCleanup(client.close)
 
         await client.set_message_like(10, liked=True)
         await client.set_message_like(10, liked=False)
 
-        self.assertEqual(requests[0].method, "POST")
-        self.assertEqual(requests[1].method, "DELETE")
+        self.assertEqual(str(requests[0].url), f"{WEBHOOK}/imbot.v2.Chat.Message.Reaction.add")
+        self.assertEqual(str(requests[1].url), f"{WEBHOOK}/imbot.v2.Chat.Message.Reaction.delete")
         for request in requests:
-            self.assertEqual(str(request.url), "https://vibe.example.com/v1/bots/7/messages/10/reactions")
-            self.assertEqual(json.loads(request.content), {"reaction": "like"})
+            body = json.loads(request.content)
+            self.assertEqual((body["messageId"], body["reaction"]), (10, "like"))
 
     async def test_set_message_like_ignores_duplicate_errors(self) -> None:
         client, _ = make_client([
-            (422, {"success": False, "error": {"code": "BITRIX_ERROR", "message": "REACTION_ALREADY_SET"}}, {}),
+            (422, {"error": "REACTION_ALREADY_SET", "error_description": "REACTION_ALREADY_SET"}, {}),
         ])
         self.addAsyncCleanup(client.close)
         await client.set_message_like(10, liked=True)
 
         client, _ = make_client([
-            (422, {"success": False, "error": {"code": "BITRIX_ERROR", "message": "REACTION_NOT_FOUND"}}, {}),
+            (422, {"error": "REACTION_NOT_FOUND", "error_description": "REACTION_NOT_FOUND"}, {}),
         ])
         self.addAsyncCleanup(client.close)
         await client.set_message_like(10, liked=False)
@@ -117,12 +120,12 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message_id, 1520)
         request = requests[0]
         self.assertEqual(request.method, "POST")
-        self.assertEqual(str(request.url), "https://vibe.example.com/v1/bots/7/files")
+        self.assertEqual(str(request.url), f"{WEBHOOK}/imbot.v2.File.upload")
         body = json.loads(request.content)
         self.assertEqual(body["dialogId"], "chat42")
-        self.assertEqual(body["file"]["name"], "a.bin")
-        self.assertEqual(body["file"]["content"], "YWJj")
-        self.assertEqual(body["message"], "txt")
+        self.assertEqual(body["fields"]["name"], "a.bin")
+        self.assertEqual(body["fields"]["content"], "YWJj")
+        self.assertEqual(body["fields"]["message"], "txt")
 
     async def test_send_photo_rejects_oversize_content(self) -> None:
         client, requests = make_client([ok({"messageId": 1})])
@@ -133,7 +136,7 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
             await client.send_photo(caption="", filename="a.bin", content=b"x" * 1025, dialog_id="chat42")
         self.assertEqual(requests, [])
 
-    async def test_get_bot_events_parses_envelope_with_query_params(self) -> None:
+    async def test_get_bot_events_parses_result_with_params(self) -> None:
         client, requests = make_client([ok({
             "events": [{"eventId": 8, "type": "ONIMBOTV2MESSAGEADD", "data": {"messageId": 3}}],
             "nextOffset": 9,
@@ -152,11 +155,9 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
             ),
         )
         request = requests[0]
-        self.assertEqual(request.method, "GET")
-        self.assertEqual(
-            str(request.url),
-            "https://vibe.example.com/v1/bots/7/events?limit=1000&offset=7",
-        )
+        self.assertEqual(str(request.url), f"{WEBHOOK}/imbot.v2.Event.get")
+        body = json.loads(request.content)
+        self.assertEqual((body["limit"], body["offset"]), (1000, 7))
 
     async def test_get_bot_events_omits_offset_when_unset(self) -> None:
         client, requests = make_client([ok({"events": [], "nextOffset": None, "hasMore": False})])
@@ -167,13 +168,15 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.events, ())
         self.assertIsNone(page.next_offset)
         self.assertFalse(page.has_more)
-        self.assertEqual(str(requests[0].url), "https://vibe.example.com/v1/bots/7/events?limit=1")
+        body = json.loads(requests[0].content)
+        self.assertEqual(body["limit"], 1)
+        self.assertNotIn("offset", body)
 
     async def test_get_bot_events_rejects_malformed_envelopes(self) -> None:
         invalid_data: tuple[object, ...] = ([], {}, {"events": {}}, {"events": [], "nextOffset": "9"}, {"events": [], "nextOffset": True})
         for payload in invalid_data:
             with self.subTest(payload=payload):
-                client, _ = make_client([(200, {"success": True, "data": payload}, {})])
+                client, _ = make_client([(200, {"result": payload}, {})])
                 self.addAsyncCleanup(client.close)
                 with self.assertRaises(RuntimeError):
                     await client.get_bot_events(offset=None)
@@ -194,7 +197,7 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_transient_bitrix_error_is_retried_then_succeeds(self) -> None:
         client, requests = make_client([
-            (422, {"success": False, "error": {"code": "BITRIX_ERROR", "message": "Operational time limit exceeded: OPERATION_TIME_LIMIT"}}, {}),
+            (422, {"error": "OPERATION_TIME_LIMIT", "error_description": "Operational time limit exceeded: OPERATION_TIME_LIMIT"}, {}),
             ok({"id": 5}),
         ])
         self.addAsyncCleanup(client.close)
@@ -204,13 +207,13 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message_id, 5)
         self.assertEqual(len(requests), 2)
 
-    async def test_non_retryable_vibe_error_raises_immediately(self) -> None:
+    async def test_non_retryable_bitrix_error_raises_immediately(self) -> None:
         client, requests = make_client([
-            (400, {"success": False, "error": {"code": "INVALID_BOT_ID", "message": "bad"}}, {}),
+            (400, {"error": "INVALID_BOT_ID", "error_description": "bad"}, {}),
         ])
         self.addAsyncCleanup(client.close)
 
-        with self.assertRaisesRegex(RuntimeError, "Vibe error: INVALID_BOT_ID"):
+        with self.assertRaisesRegex(RuntimeError, "Bitrix error: INVALID_BOT_ID"):
             await client.send_message("hi", dialog_id="chat42")
         self.assertEqual(len(requests), 1)
 
@@ -230,7 +233,7 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
 
         client._client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
-            headers={"X-Api-Key": "vibe-test-key", "Accept": "application/json"},
+            headers={"Accept": "application/json"},
         )
 
         with self.assertRaises(httpx.ReadTimeout):
@@ -248,11 +251,11 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
             call_count += 1
             if call_count == 1:
                 raise httpx.ReadTimeout("timed out", request=request)
-            return httpx.Response(200, json={"success": True, "data": {"events": [], "nextOffset": None, "hasMore": False}})
+            return httpx.Response(200, json={"result": {"events": [], "nextOffset": None, "hasMore": False}})
 
         client._client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
-            headers={"X-Api-Key": "vibe-test-key", "Accept": "application/json"},
+            headers={"Accept": "application/json"},
         )
 
         page = await client.get_bot_events(offset=None)
@@ -260,16 +263,39 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_count, 2)
         self.assertEqual(page.events, ())
 
+    async def test_webhook_url_is_not_throttled_by_default(self) -> None:
+        client, requests = make_client([ok({"id": 1}), ok({"id": 2}), ok({"id": 3})])
+        self.addAsyncCleanup(client.close)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await asyncio.gather(*(client.send_message("x", dialog_id="chat1") for _ in range(3)))
+
+        self.assertEqual(len(requests), 3)
+        self.assertLess(loop.time() - started, 0.5)
+
+    async def test_non_json_response_points_at_webhook_url(self) -> None:
+        client = BitrixClient(make_settings())
+        self.addAsyncCleanup(client.close)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"<html>login</html>")
+
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        with self.assertRaisesRegex(RuntimeError, "BITRIX_WEBHOOK_URL"):
+            await client.get_bot_events(offset=None)
+
     def test_documented_transient_errors_are_retryable(self) -> None:
         client, _ = make_client([ok({})])
         self.addAsyncCleanup(client.close)
         for code in ("OPERATION_TIME_LIMIT", "OVERLOAD_LIMIT"):
             with self.subTest(code=code):
-                self.assertTrue(client._is_retryable_exception(RuntimeError(f"Temporary Vibe error: {code}")))
+                self.assertTrue(client._is_retryable_exception(RuntimeError(f"Temporary Bitrix error: {code}")))
 
     async def test_429_honours_retry_after_header(self) -> None:
         client, requests = make_client([
-            (429, {"success": False, "error": {"code": "RATE_LIMITED", "message": "slow down"}}, {"Retry-After": "2"}),
+            (429, {"error": "QUERY_LIMIT_EXCEEDED", "error_description": "slow down"}, {"Retry-After": "2"}),
             ok({"id": 6}),
         ])
         self.addAsyncCleanup(client.close)
@@ -292,7 +318,7 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_file_meta_resolves_disk_entity_after_denied_attempt(self) -> None:
         client, requests = make_client([
-            (403, {"success": False, "error": {"code": "BITRIX_ACCESS_DENIED", "message": "disk lag"}}, {}),
+            (403, {"error": "ACCESS_DENIED", "error_description": "disk lag"}, {}),
             ok({"ID": 9, "NAME": "pic.jpg", "MIME_TYPE": "image/jpeg", "DOWNLOAD_URL": "https://example.com/pic.jpg"}),
         ])
         self.addAsyncCleanup(client.close)
@@ -312,12 +338,12 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
         assert meta is not None
         self.assertEqual(meta.name, "pic.jpg")
         self.assertTrue(meta.is_image)
-        self.assertEqual(str(requests[0].url), "https://vibe.example.com/v1/files/9")
+        self.assertEqual(str(requests[0].url), f"{WEBHOOK}/disk.file.get")
         self.assertEqual(len(requests), 2)
 
     async def test_get_file_meta_returns_none_after_persistent_denial(self) -> None:
         client, _ = make_client([
-            (403, {"success": False, "error": {"code": "BITRIX_ACCESS_DENIED", "message": "not ours"}}, {}),
+            (403, {"error": "ACCESS_DENIED", "error_description": "not ours"}, {}),
         ])
         self.addAsyncCleanup(client.close)
 
@@ -327,15 +353,15 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_file_meta_propagates_unrelated_errors(self) -> None:
         client, _ = make_client([
-            (403, {"success": False, "error": {"code": "SCOPE_DENIED", "message": "no disk scope"}}, {}),
+            (403, {"error": "INSUFFICIENT_SCOPE", "error_description": "no disk scope"}, {}),
         ])
         self.addAsyncCleanup(client.close)
 
-        with self.assertRaisesRegex(RuntimeError, "SCOPE_DENIED"):
+        with self.assertRaisesRegex(RuntimeError, "INSUFFICIENT_SCOPE"):
             await client.get_file_meta(9)
 
-    async def test_download_file_by_id_re_resolves_single_use_url_each_attempt(self) -> None:
-        resolve_fail: tuple[int, dict[str, Any], dict[str, str]] = (422, {"success": False, "error": {"code": "BITRIX_ERROR", "message": "nope"}}, {})
+    async def test_download_file_by_id_re_resolves_url_each_attempt(self) -> None:
+        resolve_fail: tuple[int, dict[str, Any], dict[str, str]] = (400, {"error": "BITRIX_ERROR", "error_description": "nope"}, {})
         client, requests = make_client([
             resolve_fail,
             resolve_fail,
@@ -354,7 +380,7 @@ class BitrixClientTestCase(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "Unable to download Bitrix file_id=9"):
                 await client.download_file_by_id(9)
         # bitrix_retry_attempts=2 in fixture settings -> two resolve attempts
-        self.assertEqual(sum(1 for r in requests if r.url.path.endswith("/files/9")), 2)
+        self.assertEqual(sum(1 for r in requests if r.url.path.endswith("imbot.v2.File.download")), 2)
 
     def test_bitrix_delivery_code_contains_no_user_scoped_message_methods(self) -> None:
         from pathlib import Path

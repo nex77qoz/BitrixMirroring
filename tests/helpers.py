@@ -26,9 +26,11 @@ def make_mapping(
 def make_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "telegram_bot_token": "token",
-        "vibe_api_key": "vibe-test-key",
-        "vibe_base_url": "https://vibe.example.com/v1",
+        "bitrix_webhook_url": "https://portal.example.com/rest/1/hook",
+        "bitrix_bot_token": "bot-token",
         "bitrix_bot_id": 7,
+        "bitrix_verify_ssl": True,
+        "bitrix_min_request_interval_seconds": 0.0,
         "chat_mappings": (make_mapping(),),
         "prefix_with_chat_title": False,
         "prefix_with_sender": True,

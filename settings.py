@@ -151,9 +151,11 @@ def _validate_chat_mappings(mappings: tuple[ChatMapping, ...]) -> None:
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
-    vibe_api_key: str
-    vibe_base_url: str
+    bitrix_webhook_url: str
+    bitrix_bot_token: str
     bitrix_bot_id: int
+    bitrix_verify_ssl: bool
+    bitrix_min_request_interval_seconds: float
     chat_mappings: tuple[ChatMapping, ...]
     prefix_with_chat_title: bool
     prefix_with_sender: bool
@@ -190,12 +192,12 @@ class Settings:
     @staticmethod
     def from_env() -> Settings:
         telegram_bot_token = _read_env("TELEGRAM_BOT_TOKEN")
-        vibe_api_key = _read_env("VIBE_API_KEY")
-        if not vibe_api_key:
-            raise ValueError("VIBE_API_KEY is required")
-        vibe_base_url = _read_env("VIBE_BASE_URL", "https://vibecode.bitrix24.tech/v1").rstrip("/")
-        if not vibe_base_url.startswith("https://"):
-            raise ValueError("VIBE_BASE_URL must use https://")
+        bitrix_webhook_url = _read_env("BITRIX_WEBHOOK_URL").rstrip("/")
+        if not bitrix_webhook_url.startswith(("https://", "http://")):
+            raise ValueError("BITRIX_WEBHOOK_URL must start with https:// or http://")
+        bitrix_bot_token = _read_env("BITRIX_BOT_TOKEN")
+        if not bitrix_bot_token:
+            raise ValueError("BITRIX_BOT_TOKEN is required")
 
         bitrix_bot_id = _parse_int("BITRIX_BOT_ID", minimum=1)
 
@@ -231,16 +233,18 @@ class Settings:
 
         return Settings(
             telegram_bot_token=telegram_bot_token,
-            vibe_api_key=vibe_api_key,
-            vibe_base_url=vibe_base_url,
+            bitrix_webhook_url=bitrix_webhook_url,
+            bitrix_bot_token=bitrix_bot_token,
             bitrix_bot_id=bitrix_bot_id,
+            bitrix_verify_ssl=_parse_bool("BITRIX_VERIFY_SSL", "true"),
+            bitrix_min_request_interval_seconds=_parse_float("BITRIX_MIN_REQUEST_INTERVAL_SECONDS", "0", minimum=0.0),
             chat_mappings=chat_mappings,
             prefix_with_chat_title=_parse_bool("PREFIX_WITH_CHAT_TITLE", "false"),
             prefix_with_sender=_parse_bool("PREFIX_WITH_SENDER", "true"),
             disable_link_preview=_parse_bool("BITRIX_DISABLE_LINK_PREVIEW", "true"),
             request_timeout_seconds=_parse_float("REQUEST_TIMEOUT_SECONDS", "20", minimum=0.1),
             socks5_proxy_url=socks5_proxy_url,
-            bitrix_poll_interval_seconds=_parse_float("BITRIX_POLL_INTERVAL_SECONDS", "5", minimum=0.1),
+            bitrix_poll_interval_seconds=_parse_float("BITRIX_POLL_INTERVAL_SECONDS", "2", minimum=0.1),
             sync_bitrix_to_telegram=_parse_bool("SYNC_BITRIX_TO_TELEGRAM", "true"),
             sync_telegram_to_bitrix=_parse_bool("SYNC_TELEGRAM_TO_BITRIX", "true"),
             mirror_state_db_path=mirror_state_db_path,

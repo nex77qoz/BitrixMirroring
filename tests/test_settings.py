@@ -24,8 +24,8 @@ class SettingsTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             env = {
                 "TELEGRAM_BOT_TOKEN": "token",
-                "VIBE_API_KEY": " vibe_api_test ",
-                "VIBE_BASE_URL": "https://vibe.example.com/v1/",
+                "BITRIX_WEBHOOK_URL": " https://portal.example.com/rest/1/hook/ ",
+                "BITRIX_BOT_TOKEN": " bot-token ",
                 "BITRIX_BOT_ID": "12",
                 "BITRIX_MAX_UPLOAD_FILE_BYTES": "2048",
                 "MIRROR_STATE_DB_PATH": os.path.join(tmpdir, "state.sqlite3"),
@@ -36,37 +36,41 @@ class SettingsTestCase(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=True):
                 settings = Settings.from_env()
-        self.assertEqual(settings.vibe_api_key, "vibe_api_test")
-        self.assertEqual(settings.vibe_base_url, "https://vibe.example.com/v1")
+        self.assertEqual(settings.bitrix_webhook_url, "https://portal.example.com/rest/1/hook")
+        self.assertEqual(settings.bitrix_bot_token, "bot-token")
         self.assertEqual(settings.bitrix_max_upload_file_bytes, 2048)
         self.assertTrue(settings.telegram_webhook_enabled)
         self.assertEqual(settings.telegram_webhook_path, "/telegram/webhook")
 
-    def test_from_env_requires_vibe_api_key(self) -> None:
+    def test_from_env_requires_bot_token(self) -> None:
         with patch.dict(os.environ, {
             "TELEGRAM_BOT_TOKEN": "token",
-            "VIBE_API_KEY": "   ",
+            "BITRIX_WEBHOOK_URL": "https://portal.example.com/rest/1/hook/",
+            "BITRIX_BOT_TOKEN": "   ",
             "BITRIX_BOT_ID": "12",
         }, clear=True):
-            with self.assertRaisesRegex(ValueError, "VIBE_API_KEY is required"):
+            with self.assertRaisesRegex(ValueError, "BITRIX_BOT_TOKEN is required"):
                 Settings.from_env()
 
-    def test_from_env_defaults_vibe_base_url(self) -> None:
+    def test_from_env_defaults_for_on_premise(self) -> None:
         with patch.dict(os.environ, {
             "TELEGRAM_BOT_TOKEN": "token",
-            "VIBE_API_KEY": "vibe_api_test",
+            "BITRIX_WEBHOOK_URL": "https://portal.example.com/rest/1/hook",
+            "BITRIX_BOT_TOKEN": "bot-token",
             "BITRIX_BOT_ID": "12",
         }, clear=True):
             settings = Settings.from_env()
-        self.assertEqual(settings.vibe_base_url, "https://vibecode.bitrix24.tech/v1")
+        self.assertTrue(settings.bitrix_verify_ssl)
+        self.assertEqual(settings.bitrix_min_request_interval_seconds, 0.0)
+        self.assertEqual(settings.bitrix_poll_interval_seconds, 2.0)
         self.assertEqual(settings.bitrix_max_upload_file_bytes, 30 * 1024 * 1024)
 
-    def test_from_env_rejects_insecure_vibe_base_url(self) -> None:
+    def test_from_env_rejects_non_http_webhook_url(self) -> None:
         with patch.dict(os.environ, {
             "TELEGRAM_BOT_TOKEN": "token",
-            "VIBE_API_KEY": "vibe_api_test",
-            "VIBE_BASE_URL": "http://vibe.example.com/v1",
+            "BITRIX_WEBHOOK_URL": "portal.example.com/rest/1/hook",
+            "BITRIX_BOT_TOKEN": "bot-token",
             "BITRIX_BOT_ID": "12",
         }, clear=True):
-            with self.assertRaisesRegex(ValueError, "https"):
+            with self.assertRaisesRegex(ValueError, "BITRIX_WEBHOOK_URL"):
                 Settings.from_env()

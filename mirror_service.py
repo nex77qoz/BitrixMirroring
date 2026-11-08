@@ -739,7 +739,7 @@ class MirrorService:
             await self.bitrix.update_message(message_id=link.bitrix_message_id, text=self.render_telegram_message(message))
         except RuntimeError as exc:
             if 'BITRIX_ACCESS_DENIED' in str(exc):
-                logger.warning('Cannot edit Bitrix message %s (created by previous bot before Vibe migration); skipping edit mirror', link.bitrix_message_id)
+                logger.warning('Cannot edit Bitrix message %s (created by another bot); skipping edit mirror', link.bitrix_message_id)
                 return
             raise
         logger.info('Mirrored Telegram edit %s from chat %s to Bitrix message %s', message.message_id, message.chat_id, link.bitrix_message_id)
@@ -771,7 +771,7 @@ class MirrorService:
     async def _collect_files_by_id(self, data: dict[str, Any], bitrix_message: BitrixMessage) -> dict[int, BitrixFile]:
         """Build file_id -> BitrixFile from the event payload, filling gaps via disk metadata.
 
-        Vibe events may or may not inline `data.files`; for any attachment the
+        Bot events may or may not inline `data.files`; for any attachment the
         event does not describe, fall back to GET /files/:id (named metadata),
         and finally to an anonymous placeholder so forwarding still proceeds.
         """
@@ -826,7 +826,7 @@ class MirrorService:
                 backoff = min(backoff * 2, self.settings.bitrix_poll_max_backoff_seconds)
 
     async def _fetch_bitrix_events_once(self) -> bool:
-        # Vibe's docs are explicit: always resume with the API-provided nextOffset,
+        # Always resume with the API-provided nextOffset (imbot.v2.Event.get),
         # never with the last event's eventId+1 — eventId and the offset cursor are
         # not guaranteed to share the same numbering. Event handlers are idempotent
         # (existing_link checks), so re-processing this page after a mid-page failure

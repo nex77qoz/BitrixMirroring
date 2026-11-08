@@ -64,17 +64,17 @@ class MirrorServiceTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_sync_telegram_edit_skips_legacy_bitrix_message(self) -> None:
         self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(bitrix_message_id=99)
-        self.bitrix.update_message = AsyncMock(side_effect=RuntimeError('Vibe error: BITRIX_ACCESS_DENIED | Access denied'))
+        self.bitrix.update_message = AsyncMock(side_effect=RuntimeError('Bitrix error: BITRIX_ACCESS_DENIED | Access denied'))
         message = make_message(text='edited text')
 
         await self.service.sync_telegram_edit(message)
 
     async def test_sync_telegram_edit_propagates_other_errors(self) -> None:
         self.state_store.get_link_by_telegram_message.return_value = SimpleNamespace(bitrix_message_id=99)
-        self.bitrix.update_message = AsyncMock(side_effect=RuntimeError('Vibe error: RATE_LIMITED | slow down'))
+        self.bitrix.update_message = AsyncMock(side_effect=RuntimeError('Bitrix error: QUERY_LIMIT_EXCEEDED | slow down'))
         message = make_message(text='edited text')
 
-        with self.assertRaisesRegex(RuntimeError, 'RATE_LIMITED'):
+        with self.assertRaisesRegex(RuntimeError, 'QUERY_LIMIT_EXCEEDED'):
             await self.service.sync_telegram_edit(message)
 
     async def test_sync_telegram_reaction_updates_state(self) -> None:

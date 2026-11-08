@@ -1,10 +1,27 @@
 # Развёртывание BitrixMirroring
 
-Проект использует Bitrix Chatbot API 2.0 в режиме `supervisor + fetch` через
-**Vibe API (бот-платформу Битрикс24)** — `https://vibecode.bitrix24.tech/v1`.
-Bitrix-события получает основной процесс через `GET /v1/bots/:botId/events`;
-отдельный Bitrix webhook-сервис не используется. Токен чат-бота платформа
-хранит сама — на стороне сервиса нужен только API-ключ.
+Проект использует Bitrix Chatbot API 2.0 (`imbot.v2.*`) в режиме
+`supervisor + fetch` напрямую через REST коробочного Битрикс24 и **входящий
+вебхук** администратора. Сторонние шлюзы (Vibe) не используются.
+События бота основной процесс забирает через `imbot.v2.Event.get`;
+отдельный Bitrix webhook-сервис не нужен.
+
+## Топология: бот на отдельном VPS
+
+Бот работает на VPS, где доступен Telegram, а Битрикс24 (коробка) стоит на
+другом сервере. Все обращения к порталу идут через публичный HTTPS-адрес
+(`BITRIX_WEBHOOK_URL=https://портал/rest/<id>/<код>/`; REST по `http` отвечает
+`INVALID_REQUEST: Https required`):
+
+- с VPS должен быть открыт исходящий доступ к порталу по 443; на портале
+  `/rest/` не должен блокироваться WAF/allowlist для IP VPS;
+- прокси (`ENABLE_SOCKS5_PROXY`) нужен только Telegram-части; Bitrix-запросы
+  ходят напрямую, держите `ENABLE_SOCKS5_PROXY=false`, если Telegram с VPS доступен;
+- события Bitrix → Telegram приходят **опросом** (`imbot.v2.Event.get`, fetch):
+  это не требует входящих соединений на VPS и не зависит от облака Битрикс;
+- ссылки на скачивание файлов (`/rest/download.json?token=…`) одноразовые и
+  ведут на тот же портал; сервис запрашивает свежую ссылку на каждую попытку;
+- секреты (`BITRIX_WEBHOOK_URL`, `BITRIX_BOT_TOKEN`) хранятся только в `.env` на VPS.
 
 ## Сервисы
 
@@ -20,18 +37,23 @@ Bitrix-события получает основной процесс чере�
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=...
-VIBE_API_KEY=vibe_api_...
-VIBE_BASE_URL=https://vibecode.bitrix24.tech/v1
-BITRIX_BOT_ID=123456
+BITRIX_WEBHOOK_URL=https://portal.example.com/rest/1/abcdef0123456789/
+BITRIX_BOT_TOKEN=...
+BITRIX_BOT_ID=123
 ```
 
-`VIBE_API_KEY` — личный ключ с https://vibecode.bitrix24.tech/keys: режим
-«чтение+запись», скоупы `imbot, disk`, владелец — пользователь с правом
-администратора портала (регистрация бота выполняется от его лица).
+`BITRIX_WEBHOOK_URL` — входящий вебхук администратора портала
+(«Разработчикам → Другое → Входящий вебхук») со скоупами `imbot`, `im`, `disk`.
 
-`BITRIX_BOT_ID` — числовой ID бота, выданный `POST /v1/bots`. Бот привязан к
-API-ключу, которым зарегистрирован; запросы с другого ключа получают
-`403 BOT_ACCESS_DENIED`.
+`BITRIX_BOT_TOKEN` — секрет владения ботом: бот привязан к токену, с которым
+зарегистрирован (`APP_ID = custom<token>`); с другим токеном API вернёт
+`BOT_OWNERSHIP_ERROR`. Токен генерирует `register_bot.py`, его нужно сохранить.
+
+`BITRIX_BOT_ID` — числовой ID бота из `imbot.v2.Bot.register`.
+
+Дополнительно: `BITRIX_VERIFY_SSL=false` для самоподписанного сертификата,
+`BITRIX_MIN_REQUEST_INTERVAL_SECONDS` (по умолчанию `0` — у коробки нет
+облачного лимита 2 запроса/с).
 
 Для Telegram webhook дополнительно задаются `TELEGRAM_WEBHOOK_ENABLED=true`,
 `TELEGRAM_WEBHOOK_PUBLIC_URL`, `TELEGRAM_WEBHOOK_PATH` и
@@ -47,13 +69,12 @@ sudo bash install.sh
 
 Installer автоматически:
 
-1. проверяет переданный `BITRIX_BOT_ID` через `GET /v1/bots/:botId`;
-2. ищет бота с кодом `tg_mirror_bot_v2` под этим ключом (`GET /v1/bots`) и,
-   если не найден, регистрирует нового через `POST /v1/bots` с
+1. проверяет вебхук (`scope`) и переданный `BITRIX_BOT_ID` (`imbot.v2.Bot.get`);
+2. ищет бота с кодом `tg_mirror_bot_v2` под этим токеном (`imbot.v2.Bot.list`) и,
+   если не найден, регистрирует нового через `imbot.v2.Bot.register` с
    `type=supervisor` и `eventMode=fetch`;
-3. сохраняет `BITRIX_BOT_ID` (и `VIBE_API_KEY`, `VIBE_BASE_URL`) в `.env`;
-4. выводит `bot_id` в терминал и отправляет администраторам Telegram (без
-   токена — платформа его не отдаёт);
+3. сохраняет `BITRIX_BOT_ID`, `BITRIX_BOT_TOKEN`, `BITRIX_WEBHOOK_URL` в `.env`;
+4. выводит `bot_id` в терминал и отправляет администраторам Telegram;
 5. устанавливает только два systemd-сервиса.
 
 После установки добавьте нового бота-супервизора во все зеркалируемые чаты
@@ -64,27 +85,30 @@ Installer автоматически:
 Скриптом (формат stdout совместим с installer):
 
 ```bash
-python3 server-side/register_bot.py "$VIBE_API_KEY" "" "Telegram Mirror V2"
+python3 server-side/register_bot.py "$BITRIX_WEBHOOK_URL" "" "Telegram Mirror V2"
 ```
 
-или напрямую запросом к Vibe API:
+Для повторного запуска с уже существующим ботом передайте `BITRIX_BOT_TOKEN`
+в окружении. Скрипт печатает `bot_id` и `bot_token` — сохраните оба в `.env`.
 
-```bash
-curl -X POST https://vibecode.bitrix24.tech/v1/bots \
-  -H "X-Api-Key: $VIBE_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"code": "tg_mirror_bot_v2", "name": "Telegram Mirror V2", "type": "supervisor", "eventMode": "fetch"}'
-```
+До создания бота скрипт проверяет скоупы и сохраняет токен в файл восстановления
+с правами `600`. Installer использует `/opt/bitrix-bot.credentials/registration.json`;
+при ручном запуске файл находится в `~/.local/state/bitrix-mirror/` (путь выводится
+в stderr). Повторный запуск с тем же вебхуком восстанавливает токен из этого файла.
+Путь можно задать через `BITRIX_BOT_CREDENTIALS_FILE`. При ошибке автонастройки
+installer останавливается; после устранения причины запустите его снова.
+Если скрипт регистрации отсутствует, потребуется вручную указать и ID, и токен.
 
-Сохраните `data.botId` в `BITRIX_BOT_ID` в `.env`. Повторный вызов с тем же
-кодом идемпотентен (`409 BOT_ALREADY_EXISTS` с `data.botId`).
+Для портала с самоподписанным сертификатом передайте `BITRIX_VERIFY_SSL=false`
+в окружении скрипта регистрации или конфигурации installer. Installer сохраняет
+это значение в `.env` для рабочего клиента.
 
 ## Лимиты файлов
 
-Загрузка файла в Bitrix24 идёт через `POST /v1/bots/:botId/files` (base64 в
-теле). Потолок тела запроса — 40 МиБ, то есть исходный файл ≈ до 30 МиБ
-(`BITRIX_MAX_UPLOAD_FILE_BYTES=31457280` по умолчанию). Файлы больше лимита
-сервис пересылает текстом с пометкой. Rate limit ключа — 10 запросов/с.
+Загрузка файла в Bitrix24 идёт через `imbot.v2.File.upload` (base64 в теле).
+Лимит определяется `post_max_size`/`upload_max_filesize` PHP портала и
+`BITRIX_MAX_UPLOAD_FILE_BYTES` (по умолчанию 30 МиБ). Файлы больше лимита
+сервис пересылает текстом с пометкой.
 
 ## Обновление и удаление
 
@@ -93,9 +117,12 @@ sudo bash /opt/bitrix-bot/install.sh --update
 sudo bash /opt/bitrix-bot/install.sh --uninstall
 ```
 
-Перед удалением installer вызывает `DELETE /v1/bots/:botId` с заголовком
-`X-Api-Key`, затем удаляет локальные сервисы и файлы. Бот удаляется и из
-Битрикс24, и из базы Вайбкод; повторный вызов безопасен.
+Перед удалением installer вызывает `imbot.v2.Bot.unregister`, затем удаляет
+локальные сервисы и файлы; повторный вызов безопасен.
+Если выбрано сохранение бота в Bitrix24, installer сначала экспортирует URL,
+ID, токен и настройку TLS в `/opt/bitrix-bot.credentials/retained-bot.*.env`
+с правами `600`. Каталог доступен только владельцу и остаётся после удаления.
+При ошибке экспорта удаление останавливается. Сохраните этот файл для переустановки.
 
 ## Проверка
 

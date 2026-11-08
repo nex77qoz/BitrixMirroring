@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Mapping
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType
@@ -13,9 +14,22 @@ from mirror_service import MirrorService
 logger = logging.getLogger("tg-bitrix-mirror")
 
 _bot_reply_ids: dict[int, list[int]] = {}
+_BOT_REPLY_IDS_MAX_PER_CHAT = 50
 
 _ADMIN_CALLBACK_PREFIX = "admin:"
-_SERVICE_NAMES = ("bitrix-bot", "bitrix-monitor", "bitrix-telegram-mirror")
+_SERVICE_NAMES = ("bitrix-monitor", "bitrix-telegram-mirror")
+
+
+def _track_bot_reply(chat_id: int, message_id: int) -> None:
+    """Record a bot reply for later /clear deletion, bounded per chat.
+
+    Private-chat entries are never popped by /clear (group-only), so without a
+    cap this dict grows without bound for the life of the process.
+    """
+    ids = _bot_reply_ids.setdefault(chat_id, [])
+    ids.append(message_id)
+    if len(ids) > _BOT_REPLY_IDS_MAX_PER_CHAT:
+        del ids[: len(ids) - _BOT_REPLY_IDS_MAX_PER_CHAT]
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -32,7 +46,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Бот запущен.\n"
         "Команда /whereami покажет chat_id текущего чата и thread_id темы."
     )
-    _bot_reply_ids.setdefault(update.effective_chat.id, []).append(sent.message_id)
+    if update.effective_chat:
+        _track_bot_reply(update.effective_chat.id, sent.message_id)
 
 
 async def on_private_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -67,6 +82,10 @@ async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             _render_mappings(mirror),
             reply_markup=_admin_panel_markup(mirror),
         )
+        return
+
+    if action == "stats":
+        await query.edit_message_text(_render_statistics(await mirror.get_statistics()), reply_markup=_admin_panel_markup(mirror))
         return
 
     if action == "forwarding:off":
@@ -105,6 +124,7 @@ def _admin_panel_markup(mirror: MirrorService) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("Проверить маппинги", callback_data="admin:mappings")],
+            [InlineKeyboardButton("Статистика", callback_data="admin:stats")],
             [InlineKeyboardButton(forwarding_text, callback_data=forwarding_action)],
             [InlineKeyboardButton("Перезагрузить службы", callback_data="admin:restart")],
         ]
@@ -124,6 +144,18 @@ def _render_mappings(mirror: MirrorService) -> str:
             f"#{mapping.mapping_id}{label}: TG {mapping.tg_chat_id} topics {topics} -> Bitrix {mapping.bitrix_dialog_id}"
         )
     return "\n".join(lines)
+
+
+def _render_statistics(stats: Mapping[str, object]) -> str:
+    return (
+        "Статистика зеркалирования:\n"
+        f"Маппингов: {stats.get('mappings', 0)}\n"
+        f"Связей сообщений: {stats.get('message_links', 0)}\n"
+        f"Активных обработчиков: {stats.get('active_workers', 0)}\n"
+        f"В очереди: {stats.get('queued_messages', 0)}\n"  # noqa: RUF001
+        f"Ошибок опроса Bitrix: {stats.get('poll_errors', 0)}\n"
+        f"Ошибок Telegram→Bitrix: {stats.get('telegram_dead_letters', 0)}"
+    )
 
 
 def _schedule_service_restart(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -172,7 +204,7 @@ async def cmd_whereami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             ]
         )
     )
-    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+    _track_bot_reply(chat.id, sent.message_id)
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -210,7 +242,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             topic_name = message.forum_topic_edited.name
         elif message.reply_to_message and message.reply_to_message.forum_topic_created:
             topic_name = message.reply_to_message.forum_topic_created.name
-            
+
         if topic_name:
             mirror.cache_topic_name(message.chat_id, message.message_thread_id, topic_name)
 
@@ -328,7 +360,7 @@ async def on_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE
 _BITRIX_ID_RE = re.compile(r"^(chat\d+|sg\d+|\d+)$")
 
 
-async def _check_admin(update: Update, mirror: "MirrorService") -> bool:
+async def _check_admin(update: Update, mirror: MirrorService) -> bool:
     user = update.effective_user
     if not user:
         return False
@@ -345,23 +377,28 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     mirror: MirrorService = context.application.bot_data["mirror_service"]
     args = context.args or []
-    
+    label = ""
+
     if len(args) == 2:
         # Token-based flow for self-service connection (no admin check required!)
         bitrix_dialog_id = args[0].strip()
         token = args[1].strip()
-        
+
         if not _BITRIX_ID_RE.match(bitrix_dialog_id):
             sent = await msg.reply_text("Неверный формат Bitrix Chat ID.")
-            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            _track_bot_reply(chat.id, sent.message_id)
             return
 
-        is_valid = await mirror.state_store.verify_and_consume_token(bitrix_dialog_id, token)
-        if not is_valid:
+        # Returns the stored Bitrix chat title on success, None on an invalid or
+        # expired token. An empty string means "valid token, no title captured",
+        # so the check must be `is None`, not falsiness.
+        chat_title = await mirror.state_store.verify_and_consume_token(bitrix_dialog_id, token)
+        if chat_title is None:
             sent = await msg.reply_text("⚠️ Неверный, использованный или просроченный токен подключения.")
-            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            _track_bot_reply(chat.id, sent.message_id)
             return
-            
+        label = chat_title
+
     elif len(args) == 1:
         # Traditional admin-only connection flow
         if not await _check_admin(update, mirror):
@@ -369,7 +406,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         bitrix_dialog_id = args[0].strip()
         if not _BITRIX_ID_RE.match(bitrix_dialog_id):
             sent = await msg.reply_text("Неверный формат Bitrix Chat ID.")
-            _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+            _track_bot_reply(chat.id, sent.message_id)
             return
     else:
         sent = await msg.reply_text(
@@ -377,18 +414,17 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Самостоятельно: `/connect <BitrixChatId> <Token>`\n"
             "Для администраторов: `/connect <BitrixChatId>`"
         )
-        _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+        _track_bot_reply(chat.id, sent.message_id)
         return
 
     is_forum = getattr(chat, "is_forum", False)
     topic_id = msg.message_thread_id if is_forum else None
     try:
-        await mirror.connect_mapping(chat.id, bitrix_dialog_id, topic_id, "")
+        await mirror.connect_mapping(chat.id, bitrix_dialog_id, topic_id, label)
     except ValueError as exc:
         sent = await msg.reply_text(f"⚠️ {exc}")
-        _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+        _track_bot_reply(chat.id, sent.message_id)
         return
-
     try:
         await mirror.bitrix.send_message("Связка установлена", dialog_id=bitrix_dialog_id)
     except Exception:
@@ -396,7 +432,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     thread_info = f" (ветка #{topic_id})" if topic_id else ""
     sent = await msg.reply_text(f"✅ Связка установлена: {bitrix_dialog_id} ↔ этот чат{thread_info}")
-    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+    _track_bot_reply(chat.id, sent.message_id)
 
 
 async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -419,7 +455,7 @@ async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         sent = await msg.reply_text(f"✅ Связка удалена для этого чата{thread_info}.")
     else:
         sent = await msg.reply_text("⚠️ Связка для этого чата/ветки не найдена.")
-    _bot_reply_ids.setdefault(chat.id, []).append(sent.message_id)
+    _track_bot_reply(chat.id, sent.message_id)
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -24,33 +24,53 @@ class SettingsTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             env = {
                 "TELEGRAM_BOT_TOKEN": "token",
-                "BITRIX_WEBHOOK_BASE": "https://example.bitrix24.ru/rest/1/token/",
+                "BITRIX_WEBHOOK_URL": " https://portal.example.com/rest/1/hook/ ",
+                "BITRIX_BOT_TOKEN": " bot-token ",
                 "BITRIX_BOT_ID": "12",
-                "BITRIX_BOT_CLIENT_ID": "client-token",
+                "BITRIX_MAX_UPLOAD_FILE_BYTES": "2048",
                 "MIRROR_STATE_DB_PATH": os.path.join(tmpdir, "state.sqlite3"),
                 "ENABLE_SOCKS5_PROXY": "false",
-                "BITRIX_WEBHOOK_BRIDGE_ENABLED": "true",
-                "MIRROR_INTERNAL_WEBHOOK_SECRET": "internal-secret",
                 "TELEGRAM_WEBHOOK_ENABLED": "true",
                 "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://bot.example.com",
                 "TELEGRAM_WEBHOOK_SECRET": "tg-secret",
             }
             with patch.dict(os.environ, env, clear=True):
                 settings = Settings.from_env()
-        self.assertEqual(settings.bitrix_webhook_base, "https://example.bitrix24.ru/rest/1/token")
-        self.assertTrue(settings.bitrix_webhook_bridge_enabled)
+        self.assertEqual(settings.bitrix_webhook_url, "https://portal.example.com/rest/1/hook")
+        self.assertEqual(settings.bitrix_bot_token, "bot-token")
+        self.assertEqual(settings.bitrix_max_upload_file_bytes, 2048)
         self.assertTrue(settings.telegram_webhook_enabled)
         self.assertEqual(settings.telegram_webhook_path, "/telegram/webhook")
 
-    def test_from_env_requires_internal_secret_when_bridge_enabled(self) -> None:
-        env = {
+    def test_from_env_requires_bot_token(self) -> None:
+        with patch.dict(os.environ, {
             "TELEGRAM_BOT_TOKEN": "token",
-            "BITRIX_WEBHOOK_BASE": "https://example.bitrix24.ru/rest/1/token",
+            "BITRIX_WEBHOOK_URL": "https://portal.example.com/rest/1/hook/",
+            "BITRIX_BOT_TOKEN": "   ",
             "BITRIX_BOT_ID": "12",
-            "BITRIX_BOT_CLIENT_ID": "client-token",
-            "BITRIX_WEBHOOK_BRIDGE_ENABLED": "true",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(ValueError):
+        }, clear=True):
+            with self.assertRaisesRegex(ValueError, "BITRIX_BOT_TOKEN is required"):
                 Settings.from_env()
 
+    def test_from_env_defaults_for_on_premise(self) -> None:
+        with patch.dict(os.environ, {
+            "TELEGRAM_BOT_TOKEN": "token",
+            "BITRIX_WEBHOOK_URL": "https://portal.example.com/rest/1/hook",
+            "BITRIX_BOT_TOKEN": "bot-token",
+            "BITRIX_BOT_ID": "12",
+        }, clear=True):
+            settings = Settings.from_env()
+        self.assertTrue(settings.bitrix_verify_ssl)
+        self.assertEqual(settings.bitrix_min_request_interval_seconds, 0.0)
+        self.assertEqual(settings.bitrix_poll_interval_seconds, 2.0)
+        self.assertEqual(settings.bitrix_max_upload_file_bytes, 30 * 1024 * 1024)
+
+    def test_from_env_rejects_non_http_webhook_url(self) -> None:
+        with patch.dict(os.environ, {
+            "TELEGRAM_BOT_TOKEN": "token",
+            "BITRIX_WEBHOOK_URL": "portal.example.com/rest/1/hook",
+            "BITRIX_BOT_TOKEN": "bot-token",
+            "BITRIX_BOT_ID": "12",
+        }, clear=True):
+            with self.assertRaisesRegex(ValueError, "BITRIX_WEBHOOK_URL"):
+                Settings.from_env()
